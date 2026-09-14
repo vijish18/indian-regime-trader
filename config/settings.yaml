@@ -1,0 +1,125 @@
+# V1 configuration for the Indian Market Regime Trading System.
+#
+# This file holds every parameter that governs trading behavior. Secrets and
+# per-deployment values (API keys, database URL) belong in `.env`, not here.
+#
+# Note on reconciliation with docs/SPECIFICATION.md:
+# - The risk thresholds below match SPECIFICATION.md section 8 (the prose
+#   risk-control table) and section 21 (its suggested config block) exactly
+#   -- those two are consistent with each other in the source document.
+#   `daily_loss_warning_pct` and `max_concurrent_positions` appear in section
+#   8's prose table but were omitted from section 21's example config; both
+#   are added here for completeness.
+# - `selection.min_holdings` is set to 7 (not the spec's "5-10" range) because
+#   7 holdings x `portfolio.max_single_name_pct` (15%) = 105%, which is the
+#   minimum holding count that can actually reach the calm-regime exposure
+#   ceiling of 100% without breaching the single-name cap. 5 holdings could
+#   not (5 x 15% = 75% < 100%). See docs/ARCHITECTURE.md for detail.
+
+market:
+  exchange: NSE
+  timezone: Asia/Kolkata
+  bar_timeframe: 1D
+  execution_delay_sessions: 1        # decision after session t, execution on t+1
+
+data:
+  raw_data_path: data_cache/raw
+  normalized_data_path: data_cache/normalized
+  instrument_master_max_age_days: 1
+  market_data_max_staleness_minutes: 30
+
+hmm:
+  candidate_states: [3, 4, 5]
+  covariance_type: diag              # diagonal default; see docs/ARCHITECTURE.md
+  training_window_days: 756
+  retrain_interval_sessions: 63      # quarterly
+  min_confidence: 0.60
+  confirmation_bars: 2
+  flicker_window_sessions: 20
+  max_covariance_condition_number: 1000000.0
+
+regime_policy:
+  calm:
+    min_gross_exposure: 0.85
+    max_gross_exposure: 1.00
+  normal:
+    min_gross_exposure: 0.70
+    max_gross_exposure: 0.90
+  elevated:
+    min_gross_exposure: 0.40
+    max_gross_exposure: 0.65
+  crisis:
+    min_gross_exposure: 0.00
+    max_gross_exposure: 0.30
+
+universe:
+  index_reference: NIFTY50
+  min_avg_daily_value_inr: 50000000
+  point_in_time: true
+  exclude_illiquid: true
+
+selection:
+  min_holdings: 7
+  max_holdings: 10
+  momentum_lookback_months: [3, 6]
+
+portfolio:
+  max_single_name_pct: 0.15
+  max_sector_pct: 0.30
+
+risk:
+  max_gross_exposure: 1.00
+  max_leverage: 1.00
+  max_single_name_pct: 0.15
+  max_sector_pct: 0.30
+  max_concurrent_positions: 10
+  max_risk_per_position_pct: 0.005
+  daily_loss_warning_pct: 0.015
+  daily_loss_reduce_pct: 0.020
+  daily_loss_halt_pct: 0.030
+  weekly_loss_reduce_pct: 0.040
+  weekly_loss_halt_pct: 0.060
+  peak_drawdown_halt_pct: 0.10
+  stale_data_max_minutes: 30
+
+execution:
+  mode: paper                        # paper | live
+  order_type: limit
+  order_price_guard_bps: 50
+  stale_quote_seconds: 15
+  max_participation_adv_pct: 0.05
+  no_market_order_fallback: true     # NSE algo orders may not use market orders
+
+broker:
+  provider: paper
+  static_ip_required: true
+
+backtest:
+  training_window_sessions: 756
+  test_window_sessions: 126
+  roll_step_sessions: 63
+  include_indian_costs: true
+  include_slippage: true
+  point_in_time_universe: true
+
+costs:
+  brokerage_flat_inr: 0.0
+  brokerage_pct: 0.0
+  stt_delivery_pct: 0.001
+  exchange_txn_pct: 0.0000345
+  sebi_turnover_pct: 0.0000010
+  gst_pct: 0.18
+  stamp_duty_pct: 0.00015
+  dp_charges_inr: 15.93
+
+database:
+  url_env_var: DATABASE_URL
+  pool_size: 5
+
+logging:
+  level: INFO
+  format: json
+
+monitoring:
+  heartbeat_interval_seconds: 60
+  alert_channels: []

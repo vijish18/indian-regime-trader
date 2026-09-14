@@ -1,0 +1,248 @@
+# JSON Schema (draft 2020-12) for config/settings.yaml.
+# Validated structurally at load time by config/loader.py before the typed
+# pydantic models in config/models.py are constructed. Keep this in sync with
+# config/models.py -- the schema catches malformed YAML early and documents
+# the config shape for anyone who isn't reading Python.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: IndianRegimeTraderSettings
+type: object
+additionalProperties: false
+required:
+  - market
+  - data
+  - hmm
+  - regime_policy
+  - universe
+  - selection
+  - portfolio
+  - risk
+  - execution
+  - broker
+  - backtest
+  - costs
+  - database
+  - logging
+  - monitoring
+
+definitions:
+  exposure_band:
+    type: object
+    additionalProperties: false
+    required: [min_gross_exposure, max_gross_exposure]
+    properties:
+      min_gross_exposure: { type: number, minimum: 0, maximum: 1 }
+      max_gross_exposure: { type: number, minimum: 0, maximum: 1 }
+
+properties:
+  market:
+    type: object
+    additionalProperties: false
+    required: [exchange, timezone, bar_timeframe, execution_delay_sessions]
+    properties:
+      exchange: { type: string, const: NSE }
+      timezone: { type: string, const: Asia/Kolkata }
+      bar_timeframe: { type: string, enum: [1D] }
+      execution_delay_sessions: { type: integer, minimum: 1 }
+
+  data:
+    type: object
+    additionalProperties: false
+    required:
+      - raw_data_path
+      - normalized_data_path
+      - instrument_master_max_age_days
+      - market_data_max_staleness_minutes
+    properties:
+      raw_data_path: { type: string, minLength: 1 }
+      normalized_data_path: { type: string, minLength: 1 }
+      instrument_master_max_age_days: { type: integer, minimum: 1 }
+      market_data_max_staleness_minutes: { type: integer, minimum: 1 }
+
+  hmm:
+    type: object
+    additionalProperties: false
+    required:
+      - candidate_states
+      - covariance_type
+      - training_window_days
+      - retrain_interval_sessions
+      - min_confidence
+      - confirmation_bars
+      - flicker_window_sessions
+      - max_covariance_condition_number
+    properties:
+      candidate_states:
+        type: array
+        items: { type: integer, minimum: 2, maximum: 10 }
+        minItems: 1
+      covariance_type: { type: string, enum: [diag, full] }
+      training_window_days: { type: integer, minimum: 252 }
+      retrain_interval_sessions: { type: integer, minimum: 1 }
+      min_confidence: { type: number, minimum: 0, maximum: 1 }
+      confirmation_bars: { type: integer, minimum: 1 }
+      flicker_window_sessions: { type: integer, minimum: 1 }
+      max_covariance_condition_number: { type: number, exclusiveMinimum: 0 }
+
+  regime_policy:
+    type: object
+    additionalProperties: false
+    required: [calm, normal, elevated, crisis]
+    properties:
+      calm: { $ref: "#/definitions/exposure_band" }
+      normal: { $ref: "#/definitions/exposure_band" }
+      elevated: { $ref: "#/definitions/exposure_band" }
+      crisis: { $ref: "#/definitions/exposure_band" }
+
+  universe:
+    type: object
+    additionalProperties: false
+    required: [index_reference, min_avg_daily_value_inr, point_in_time, exclude_illiquid]
+    properties:
+      index_reference: { type: string, minLength: 1 }
+      min_avg_daily_value_inr: { type: number, minimum: 0 }
+      point_in_time: { type: boolean, const: true }
+      exclude_illiquid: { type: boolean }
+
+  selection:
+    type: object
+    additionalProperties: false
+    required: [min_holdings, max_holdings, momentum_lookback_months]
+    properties:
+      min_holdings: { type: integer, minimum: 1 }
+      max_holdings: { type: integer, minimum: 1 }
+      momentum_lookback_months:
+        type: array
+        items: { type: integer, minimum: 1 }
+        minItems: 1
+
+  portfolio:
+    type: object
+    additionalProperties: false
+    required: [max_single_name_pct, max_sector_pct]
+    properties:
+      max_single_name_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_sector_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+
+  risk:
+    type: object
+    additionalProperties: false
+    required:
+      - max_gross_exposure
+      - max_leverage
+      - max_single_name_pct
+      - max_sector_pct
+      - max_concurrent_positions
+      - max_risk_per_position_pct
+      - daily_loss_warning_pct
+      - daily_loss_reduce_pct
+      - daily_loss_halt_pct
+      - weekly_loss_reduce_pct
+      - weekly_loss_halt_pct
+      - peak_drawdown_halt_pct
+      - stale_data_max_minutes
+    properties:
+      max_gross_exposure: { type: number, minimum: 0, maximum: 1 }
+      max_leverage: { type: number, minimum: 1, maximum: 1 }
+      max_single_name_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_sector_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_concurrent_positions: { type: integer, minimum: 1 }
+      max_risk_per_position_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      daily_loss_warning_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      daily_loss_reduce_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      daily_loss_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      weekly_loss_reduce_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      weekly_loss_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      peak_drawdown_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      stale_data_max_minutes: { type: integer, minimum: 1 }
+
+  execution:
+    type: object
+    additionalProperties: false
+    required:
+      - mode
+      - order_type
+      - order_price_guard_bps
+      - stale_quote_seconds
+      - max_participation_adv_pct
+      - no_market_order_fallback
+    properties:
+      mode: { type: string, enum: [paper, live] }
+      order_type: { type: string, enum: [limit] }
+      order_price_guard_bps: { type: number, minimum: 0 }
+      stale_quote_seconds: { type: integer, minimum: 1 }
+      max_participation_adv_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      no_market_order_fallback: { type: boolean, const: true }
+
+  broker:
+    type: object
+    additionalProperties: false
+    required: [provider, static_ip_required]
+    properties:
+      provider: { type: string, minLength: 1 }
+      static_ip_required: { type: boolean }
+
+  backtest:
+    type: object
+    additionalProperties: false
+    required:
+      - training_window_sessions
+      - test_window_sessions
+      - roll_step_sessions
+      - include_indian_costs
+      - include_slippage
+      - point_in_time_universe
+    properties:
+      training_window_sessions: { type: integer, minimum: 1 }
+      test_window_sessions: { type: integer, minimum: 1 }
+      roll_step_sessions: { type: integer, minimum: 1 }
+      include_indian_costs: { type: boolean, const: true }
+      include_slippage: { type: boolean, const: true }
+      point_in_time_universe: { type: boolean, const: true }
+
+  costs:
+    type: object
+    additionalProperties: false
+    required:
+      - brokerage_flat_inr
+      - brokerage_pct
+      - stt_delivery_pct
+      - exchange_txn_pct
+      - sebi_turnover_pct
+      - gst_pct
+      - stamp_duty_pct
+      - dp_charges_inr
+    properties:
+      brokerage_flat_inr: { type: number, minimum: 0 }
+      brokerage_pct: { type: number, minimum: 0 }
+      stt_delivery_pct: { type: number, minimum: 0 }
+      exchange_txn_pct: { type: number, minimum: 0 }
+      sebi_turnover_pct: { type: number, minimum: 0 }
+      gst_pct: { type: number, minimum: 0 }
+      stamp_duty_pct: { type: number, minimum: 0 }
+      dp_charges_inr: { type: number, minimum: 0 }
+
+  database:
+    type: object
+    additionalProperties: false
+    required: [url_env_var, pool_size]
+    properties:
+      url_env_var: { type: string, minLength: 1 }
+      pool_size: { type: integer, minimum: 1 }
+
+  logging:
+    type: object
+    additionalProperties: false
+    required: [level, format]
+    properties:
+      level: { type: string, enum: [DEBUG, INFO, WARNING, ERROR] }
+      format: { type: string, enum: [json, text] }
+
+  monitoring:
+    type: object
+    additionalProperties: false
+    required: [heartbeat_interval_seconds, alert_channels]
+    properties:
+      heartbeat_interval_seconds: { type: integer, minimum: 1 }
+      alert_channels:
+        type: array
+        items: { type: string }
