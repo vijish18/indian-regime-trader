@@ -48,6 +48,7 @@ MODULES = [
     "risk.exposure",
     "risk.circuit_breaker",
     "risk.order_validator",
+    "risk.portfolio_risk_state",
     "execution",
     "execution.order_manager",
     "execution.position_tracker",

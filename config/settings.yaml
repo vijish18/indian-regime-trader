@@ -141,19 +141,29 @@ portfolio:
   min_correlation_observations: 40     # below this, skip the pair rather than act on a noisy estimate
 
 risk:
+  # See risk/risk_manager.py and risk/circuit_breaker.py for how these are
+  # applied. Independent of, and a hard veto over, every upstream layer --
+  # none of these thresholds are derived from the regime or the portfolio
+  # constructor's own (looser, construction-time) limits.
   max_gross_exposure: 1.00
   max_leverage: 1.00
   max_single_name_pct: 0.15
   max_sector_pct: 0.30
   max_concurrent_positions: 10
   max_risk_per_position_pct: 0.005
-  daily_loss_warning_pct: 0.015
-  daily_loss_reduce_pct: 0.020
-  daily_loss_halt_pct: 0.030
-  weekly_loss_reduce_pct: 0.040
-  weekly_loss_halt_pct: 0.060
-  peak_drawdown_halt_pct: 0.10
+  daily_loss_warning_pct: 0.015        # logged only; does not change circuit state
+  daily_loss_reduce_pct: 0.020         # -> REDUCED_RISK
+  daily_loss_halt_pct: 0.030           # -> HALTED
+  rolling_loss_reduce_pct: 0.040       # rolling-window drawdown -> REDUCED_RISK
+  rolling_loss_halt_pct: 0.060         # rolling-window drawdown -> HALTED
+  peak_to_trough_drawdown_halt_pct: 0.10
   stale_data_max_minutes: 30
+  max_pairwise_correlation: 0.85       # backstop above portfolio's 0.80 soft penalty threshold
+  max_adv_participation_pct: 0.08      # backstop above execution's 0.05 soft construction target
+  max_spread_bps: 100                  # liquid NSE large caps trade well under this; a spread this
+                                        # wide signals a stressed or illiquid book, not just noise
+  max_daily_turnover_pct: 0.50         # guards against a bug causing repeated full rebalances
+  reduced_risk_exposure_multiplier: 0.50
 
 execution:
   mode: paper                        # paper | live

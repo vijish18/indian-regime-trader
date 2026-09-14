@@ -13,24 +13,16 @@ from config.loader import load_settings
 
 
 def test_position_sizer_is_unimplemented() -> None:
-    """Portfolio construction (target weights) is implemented; converting a
-    target weight into a final order quantity is still later work.
+    """Portfolio construction and risk management (approve/veto) are
+    implemented; converting an approved target weight into a final order
+    quantity is still later work (Phase 7c).
     """
     from risk.position_sizer import PositionSizer
 
     settings = load_settings()
     sizer = PositionSizer(settings.risk)
-    with pytest.raises(NotImplementedError, match="Phase 7"):
+    with pytest.raises(NotImplementedError, match="Phase 7c"):
         sizer.weight_based_quantity(proposed=None, equity=100.0, price=10.0)  # type: ignore[arg-type]
-
-
-def test_risk_manager_is_unimplemented() -> None:
-    from risk.risk_manager import RiskManager
-
-    settings = load_settings()
-    manager = RiskManager(settings.risk)
-    with pytest.raises(NotImplementedError, match="Phase 7"):
-        manager.evaluate(proposed_weights=[], current_exposure=None, circuit_status=None)  # type: ignore[arg-type]
 
 
 def test_backtest_engine_is_unimplemented() -> None:

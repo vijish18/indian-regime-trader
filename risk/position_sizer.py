@@ -14,7 +14,10 @@ risk distance), not necessarily a resting protective stop order -- section
 1.2 explicitly demotes live stop orders to a last-resort control. Sizing
 still needs a risk-distance estimate even when no stop order will be placed.
 
-Not implemented yet (Phase 7/8).
+Not implemented yet (Phase 7c). Takes a ``RiskDecision``-approved target
+weight as its input in spirit, though the signatures below still take a raw
+``TargetPosition`` -- ``risk/risk_manager.py`` (Phase 7b) is the layer that
+approves or vetoes a proposal before it ever reaches here.
 """
 
 from __future__ import annotations
@@ -44,14 +47,14 @@ class PositionSizer:
 
     def weight_based_quantity(self, proposed: TargetPosition, equity: float, price: float) -> int:
         """Quantity implied purely by the proposed target weight."""
-        raise NotImplementedError("Phase 7: position sizing is not implemented yet.")
+        raise NotImplementedError("Phase 7c: position sizing is not implemented yet.")
 
     def risk_based_quantity(self, equity: float, entry_price: float, stop_distance: float) -> int:
         """``floor((equity * max_risk_per_position_pct) / stop_distance)``
         (docs/SPECIFICATION.md section 8.1), stressed for overnight gap risk
         rather than assuming a stop fills exactly at the stop price.
         """
-        raise NotImplementedError("Phase 7: position sizing is not implemented yet.")
+        raise NotImplementedError("Phase 7c: position sizing is not implemented yet.")
 
     def reconcile(
         self,
@@ -67,4 +70,4 @@ class PositionSizer:
         cash, and liquidity participation. Records which constraint bound
         the final quantity, for auditability.
         """
-        raise NotImplementedError("Phase 7: position sizing is not implemented yet.")
+        raise NotImplementedError("Phase 7c: position sizing is not implemented yet.")

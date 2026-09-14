@@ -370,10 +370,32 @@ class RiskConfig(BaseModel):
     daily_loss_warning_pct: Percent = Field(gt=0, le=1)
     daily_loss_reduce_pct: Percent = Field(gt=0, le=1)
     daily_loss_halt_pct: Percent = Field(gt=0, le=1)
-    weekly_loss_reduce_pct: Percent = Field(gt=0, le=1)
-    weekly_loss_halt_pct: Percent = Field(gt=0, le=1)
-    peak_drawdown_halt_pct: Percent = Field(gt=0, le=1)
+    rolling_loss_reduce_pct: Percent = Field(gt=0, le=1)
+    """The "rolling drawdown" check (docs/SPECIFICATION.md section 8): P&L
+    over a trailing multi-day window the caller defines when building
+    ``PortfolioRiskState.rolling_pnl_pct`` -- distinct from same-day P&L
+    (``daily_loss_*``) and from since-inception peak-to-trough
+    (``peak_to_trough_drawdown_halt_pct``)."""
+    rolling_loss_halt_pct: Percent = Field(gt=0, le=1)
+    peak_to_trough_drawdown_halt_pct: Percent = Field(gt=0, le=1)
     stale_data_max_minutes: int = Field(ge=1)
+    max_pairwise_correlation: Percent = Field(gt=0, le=1)
+    """Risk-layer hard backstop on correlation concentration. Deliberately a
+    separate, independently configured limit from
+    ``portfolio.max_pairwise_correlation`` (which only halves a weight) --
+    this one is a veto, evaluated against whatever correlation actually
+    survived construction, not the construction-time estimate."""
+    max_adv_participation_pct: Percent = Field(gt=0, le=1)
+    max_spread_bps: float = Field(gt=0)
+    max_daily_turnover_pct: float = Field(gt=0)
+    """Not a ``Percent``/``le=1`` field on purpose: turnover (bought +
+    sold, as a fraction of equity) can legitimately exceed 100% in one day
+    if a position is both exited and re-entered."""
+    reduced_risk_exposure_multiplier: Percent = Field(gt=0, lt=1)
+    """Applied to ``max_gross_exposure``, ``max_single_name_pct``, and
+    ``max_sector_pct`` while the circuit breaker is in REDUCED_RISK --
+    strictly less than 1 so REDUCED_RISK is always actually tighter than
+    NORMAL, never a no-op."""
 
     @model_validator(mode="after")
     def _thresholds_are_ordered(self) -> RiskConfig:
@@ -385,8 +407,8 @@ class RiskConfig(BaseModel):
             raise ValueError(
                 "daily_loss_warning_pct < daily_loss_reduce_pct < daily_loss_halt_pct must hold"
             )
-        if not (self.weekly_loss_reduce_pct < self.weekly_loss_halt_pct):
-            raise ValueError("weekly_loss_reduce_pct < weekly_loss_halt_pct must hold")
+        if not (self.rolling_loss_reduce_pct < self.rolling_loss_halt_pct):
+            raise ValueError("rolling_loss_reduce_pct < rolling_loss_halt_pct must hold")
         return self
 
 

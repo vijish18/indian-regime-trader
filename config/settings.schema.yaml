@@ -264,10 +264,15 @@ properties:
       - daily_loss_warning_pct
       - daily_loss_reduce_pct
       - daily_loss_halt_pct
-      - weekly_loss_reduce_pct
-      - weekly_loss_halt_pct
-      - peak_drawdown_halt_pct
+      - rolling_loss_reduce_pct
+      - rolling_loss_halt_pct
+      - peak_to_trough_drawdown_halt_pct
       - stale_data_max_minutes
+      - max_pairwise_correlation
+      - max_adv_participation_pct
+      - max_spread_bps
+      - max_daily_turnover_pct
+      - reduced_risk_exposure_multiplier
     properties:
       max_gross_exposure: { type: number, minimum: 0, maximum: 1 }
       max_leverage: { type: number, minimum: 1, maximum: 1 }
@@ -278,10 +283,15 @@ properties:
       daily_loss_warning_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
       daily_loss_reduce_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
       daily_loss_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
-      weekly_loss_reduce_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
-      weekly_loss_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
-      peak_drawdown_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      rolling_loss_reduce_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      rolling_loss_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      peak_to_trough_drawdown_halt_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
       stale_data_max_minutes: { type: integer, minimum: 1 }
+      max_pairwise_correlation: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_adv_participation_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_spread_bps: { type: number, exclusiveMinimum: 0 }
+      max_daily_turnover_pct: { type: number, exclusiveMinimum: 0 }
+      reduced_risk_exposure_multiplier: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
 
   execution:
     type: object

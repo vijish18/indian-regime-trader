@@ -50,10 +50,11 @@ rule or equivalent test once there is real code to check (Phase 5+):
   portfolio construction only through `core/regime/regime_policy.py`'s exposure target, not
   through the selection layer — this is what lets a walk-forward run measure the regime
   layer's incremental value in isolation from selection.
-- `portfolio/` proposes; it does not decide. `portfolio_constructor.py` produces
-  `ProposedWeight` objects, not orders. `risk/risk_manager.py` always evaluates proposals
-  and always has the final say — this is the structural form of specification section 8's
-  "NON-NEGOTIABLE... independent veto".
+- `portfolio/` proposes; it does not decide. `portfolio_constructor.py` produces a
+  `TargetPortfolio` of `TargetPosition`s, not orders. `risk/risk_manager.py` always
+  evaluates that proposal and always has the final say — this is the structural form of
+  specification section 8's "NON-NEGOTIABLE... independent veto". `risk/` never imports
+  `core.regime`, so no regime label can influence a risk decision either.
 - `risk/position_sizer.py` is the single place specification section 7.2's weight-based
   sizing formula and section 8.1's stop-distance risk-based sizing formula are reconciled
   into one final order quantity. No other module computes a final order quantity.
@@ -145,8 +146,9 @@ yet.")` body — not working logic.
 | 5 | HMM engine, model registry, causal feature scaling | **Done** |
 | 6 | Regime-aware allocation (`core/regime/allocation.py`, `regime_policy.py`, `baseline_policy.py`) | **Done** |
 | 6b | Stock selection (`universe/stock_selector.py`, `factor_calculator.py`) | **Done** |
-| 7 | Portfolio constructor (`portfolio/portfolio_constructor.py`) | **Done** (position sizer, risk manager -- converting a target weight into a final order quantity -- are still Phase 7b) |
-| 7b | Position sizer, risk manager | Stubbed |
+| 7 | Portfolio constructor (`portfolio/portfolio_constructor.py`) | **Done** (position sizer -- converting an approved target weight into a final order quantity -- is still Phase 7c) |
+| 7b | Independent risk management (`risk/risk_manager.py`, `risk/circuit_breaker.py`, `risk/portfolio_risk_state.py`) | **Done** |
+| 7c | Position sizer (`risk/position_sizer.py`) | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
 | 9 | Walk-forward validation, stress testing | Stubbed |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
@@ -549,8 +551,93 @@ about how much history is "enough" for their different purposes.
 takes an optional `sector_map: dict[str, str]` parameter; an instrument with
 no entry defaults to its own `instrument_id` as a singleton sector (the cap
 becomes a no-op for it) rather than fabricating a classification. Converting
-a target weight to a final order quantity, and the independent risk-manager
-veto over that decision, remain Phase 7b.
+an approved target weight to a final order quantity is Phase 7c.
+
+## Independent risk management (Phase 7b)
+
+`risk/risk_manager.py`, `risk/circuit_breaker.py`, and
+`risk/portfolio_risk_state.py` are the layer specification section 8 calls
+"NON-NEGOTIABLE... independent veto": every `TargetPortfolio`
+`portfolio/portfolio_constructor.py` produces passes through here before
+anything downstream can act on it, and this layer never imports
+`core.regime` -- it never sees a `RegimeState` or `AllocationRegime`, only
+measured numbers. A regime that looks calm cannot talk this layer out of a
+check.
+
+**`PortfolioRiskState` is the one snapshot every check reads from** --
+equity, per-instrument liquidity/staleness/spread facts (`PositionRisk`),
+P&L and drawdown numbers, and two operational health flags (system health,
+broker connectivity). `risk/` assembles none of this itself: the module has
+no dependency on `data.interfaces.MarketDataProvider` or `broker.base.Broker`,
+which keeps every check a pure, deterministic function of plain data and
+keeps `risk/` from acquiring a dependency on `broker/` or `execution/`,
+which sit downstream of it. Whatever orchestrates a trading cycle (the
+backtest engine, later the live loop) is responsible for building this
+snapshot.
+
+**Two-stage evaluation.** `RiskManager.evaluate()` first asks
+`CircuitBreaker.evaluate()` for the current `CircuitState`:
+
+- **HALTED** rejects *every* proposed position outright, with no further
+  checks run and no exception for a trade that would only reduce risk -- a
+  halt driven by broker/system failure means no order is safe to route,
+  sell or buy alike (specification section 19's kill-switch requirement:
+  "make new order creation impossible, not merely discouraged").
+- **REDUCED_RISK** tightens `max_gross_exposure`, `max_single_name_pct`, and
+  `max_sector_pct` by `RiskConfig.reduced_risk_exposure_multiplier`, and
+  forbids opening any position not already present in `current`. Fail
+  closed: with no `current` portfolio supplied at all, every proposed
+  position is treated as new and rejected, rather than silently skipping
+  this protection because the caller omitted the comparison.
+- **NORMAL** runs every check against the configured limits unmodified.
+
+Only then do the portfolio- and position-level checks run: gross exposure,
+position count, sector concentration, correlation concentration,
+single-name exposure, liquidity/ADV participation, stale data, abnormal
+spread, daily turnover, and the V1 long-only/no-leverage/no-borrowing
+invariants -- re-checked here as defense in depth even though
+`TargetPortfolio`/`TargetPosition` already enforce most of them
+structurally, because this layer must never simply trust what it is handed.
+A position with no matching `PositionRisk` entry is rejected outright
+(`MISSING_RISK_DATA`) -- fail closed rather than approve something this
+layer has no data to judge.
+
+**Veto, never resize.** `RiskManager` never adjusts a weight; it approves or
+rejects each proposed position outright (`RiskDecision.approved`).
+Converting an approved weight into a final order quantity is
+`risk/position_sizer.py`'s job (Phase 7c) -- conflating "should we do this
+at all" with "how many shares exactly" would blur the line specification
+section 8 draws between risk control and execution mechanics.
+
+**Attribution.** A portfolio-level breach (gross exposure, daily turnover,
+or a structural no-leverage/no-borrowing violation) rejects every proposed
+position, since none of them is individually at fault. A position-count
+breach rejects only the lowest-ranked excess positions
+(`TargetPosition.rank`, ascending = best). A sector-concentration breach
+rejects every position in the offending sector. A correlation breach
+rejects only the lower-ranked member of the flagged pair -- the same
+"who gets blamed" rule the portfolio constructor's correlation *penalty*
+uses, except here it is an outright rejection, not a half-weight.
+
+**The circuit breaker: NORMAL / REDUCED_RISK / HALTED, and why HALTED is
+sticky.** `CircuitBreaker.evaluate()` checks broker connectivity and system
+health first -- either failing forces HALTED outright, bypassing the loss
+tiers entirely. Otherwise, each of three drawdown measures (`daily_pnl_pct`,
+`rolling_pnl_pct`, `peak_to_trough_drawdown_pct`) is checked against its own
+"halt" threshold, then its "reduce" threshold; crossing only the "warning"
+threshold (`daily_loss_warning_pct`) is logged but leaves the state
+unchanged. Once HALTED, the state is persisted to a single JSON file and
+`evaluate()` returns that persisted status unchanged on every subsequent
+call, no matter what the current numbers say -- there is no automatic
+recovery path out of a halt, and a fresh `CircuitBreaker` pointed at the
+same state file after a process restart picks up exactly where the last one
+left off. The only way out is `CircuitBreaker.manual_reset()`, an explicit,
+separately logged action requiring an operator and a reason. REDUCED_RISK
+has no such stickiness: it clears back to NORMAL on its own once the
+triggering metric recovers, since it was never a "critical" halt to begin
+with. Every transition, and every manual reset, is logged through
+`monitoring/logger.py` with structured `extra_fields` (`event`,
+`previous_state`, `new_state`, `triggered_by`, `reason`).
 
 ## Why the module boundaries matter for correctness, not just style
 

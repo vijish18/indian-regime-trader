@@ -14,10 +14,10 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-8 complete: configuration, the broker-independent data layer,
+**Phases 1-9 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
-regime engine, regime-aware portfolio allocation, stock selection, and
-portfolio construction.**
+regime engine, regime-aware portfolio allocation, stock selection, portfolio
+construction, and independent risk management.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -122,11 +122,30 @@ portfolio construction.**
   actions — no order is sized or sent from this module. A defense-in-depth
   check re-validates the finished portfolio against every configured limit
   before returning it.
+- **Independent risk management** (`risk/risk_manager.py`,
+  `risk/circuit_breaker.py`, `risk/portfolio_risk_state.py`) — the layer
+  with absolute veto power over every proposed `TargetPortfolio`; it never
+  imports `core.regime`, so no regime label can talk it out of a check.
+  `RiskManager` approves or rejects each proposed position outright (it
+  never resizes one) against gross exposure, single-name and sector
+  concentration, correlation concentration, position count, liquidity/ADV
+  participation, stale data, abnormal spread, daily turnover, and the V1
+  long-only/no-leverage/no-borrowing invariants — a position with no
+  matching risk data is rejected outright, fail closed. A `CircuitBreaker`
+  tracks account health independently: NORMAL / REDUCED_RISK / HALTED,
+  driven by daily, rolling-window, and peak-to-trough drawdown, plus system
+  and broker-connectivity health. REDUCED_RISK tightens exposure caps and
+  forbids new positions (fail closed to "reject" when it can't tell what's
+  new); HALTED rejects every proposed order with no exceptions, persists to
+  disk so it survives an application restart, and clears only through an
+  explicit, separately logged `manual_reset()` — never automatically. Every
+  circuit-breaker transition and every risk rejection is logged with a
+  structured reason.
 
-**No position sizing, risk veto, or execution logic is implemented yet** —
-`risk/position_sizer.py` and `risk/risk_manager.py` (converting a target
-weight into a final, risk-bounded order quantity) and everything past them
-remain typed stubs that define the interfaces for later phases. See
+**No position sizing or execution logic is implemented yet** —
+`risk/position_sizer.py` (converting an approved target weight into a
+final, risk-bounded order quantity) and everything past it remain typed
+stubs that define the interfaces for later phases. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
