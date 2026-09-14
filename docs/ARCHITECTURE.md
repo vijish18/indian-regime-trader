@@ -150,8 +150,9 @@ yet.")` body — not working logic.
 | 7b | Independent risk management (`risk/risk_manager.py`, `risk/circuit_breaker.py`, `risk/portfolio_risk_state.py`) | **Done** |
 | 7c | Position sizer (`risk/position_sizer.py`) | Stubbed |
 | 8 | Indian transaction-cost and execution-cost model (`backtest/costs.py`, `backtest/cost_schedule.py`) | **Done** |
-| 8b | Backtest engine, performance metrics | Stubbed |
-| 9 | Walk-forward validation, stress testing | Stubbed |
+| 8b | Backtest engine, performance metrics (`backtest/engine.py`, `backtest/performance.py`) | **Done** |
+| 9 | Walk-forward validation (`backtest/walk_forward.py`) | **Done** |
+| 9b | Stress testing | Stubbed |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
 | 11 | Position tracking, reconciliation, live operational controls | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
@@ -708,13 +709,137 @@ doesn't match its own breakdown by a paisa.
 arithmetic this module provides toward docs/SPECIFICATION.md's "backtests
 must report gross P&L, costs, net P&L, cost as % of turnover" requirement
 -- pairing buy and sell legs into a gross P&L in the first place needs
-position tracking across time, which is the (still-stubbed) backtest
-engine's job (Phase 8b), not this module's. The rates shipped in
-`config/cost_schedules.yaml` are illustrative approximations assembled from
-publicly documented STT/GST/SEBI-fee rules and a representative
+position tracking across time, which is `backtest/engine.py`'s job (Phase
+8b -- see "The backtest engine and walk-forward validation" below), not
+this module's; that engine's `PerformanceCalculator` is where gross/net
+P&L and cost-as-%-of-turnover are actually reported end to end. The rates
+shipped in `config/cost_schedules.yaml` are illustrative approximations
+assembled from publicly documented STT/GST/SEBI-fee rules and a representative
 zero-brokerage discount-broker plan -- verify against the current
 NSE/SEBI/CDSL circulars and your actual broker's rate card before using
 this for anything beyond research backtests.
+
+## The backtest engine and walk-forward validation (Phases 8b-9)
+
+`backtest/engine.py` and `backtest/walk_forward.py` are where every prior
+phase gets wired together and run day by day, and where
+docs/SPECIFICATION.md's central walk-forward requirement gets enforced
+mechanically rather than by convention:
+
+    historical data
+        v
+    training window            <- fit HMM + scaler on this window ONLY
+        v
+    fit HMM / factors / normalizers
+        v
+    freeze model                <- ScalerParams and FittedRegimeModel never change again
+        v
+    OOS simulation               <- BacktestEngine, test window only
+        v
+    advance window                <- roll forward by roll_step_sessions
+        v
+    retrain
+        v
+    next OOS period
+
+**The twelve-step per-session pipeline.** For every session `T`,
+`BacktestEngine.run()` does, in order: (1-2) `StockSelector.select(T)` --
+causal by construction (Phase 6b); (3-4) not repeated per session -- the
+regime/HMM step already ran once, up front, when `WalkForwardValidator`
+built the fold's whole `exposure_targets` series (see "Filtering the
+whole test window in one call" below); (5) that day's `AllocationTarget`
+is read from the precomputed series; (6-7) `PortfolioConstructor.construct(...)`
+combines the risk budget, rankings, and every configured limit into one
+proposed `TargetPortfolio`; (8) `RiskManager.evaluate(...)` approves or
+vetoes each position, and `_apply_risk_decisions` folds that into the
+portfolio actually acted on; (9) the weight deltas between what is
+currently held and that risk-approved target become hypothetical orders
+(`OrderRecord`) -- still no price, no quantity; (10) orders are sized (a
+simple weight-based `floor(notional / fill_price)`, not
+`risk/position_sizer.py`'s stop-distance reconciliation, still Phase 7c)
+and filled at the *next* session's opening price; (11) `CostModel` prices
+every fill's full Indian cost breakdown, deducted from cash immediately;
+(12) cash, holdings, and every recorded series are updated.
+
+**No same-bar execution.** The signal for session `T` is built from
+information available at `T`'s close -- the most recent price stock
+selection and portfolio construction ever see for that decision. The
+resulting orders execute at session `T + 1`'s **opening** price, never at
+`T`'s own close or open. This is `docs/SPECIFICATION.md` section 10's
+"signal at close of day T, execution at day T+1" rule, made concrete as
+one specific, named fill assumption rather than left implicit. A order
+that cannot fill at `T+1`'s open (the instrument didn't trade) rests,
+searching forward a bounded number of sessions (`max_fill_search_days`) --
+not a look-ahead, since the order's terms were already fixed before this
+price is read; only *when* it fills is being resolved. A full
+guarded-limit-order microstructure model (partial fills, price-guard
+rejection) remains `execution/`/`broker/`'s job.
+
+**Filtering the whole test window in one call.** `HMMRegimeEngine.filter()`
+is forward-only: the state for row `t` depends on observations `1..t`
+only, proven directly by a dedicated test (Phase 5) that appending later
+rows never changes an earlier one. That property is exactly what lets
+`WalkForwardValidator._hmm_exposure_targets` call `filter()` *once* over
+an entire fold's test window instead of incrementally re-running it every
+session -- mathematically identical, and far cheaper. It also runs
+inference a little before `test_start` (`feature_warmup_buffer_days`) so
+`RegimeAllocationEngine`'s confirmation/flicker logic has real context on
+the test window's first sessions, instead of manufacturing an artificial
+"not enough history" gap at every fold boundary. This is not a leak: the
+model is already frozen by this point, so extending how far back it is
+*run* changes nothing about what it *learned*.
+
+**Rolling, not expanding, training windows.** Each fold's training window
+is the same length as every other's (`backtest.training_window_sessions`),
+sliding forward by `backtest.roll_step_sessions` each time -- never
+growing. This isolates "did the regime genuinely change" from "did the
+model just see more data than last time," and means a later fold's model
+is never trusted more just because its training set happened to be
+bigger.
+
+**Five strategies, one identical downstream pipeline.**
+`WalkForwardValidator.run_all_strategies` runs buy-and-hold, the
+rolling-volatility baseline, the moving-average trend baseline
+(`core/regime/baseline_policy.py::MovingAverageTrendBaseline`, the "simple
+200-day moving-average risk filter" docs/SPECIFICATION.md section 10.1
+requires), the HMM, and a shuffled-regime control over the *same* fold
+sequence and the *same* stock selector, portfolio constructor, risk
+manager, and cost model -- the only thing that ever differs is which
+`AllocationTarget` series each one produces. This is what makes "the HMM
+beats the simple baseline after costs" (section 10.3) a checkable claim
+rather than an assumed one. The shuffled-regime control re-derives targets
+from the *same* states the HMM actually produced for a fold, with their
+date assignment randomly permuted (`WalkForwardValidator._shuffled_exposure_targets`)
+-- the same total time spent in each regime, just reordered, to test
+whether *when* the HMM called a regime mattered, not merely that it called
+some regime some of the time.
+
+**Folds chain into one continuous ledger.** Each fold's
+`BacktestEngine.run()` starts from the *previous* fold's ending equity,
+not a fresh `initial_equity` every time. Holdings themselves do not carry
+across a fold boundary -- a retrain is treated as a flatten-and-reassess
+point, since the new fold's stock selector may not even rank the same
+instruments; this is a documented simplification, not an attempt to model
+a real zero-cost liquidation.
+
+**Dates, not `pandas.Timestamp`.** The Phase 1 stub this module replaces
+typed every date as `pandas.Timestamp`; that was a placeholder guess made
+before the rest of the system's date conventions existed. Every date here
+is `datetime.date` instead, matching `TradingCalendar`,
+`AllocationTarget.as_of`, and `RegimeState.as_of` -- corrected rather than
+preserved for its own sake, the same treatment earlier phases gave
+`ProposedWeight` and other early guesses that got superseded once the
+surrounding design solidified.
+
+**What's not here.** `risk/position_sizer.py`'s stop-distance
+reconciliation (Phase 7c) and `backtest/stress_test.py`'s failure-injection
+scenarios (Phase 9b) remain stubbed. No per-fold model persistence through
+`core/regime/model_registry.py`: a walk-forward run fits and discards many
+models in sequence for research purposes, which is a different use case
+from the registry's single-approved-production-model workflow (Phase 5),
+so each fold's model is kept in memory only, identified by a `model_id`
+label (`core/regime/model_registry.py::build_model_id`) for audit, not
+persisted to disk.
 
 ## Why the module boundaries matter for correctness, not just style
 

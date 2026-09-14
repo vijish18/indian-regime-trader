@@ -180,12 +180,14 @@ properties:
       - extreme_confidence_threshold
       - max_flicker_transitions
       - baseline_volatility_window
+      - trend_ma_window_days
     properties:
       low_risk_volatility_threshold: { type: number, exclusiveMinimum: 0 }
       high_risk_volatility_threshold: { type: number, exclusiveMinimum: 0 }
       extreme_confidence_threshold: { type: number, exclusiveMinimum: 0, maximum: 1 }
       max_flicker_transitions: { type: integer, minimum: 0 }
       baseline_volatility_window: { type: integer, minimum: 2 }
+      trend_ma_window_days: { type: integer, minimum: 2 }
 
   universe:
     type: object

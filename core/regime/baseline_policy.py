@@ -35,7 +35,7 @@ import math
 import pandas as pd
 
 from config.models import AllocationConfig
-from core.regime.allocation import AllocationTarget, volatility_tier
+from core.regime.allocation import AllocationRegime, AllocationTarget, volatility_tier
 from core.regime.regime_policy import RegimePolicy
 
 _TRADING_DAYS_PER_YEAR = 252
@@ -105,6 +105,86 @@ class RollingVolatilityBaseline:
             confidence=1.0,
             expected_volatility=volatility,
             reason="rolling_realized_volatility",
+        )
+
+
+class MovingAverageTrendBaseline:
+    """Classifies the current risk tier from whether the index price is
+    above or below its trailing simple moving average -- the "simple
+    200-day moving-average risk filter" docs/SPECIFICATION.md section 10.1
+    requires as a second, independent non-HMM walk-forward benchmark.
+
+    Deliberately binary (price above the average vs. at or below it, the
+    classic form of this filter), unlike the volatility baseline's
+    three-tier classification -- there is no natural "normal" reading for a
+    single moving-average crossing. "Above" maps to LOW_RISK (full
+    participation); "at or below" maps to HIGH_RISK (defensive). No HMM, no
+    volatility estimate, no confidence score, no feature engineering.
+    """
+
+    def __init__(self, config: AllocationConfig, policy: RegimePolicy) -> None:
+        self.config = config
+        self.policy = policy
+
+    def moving_average(self, prices: pd.Series) -> float:
+        window = prices.tail(self.config.trend_ma_window_days)
+        if len(window) < self.config.trend_ma_window_days:
+            raise ValueError(
+                f"need at least {self.config.trend_ma_window_days} trailing prices, "
+                f"got {len(window)}"
+            )
+        if window.isna().any():
+            raise ValueError("trailing price window contains NaN")
+        return float(window.mean())
+
+    def evaluate(self, prices: pd.Series, as_of: dt.date | None = None) -> AllocationTarget:
+        """The allocation implied by price vs. trailing moving average
+        alone.
+
+        ``prices`` must be ascending and end at the decision date;
+        ``as_of`` defaults to that last date. As with
+        :meth:`RollingVolatilityBaseline.evaluate`, the target is the
+        midpoint of the tier's configured band -- this method has no
+        confidence score to scale by, so picking anything closer to one
+        edge would imply a certainty it has no basis for. ``confidence`` is
+        reported as 1.0 and ``allow_new_positions`` as always True, for the
+        same reason documented on the volatility baseline.
+        """
+        if prices.empty:
+            raise ValueError("cannot evaluate the trend baseline on an empty price series")
+
+        moving_average = self.moving_average(prices)
+        current_price = float(prices.iloc[-1])
+        regime = (
+            AllocationRegime.LOW_RISK
+            if current_price > moving_average
+            else AllocationRegime.HIGH_RISK
+        )
+        band = self.policy.band_for(regime)
+        target = (band.min_gross_exposure + band.max_gross_exposure) / 2.0
+        decision_date = as_of if as_of is not None else _as_date(prices.index[-1])
+
+        window_returns = prices.tail(self.config.trend_ma_window_days).pct_change().dropna()
+        informational_volatility = (
+            float(window_returns.std(ddof=0) * math.sqrt(_TRADING_DAYS_PER_YEAR))
+            if not window_returns.empty
+            else 0.0
+        )
+
+        return AllocationTarget(
+            as_of=decision_date,
+            regime=regime,
+            target_gross_exposure=target,
+            min_gross_exposure=band.min_gross_exposure,
+            max_gross_exposure=band.max_gross_exposure,
+            allow_new_positions=True,
+            confidence=1.0,
+            expected_volatility=informational_volatility,
+            reason=(
+                f"price {current_price:.2f} "
+                f"{'above' if current_price > moving_average else 'at/below'} "
+                f"{self.config.trend_ma_window_days}-day moving average {moving_average:.2f}"
+            ),
         )
 
 

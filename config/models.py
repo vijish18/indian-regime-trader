@@ -206,6 +206,12 @@ class AllocationConfig(BaseModel):
     """Trailing sessions used by the non-HMM rolling-volatility baseline
     (core/regime/baseline_policy.py)."""
 
+    trend_ma_window_days: int = Field(ge=2)
+    """Trailing sessions used by the non-HMM moving-average trend baseline
+    (core/regime/baseline_policy.py's ``MovingAverageTrendBaseline`` --
+    docs/SPECIFICATION.md section 10.1's "simple 200-day moving-average
+    risk filter" walk-forward benchmark)."""
+
     @model_validator(mode="after")
     def _thresholds_are_ordered(self) -> AllocationConfig:
         if self.low_risk_volatility_threshold >= self.high_risk_volatility_threshold:

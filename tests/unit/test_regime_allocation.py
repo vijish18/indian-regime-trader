@@ -20,7 +20,7 @@ from core.regime.allocation import (
     count_transitions,
     volatility_tier,
 )
-from core.regime.baseline_policy import RollingVolatilityBaseline
+from core.regime.baseline_policy import MovingAverageTrendBaseline, RollingVolatilityBaseline
 from core.regime.hmm_engine import RegimeLabel, RegimeState
 from core.regime.regime_policy import RegimePolicy
 
@@ -32,6 +32,7 @@ def allocation_config(**overrides: object) -> AllocationConfig:
         "extreme_confidence_threshold": 0.90,
         "max_flicker_transitions": 3,
         "baseline_volatility_window": 20,
+        "trend_ma_window_days": 200,
     }
     defaults.update(overrides)
     return AllocationConfig.model_validate(defaults)
@@ -666,4 +667,102 @@ def test_baseline_is_structurally_interchangeable_with_the_hmm_engine() -> None:
     assert field_names  # sanity: the dataclass actually has fields
     for name in field_names:
         getattr(baseline_target, name)  # every field is present on both
+        getattr(hmm_target, name)
+
+
+# --------------------------------------------------------------------------
+# Baseline: simple moving-average trend filter, no HMM
+# --------------------------------------------------------------------------
+
+
+def _prices(values: list[float], start: dt.date = dt.date(2024, 1, 2)) -> pd.Series:
+    return pd.Series(values, index=pd.bdate_range(start, periods=len(values)))
+
+
+def test_trend_baseline_classifies_price_above_average_as_low_risk() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=10), policy)
+
+    rising = _prices([100.0 + i for i in range(15)])
+    target = baseline.evaluate(rising)
+
+    assert target.regime is AllocationRegime.LOW_RISK
+    assert target.allow_new_positions is True
+
+
+def test_trend_baseline_classifies_price_at_or_below_average_as_high_risk() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=10), policy)
+
+    falling = _prices([100.0 - i for i in range(15)])
+    target = baseline.evaluate(falling)
+
+    assert target.regime is AllocationRegime.HIGH_RISK
+
+
+def test_trend_baseline_target_is_the_band_midpoint() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=5), policy)
+
+    target = baseline.evaluate(_prices([100.0] * 10))
+    band_config = regime_policy_config().high_risk  # flat price == moving average -> not > MA
+    expected_midpoint = (band_config.min_gross_exposure + band_config.max_gross_exposure) / 2
+    assert target.target_gross_exposure == pytest.approx(expected_midpoint)
+
+
+def test_trend_baseline_reports_full_confidence_and_always_allows_new_positions() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=5), policy)
+
+    for values in ([100.0 + i for i in range(10)], [100.0 - i for i in range(10)]):
+        target = baseline.evaluate(_prices(values))
+        assert target.confidence == 1.0
+        assert target.allow_new_positions is True
+        assert target.regime is not AllocationRegime.UNCERTAIN
+
+
+def test_trend_baseline_rejects_a_window_shorter_than_configured() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=20), policy)
+
+    with pytest.raises(ValueError, match="need at least 20"):
+        baseline.moving_average(_prices([100.0] * 10))
+
+
+def test_trend_baseline_rejects_an_empty_price_series() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(), policy)
+    with pytest.raises(ValueError, match="empty price series"):
+        baseline.evaluate(pd.Series(dtype=float))
+
+
+def test_trend_baseline_rejects_nan_in_the_window() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=10), policy)
+
+    series = _prices([100.0] * 15)
+    series.iloc[5] = float("nan")
+
+    with pytest.raises(ValueError, match="NaN"):
+        baseline.moving_average(series)
+
+
+def test_trend_baseline_moving_average_is_a_plain_trailing_mean() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline = MovingAverageTrendBaseline(allocation_config(trend_ma_window_days=5), policy)
+
+    values = [10.0, 20.0, 30.0, 40.0, 50.0]
+    assert baseline.moving_average(_prices(values)) == pytest.approx(30.0)
+
+
+def test_trend_baseline_is_structurally_interchangeable_with_the_hmm_engine() -> None:
+    policy = RegimePolicy(regime_policy_config())
+    baseline_target = MovingAverageTrendBaseline(
+        allocation_config(trend_ma_window_days=5), policy
+    ).evaluate(_prices([100.0 + i for i in range(10)]))
+    hmm_target = engine(hmm=hmm_config(confirmation_bars=1)).evaluate(history(0.05, 0.9, 5))
+
+    assert type(baseline_target) is type(hmm_target) is AllocationTarget
+    for name in {f.name for f in dataclasses.fields(AllocationTarget)}:
+        getattr(baseline_target, name)
         getattr(hmm_target, name)

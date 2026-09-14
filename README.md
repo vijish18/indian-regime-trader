@@ -14,11 +14,11 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-10 complete: configuration, the broker-independent data layer,
+**Phases 1-11 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
-construction, independent risk management, and the Indian transaction-cost
-model.**
+construction, independent risk management, the Indian transaction-cost
+model, and realistic walk-forward backtesting.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -164,12 +164,30 @@ model.**
   always exactly matches the sum of its displayed line items. STT applies
   on both legs for delivery equity, stamp duty on the buy leg only, and DP
   charges on the sell leg only — modeled per leg, never averaged.
+- **Walk-forward backtesting** (`backtest/engine.py`, `backtest/walk_forward.py`,
+  `backtest/performance.py`) — a true out-of-sample fit → freeze → OOS →
+  advance → retrain loop, never fitting model parameters on future test
+  data. Each fold's HMM and feature scaler are fit on a rolling (not
+  expanding) training window only, frozen, and evaluated strictly on the
+  following test window. `BacktestEngine` replays every session's decision
+  — stock selection, portfolio construction, risk veto, cost pricing — from
+  information available at that session's close only, and executes the
+  resulting orders at the **next** session's opening price, never the
+  signal's own close or open. Five strategies (buy-and-hold, the
+  rolling-volatility baseline, a moving-average trend baseline, the HMM,
+  and a shuffled-regime control) run over the identical fold sequence and
+  identical downstream pipeline, isolating whether the HMM's regime timing
+  — not just its existence — adds value after costs. Every fold's equity
+  curve, positions, orders, fills, costs, regime, confidence, risk
+  decisions, and turnover are recorded. Look-ahead and leakage are tested
+  directly via truncation invariance: two environments built from the same
+  random seed but differing amounts of data must produce bit-identical
+  decisions for every date both of them cover.
 
-**No position sizing, backtest engine, or execution logic is implemented
-yet** — `risk/position_sizer.py` (converting an approved target weight
-into a final, risk-bounded order quantity), `backtest/engine.py`, and
-everything past them remain typed stubs that define the interfaces for
-later phases. See
+**No position sizing or execution logic is implemented yet** —
+`risk/position_sizer.py` (converting an approved target weight into a
+final, risk-bounded order quantity) and everything past it remain typed
+stubs that define the interfaces for later phases. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's

@@ -231,18 +231,25 @@ class ExecutionCostEstimate:
                 raise ValueError(f"{field_name} must be >= 0, got {value}")
         if self.gross_value <= 0:
             raise ValueError(f"gross_value must be > 0, got {self.gross_value}")
-        expected_total = self.trade_cost.total + self.slippage_amount
-        if abs(self.total_cost - expected_total) > 1e-6:
+        # Both checks below compare against the nearest-paisa-rounded expected
+        # value, not the raw float sum: `total_cost` and `net_value` are
+        # themselves rounded to the paisa (this module's docstring,
+        # "Rounding"), and `gross_value` (quantity * a float price) is not
+        # guaranteed to itself be a clean 2-decimal number, so an exact
+        # (1e-6) comparison against the unrounded sum would reject a
+        # correctly-rounded value over ordinary paisa-level rounding.
+        expected_total = _round_inr(self.trade_cost.total + self.slippage_amount)
+        if abs(self.total_cost - expected_total) > 0.01:
             raise ValueError(
                 f"total_cost ({self.total_cost}) must equal trade_cost.total + "
-                f"slippage_amount ({expected_total})"
+                f"slippage_amount, rounded ({expected_total})"
             )
-        expected_net = (
+        expected_net = _round_inr(
             self.gross_value + self.total_cost
             if self.trade_cost.side is TradeSide.BUY
             else self.gross_value - self.total_cost
         )
-        if abs(self.net_value - expected_net) > 1e-6:
+        if abs(self.net_value - expected_net) > 0.01:
             raise ValueError(f"net_value ({self.net_value}) must equal {expected_net}")
         expected_pct = self.total_cost / self.gross_value
         if abs(self.cost_pct_of_turnover - expected_pct) > 1e-9:
@@ -422,11 +429,12 @@ class CostModel:
 
 
 def net_pnl(gross_pnl: float, total_cost: float) -> float:
-    """``gross_pnl - total_cost`` -- the one-line arithmetic a backtest
-    report needs once it has summed ``ExecutionCostEstimate.total_cost``
-    across every trade. Pairing buys and sells into a gross P&L in the
-    first place is the (still-stubbed) backtest engine's job, not this
-    module's -- this function exists only so "net P&L" isn't left as an
+    """``gross_pnl - total_cost``. ``backtest/performance.py``'s
+    ``PerformanceCalculator`` derives gross P&L from the equity curve in
+    the *other* direction (``gross = net + costs``, since the curve is
+    already net of every cost) rather than calling this function directly,
+    but the two are the same equation read in opposite directions -- this
+    is the canonical statement of it, so "net P&L" isn't left as an
     implicit convention scattered across whoever reports it.
     """
     return gross_pnl - total_cost

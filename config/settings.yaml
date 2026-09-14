@@ -99,6 +99,7 @@ allocation:
   extreme_confidence_threshold: 0.90   # confirms a new regime in 1 bar instead of hmm.confirmation_bars
   max_flicker_transitions: 3           # confirmed-regime changes tolerated within hmm.flicker_window_sessions
   baseline_volatility_window: 20       # trailing sessions for the non-HMM rolling-volatility baseline
+  trend_ma_window_days: 200            # the non-HMM "simple 200-day moving-average risk filter" benchmark
 
 universe:
   index_reference: NIFTY50
