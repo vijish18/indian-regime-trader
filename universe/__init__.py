@@ -6,3 +6,19 @@ exposure applied by portfolio construction -- this is what lets the system
 measure the regime layer's incremental value in isolation
 (docs/SPECIFICATION.md section 1.2, "IMPORTANT").
 """
+
+from universe.universe import (
+    ConstituentSnapshot,
+    ExclusionReason,
+    UniverseExclusion,
+    UniverseProvider,
+    UniverseSnapshot,
+)
+
+__all__ = [
+    "ConstituentSnapshot",
+    "ExclusionReason",
+    "UniverseExclusion",
+    "UniverseProvider",
+    "UniverseSnapshot",
+]

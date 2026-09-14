@@ -122,6 +122,7 @@ yet.")` body — not working logic.
 | 1 | Repository, typed/validated configuration, logging, environment handling, test framework | **Done** |
 | 2 | Market calendar, point-in-time instrument master | **Done** |
 | 3 | Data ingestion, corporate actions, data quality | **Done** (local files; no vendor/broker feed) |
+| 3b | Point-in-time universe construction (`universe/universe.py`) | **Done** |
 | 4 | Causal feature engineering + scaling, no-look-ahead tests | Stubbed |
 | 5 | HMM engine, model registry | Stubbed |
 | 6 | Regime policy, stock selector | Stubbed |
@@ -173,6 +174,52 @@ check, which are warnings, not silent passes.
 Point-in-time membership (`data/membership.py`) is the survivorship-bias
 control: no constituent list is hardcoded anywhere, so a 2019 backtest sees the
 index as it was in 2019, including companies later deleted.
+
+## The universe engine
+
+`universe/universe.py`'s `UniverseProvider.get_universe(as_of)` is where the
+survivorship-bias control in `data/membership.py` becomes an actual eligible
+universe, by joining three point-in-time sources:
+
+1. **Index membership** — was the instrument a constituent on `as_of`.
+2. **Instrument status** — was it active (not suspended/delisted), and under
+   what symbol, on `as_of`.
+3. **Corporate actions** (optional) — had a merger/demerger/delisting with
+   `ex_date <= as_of` already completed.
+
+Every check is bounded by `as_of`: membership uses `is_member_on(as_of)`,
+instrument lookup uses `get(id, as_of)`, and the corporate-action cross-check
+passes `end=as_of` to `actions_for(...)`, so a scheduled-but-not-yet-effective
+action can never exclude an instrument early. That bound is exercised directly
+by `test_future_corporate_action_does_not_exclude_early_because_that_would_be_look_ahead`
+in `tests/unit/test_universe.py`, the same test file's
+`test_future_constituents_cannot_enter_earlier_periods` proving the equivalent
+property for membership itself.
+
+A constituent is never silently dropped or silently kept: every exclusion
+(`ExclusionReason.MISSING_INSTRUMENT_DATA`, `NOT_TRADABLE`, `CORPORATE_ACTION`)
+is recorded on the `UniverseSnapshot` alongside the accepted constituents, so a
+name missing from a given day's universe is an auditable decision rather than
+a gap someone has to notice by its absence.
+
+**Explicit scope boundary:** this module decides *eligibility*, not
+*investability*. Liquidity filtering (`config.universe.min_avg_daily_value_inr`)
+and trend/momentum scoring belong to `universe/stock_selector.py` (Phase 6,
+still stubbed), applied *within* the eligible universe this module returns.
+Keeping the two separate is what will let a later walk-forward run attribute
+performance to selection vs. eligibility independently, rather than conflating
+"was this a real historical constituent" with "did it pass today's factor
+screen."
+
+**Explicit data limitations** (also documented at the top of
+`universe/universe.py`): correctness here is bounded by the completeness of
+the membership and instrument datasets it is given — no logic in this module
+can recover a historical add/remove date a vendor never recorded, and an
+instrument whose delisting was never reflected in either the instrument
+master's `status` or a corporate-action record will incorrectly remain
+eligible. Snapshot persistence (so a later data correction cannot retroactively
+change what a past rebalance "saw") is deferred to the storage layer, which is
+not implemented yet.
 
 ## Why the module boundaries matter for correctness, not just style
 

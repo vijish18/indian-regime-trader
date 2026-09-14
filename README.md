@@ -14,7 +14,8 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-3 complete: configuration, and the broker-independent data layer.**
+**Phases 1-3 complete: configuration, the broker-independent data layer, and
+point-in-time universe construction.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -23,6 +24,17 @@ before any live capital.
   ingestion, and data-quality validation. Historical data only: there is no
   broker or vendor connection, and `LocalMarketDataProvider.get_quote` raises
   by design so a backtest cannot consult a live book.
+- **Universe engine** (`universe/universe.py`) — joins index membership,
+  instrument status, and (optionally) corporate actions into a point-in-time
+  eligible universe. `UniverseProvider.get_universe(as_of)` returns only
+  constituents that were actually members, tradable, and not already subject
+  to a completed merger/demerger/delisting on that exact date — the primary
+  survivorship-bias control described in `docs/SPECIFICATION.md` section 2.1.
+  Every exclusion is recorded with a reason rather than silently dropped.
+  Liquidity/trend/momentum filtering is a separate, later concern
+  (`universe/stock_selector.py`, still stubbed) — see
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the scope boundary and
+  documented data limitations.
 
 **No trading, regime, selection, portfolio, risk, or execution logic is
 implemented yet** — those modules remain typed stubs that define the interfaces
