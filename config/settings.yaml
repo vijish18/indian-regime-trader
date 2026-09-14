@@ -12,7 +12,7 @@
 #   are added here for completeness.
 # - `selection.min_holdings` is set to 7 (not the spec's "5-10" range) because
 #   7 holdings x `portfolio.max_single_name_pct` (15%) = 105%, which is the
-#   minimum holding count that can actually reach the calm-regime exposure
+#   minimum holding count that can actually reach the low-risk-tier exposure
 #   ceiling of 100% without breaching the single-name cap. 5 holdings could
 #   not (5 x 15% = 75% < 100%). See docs/ARCHITECTURE.md for detail.
 
@@ -71,19 +71,34 @@ hmm:
   covariance_regularization: 0.000001  # ridge added to each covariance diagonal
   min_state_occupancy: 0.02          # states occupying less than this are degenerate
 
+# Allocation-tier exposure bands. Deliberately not a copy of the HMM's own
+# calm/normal/elevated/crisis labels (core/regime/hmm_engine.py) -- these
+# four tiers are what core/regime/allocation.py actually acts on, chosen
+# fresh for this phase rather than carried over from an earlier design. See
+# docs/ARCHITECTURE.md, "Resolved specification ambiguities" (B6).
 regime_policy:
-  calm:
-    min_gross_exposure: 0.85
+  low_risk:                          # highest permitted exposure
+    min_gross_exposure: 0.75
     max_gross_exposure: 1.00
-  normal:
-    min_gross_exposure: 0.70
-    max_gross_exposure: 0.90
-  elevated:
-    min_gross_exposure: 0.40
-    max_gross_exposure: 0.65
-  crisis:
+  normal_risk:                       # moderate exposure
+    min_gross_exposure: 0.45
+    max_gross_exposure: 0.75
+  high_risk:                         # reduced exposure
+    min_gross_exposure: 0.15
+    max_gross_exposure: 0.45
+  uncertain:                         # conservative exposure; no new positions
     min_gross_exposure: 0.00
-    max_gross_exposure: 0.30
+    max_gross_exposure: 0.15
+
+allocation:
+  # Annualized volatility (from core/features nifty_realized_vol_20d, or the
+  # rolling-vol baseline) below this is LOW_RISK; at/above the high threshold
+  # is HIGH_RISK; between the two is NORMAL_RISK.
+  low_risk_volatility_threshold: 0.12
+  high_risk_volatility_threshold: 0.25
+  extreme_confidence_threshold: 0.90   # confirms a new regime in 1 bar instead of hmm.confirmation_bars
+  max_flicker_transitions: 3           # confirmed-regime changes tolerated within hmm.flicker_window_sessions
+  baseline_volatility_window: 20       # trailing sessions for the non-HMM rolling-volatility baseline
 
 universe:
   index_reference: NIFTY50

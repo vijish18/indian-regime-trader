@@ -17,7 +17,10 @@ MODULES = [
     "core.regime",
     "core.regime.hmm_engine",
     "core.regime.regime_policy",
+    "core.regime.allocation",
+    "core.regime.baseline_policy",
     "core.regime.model_registry",
+    "core.regime.gaussian_hmm",
     "core.features",
     "core.features.feature_engineering",
     "core.features.feature_scaler",
@@ -81,12 +84,14 @@ def test_core_does_not_import_downstream_layers() -> None:
     """
     import core.features.feature_engineering as fe
     import core.features.feature_scaler as fs
+    import core.regime.allocation as allocation
+    import core.regime.baseline_policy as baseline
     import core.regime.hmm_engine as hmm
     import core.regime.model_registry as registry
     import core.regime.regime_policy as policy
 
     forbidden_prefixes = ("universe", "portfolio", "risk", "execution", "broker")
-    for module in (fe, fs, hmm, registry, policy):
+    for module in (fe, fs, hmm, registry, policy, allocation, baseline):
         for name, value in vars(module).items():
             module_name = getattr(value, "__module__", "")
             assert not module_name.startswith(forbidden_prefixes), (

@@ -79,13 +79,13 @@ reduce 2.0%, daily halt 3.0%, weekly reduce 4.0%, weekly halt 6.0%, peak-drawdow
 includes `daily_loss_warning_pct` (1.5%) and `max_concurrent_positions` (10), both present
 in section 8's prose table but omitted from section 21's example config.
 
-**Minimum holdings vs. single-name cap vs. calm-regime exposure (genuinely under-specified).**
+**Minimum holdings vs. single-name cap vs. low-risk-tier exposure (genuinely under-specified).**
 Section 7.1 says "start with 5–10 positions"; section 8 caps single-name weight at 15%;
-section 7 targets 85–100% gross exposure in the calm regime. Five positions at a 15% cap
-can reach at most 75% gross exposure — short of the calm-regime floor, let alone its
-ceiling. `config/settings.yaml` sets `selection.min_holdings: 7` (7 x 15% = 105%, enough to
+section 7 targets 85–100% gross exposure in the calmest regime. Five positions at a 15% cap
+can reach at most 75% gross exposure — short of that floor, let alone its ceiling.
+`config/settings.yaml` sets `selection.min_holdings: 7` (7 x 15% = 105%, enough to
 reach 100%), and `config/models.py`'s `Settings` model enforces
-`selection.min_holdings * portfolio.max_single_name_pct >= regime_policy.calm.max_gross_exposure`
+`selection.min_holdings * portfolio.max_single_name_pct >= regime_policy.low_risk.max_gross_exposure`
 as a validator, so this can't silently regress if either number changes later.
 
 **Two position-sizing formulas (genuinely under-specified).** Section 7.2 sizes by
@@ -108,6 +108,24 @@ actual resolution (keep signed returns with justification, or switch to `|return
 return) is a Phase 4 decision informed by the section 6.3 validation gates, not a Phase 1
 one, and is deliberately left open here rather than pre-decided.
 
+**Two regime vocabularies, deliberately (B6).** Section 7 names its exposure tiers Calm,
+Normal, Elevated, Crisis-like — the same words section 6.1 uses for the HMM's own post-hoc
+state labels. This repository keeps two separate enums instead of one:
+`core.regime.hmm_engine.RegimeLabel` (calm/normal/elevated/crisis) is the HMM's relative,
+per-model ranking of its own fitted states, for reporting only, exactly as Phase 5 requires.
+`core.regime.allocation.AllocationRegime` (low_risk/normal_risk/high_risk/uncertain) is what
+`RegimeAllocationEngine` actually acts on: an absolute, confidence-aware classification driven
+by configured volatility thresholds, with a fourth category — UNCERTAIN — that has no
+volatility-level analogue at all, since it answers "should this classification be trusted",
+not "how risky does the market look". Reusing one vocabulary for both would have made it easy
+to accidentally switch on `state.label` when computing exposure, exactly the failure mode
+Phase 5's "names must not determine behavior" rule exists to prevent.
+`config/settings.yaml`'s `regime_policy` section is keyed by the allocation vocabulary
+(`low_risk`/`normal_risk`/`high_risk`/`uncertain`), not the spec's literal Calm/Normal/
+Elevated/Crisis-like terms, and the configured bands are a fresh design for this phase
+rather than a copy of section 7's example percentages — see `config/settings.yaml`'s comment
+above `regime_policy:` for the actual numbers and reasoning.
+
 ## Phase plan
 
 Follows [SPECIFICATION.md section 18](SPECIFICATION.md#18-codex-build-plan) with one
@@ -125,7 +143,7 @@ yet.")` body — not working logic.
 | 3b | Point-in-time universe construction (`universe/universe.py`) | **Done** |
 | 4 | Causal feature engineering (`core/features/feature_engineering.py`) | **Done** (feature scaling for walk-forward fitting, `core/features/feature_scaler.py`, is still Phase 5) |
 | 5 | HMM engine, model registry, causal feature scaling | **Done** |
-| 6 | Regime policy, stock selector | Stubbed |
+| 6 | Regime-aware allocation (`core/regime/allocation.py`, `regime_policy.py`, `baseline_policy.py`) | **Done**; stock selector still stubbed |
 | 7 | Portfolio constructor, position sizer, risk manager | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
 | 9 | Walk-forward validation, stress testing | Stubbed |
@@ -286,7 +304,9 @@ without strategy context attached:
 | `gaussian_hmm.py` | Pure inference math: parameters, Gaussian emissions, the forward filter, Baum-Welch, BIC/AIC |
 | `hmm_engine.py` | Candidate selection, validation gates, measured state statistics, labelling |
 | `model_registry.py` | Versioned JSON artifacts, approval gate |
-| `regime_policy.py` | Regime → exposure band (Phase 6, still stubbed) |
+| `allocation.py` | `AllocationRegime`, `AllocationTarget`, `RegimeAllocationEngine` — volatility-tier classification, confirmation, flicker, confidence scaling |
+| `regime_policy.py` | `RegimePolicy` — allocation tier → configured exposure band (pure lookup) |
+| `baseline_policy.py` | `RollingVolatilityBaseline` — the non-HMM comparison strategy |
 
 **Filtered inference, never smoothed, never Viterbi.** The live regime call is
 `P(state_t | observations_1..t)` and nothing else. Two standard routines
@@ -312,11 +332,11 @@ empirical occupancy, expected duration and self-transition probability —
 computed from the *actual return series* weighted by each state's
 responsibility, not from the standardized feature space, which would be
 uninterpretable. `RegimeLabel` is assigned afterwards by ranking states on
-measured volatility. `RegimePolicy.exposure_for` takes the whole `RegimeState`
-plus the full statistics set, so it can place a state's measured risk
-*relative* to the others rather than switching on a string. A test permutes a
-fitted model's state IDs and asserts every risk-relevant output is unchanged
-session by session while the IDs demonstrably change.
+measured volatility, for reporting only. `RegimeAllocationEngine` (below)
+never reads it — every allocation decision comes from `expected_volatility`
+and `confidence` alone. A test permutes a fitted model's state IDs and
+asserts every risk-relevant output is unchanged session by session while the
+IDs demonstrably change.
 
 **Selection fails closed.** Every (candidate state count × seed) pair is
 fitted, then candidates are rejected for non-convergence, degenerate
@@ -334,6 +354,70 @@ are a handful of states over a handful of features, so there is no size
 argument against it. Saving a model does not make it live: `approve()` is a
 separate step and `load_current_approved()` raises when nothing is approved,
 rather than falling back to the newest fit.
+
+## Regime-aware allocation (Phase 6)
+
+`core/regime/allocation.py` turns a `RegimeState` history into an
+`AllocationTarget` — a gross-exposure band and a point target within it. It
+has no access to any security's price, score, or candidacy; it hands its
+output to `portfolio/portfolio_constructor.py` (Phase 7, still stubbed),
+which is the only place stock-level weights get decided.
+
+**Never `state.label`.** `RegimeAllocationEngine` reads only
+`expected_volatility` and `confidence` from each `RegimeState` — the same
+discipline `hmm_engine.py` already enforces for its own labelling, applied
+one layer up. `volatility_tier` classifies a bare number against two
+configured thresholds (`config.allocation.low_risk_volatility_threshold`,
+`high_risk_volatility_threshold`) into LOW_RISK / NORMAL_RISK / HIGH_RISK;
+it can never return UNCERTAIN, because that category isn't a volatility
+level — it's whether the classification itself should be trusted, which a
+bare number can't answer. A test constructs two otherwise-identical regime
+histories differing only in `RegimeLabel` and asserts identical
+`AllocationTarget`s.
+
+**Confirmation and flicker are pure functions of parallel arrays.**
+`confirmed_tier_sequence` takes a list of raw tiers and confidences (not
+`RegimeState` objects) and returns, position by position, the most recently
+*confirmed* tier — `None` before anything has ever confirmed. A candidate
+tier confirms after `hmm.confirmation_bars` consecutive agreeing
+observations, or in one bar if confidence is at or above
+`allocation.extreme_confidence_threshold` (docs/SPECIFICATION.md section 6,
+"2 consecutive observations unless confidence is extreme"). While a
+transition is unconfirmed, the *previous* confirmed tier is held rather than
+acted on — tested directly by constructing a tier sequence with a dissenting
+observation that reverts before confirming, and checking the confirmed
+sequence never moved. `count_transitions` then measures how often the
+confirmed tier actually changed within the trailing
+`hmm.flicker_window_sessions`; too many changes forces UNCERTAIN regardless
+of what the latest single reading says. Keeping both as pure functions over
+plain arrays (rather than methods needing a fitted model) means the
+confirmation and flicker logic is tested with hand-constructed sequences, not
+only through a full HMM fit.
+
+**Confidence scales continuously within a tier, not just on/off.** Once a
+tier is confirmed and trusted, the final target is
+`band.min + (band.max - band.min) * scale`, where `scale` maps confidence
+linearly from `hmm.min_confidence` (→ 0) to 1.0 (→ 1), clamped to `[0, 1]`.
+`AllocationTarget.__post_init__` re-validates `0 <= min <= max <= 1` and that
+the target sits inside its own band — defense in depth on top of
+`ExposureBand`'s own `Percent` fields, since floating-point arithmetic can
+land a hair outside a mathematically-guaranteed range (`_build` clamps for
+exactly this reason, caught by a property-style test sweeping volatility and
+confidence across their full ranges).
+
+**The baseline is not a toy.** `RollingVolatilityBaseline` exists because
+"the HMM must beat a simpler alternative after costs" is not verifiable
+without the alternative existing as running code
+(docs/SPECIFICATION.md section 10.1, 10.3). It classifies trailing realized
+volatility — using the exact same population-std, `sqrt(252)` annualization
+as `core.features.feature_engineering`'s realized-vol feature, so a
+comparison reflects the classification logic and not a different volatility
+estimator — into the *same* configured bands `RegimeAllocationEngine` uses,
+and returns the identical `AllocationTarget` shape, so a later walk-forward
+comparison (Phase 8/9) can run the same downstream pipeline against either
+one's output. It deliberately cannot express "uncertain" (`confidence` is
+always reported as 1.0, `allow_new_positions` always True) — a documented
+limitation, and itself part of what the HMM has to justify by doing better.
 
 ## Why the module boundaries matter for correctness, not just style
 

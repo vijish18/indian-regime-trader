@@ -13,6 +13,7 @@ required:
   - features
   - hmm
   - regime_policy
+  - allocation
   - universe
   - selection
   - portfolio
@@ -145,12 +146,28 @@ properties:
   regime_policy:
     type: object
     additionalProperties: false
-    required: [calm, normal, elevated, crisis]
+    required: [low_risk, normal_risk, high_risk, uncertain]
     properties:
-      calm: { $ref: "#/definitions/exposure_band" }
-      normal: { $ref: "#/definitions/exposure_band" }
-      elevated: { $ref: "#/definitions/exposure_band" }
-      crisis: { $ref: "#/definitions/exposure_band" }
+      low_risk: { $ref: "#/definitions/exposure_band" }
+      normal_risk: { $ref: "#/definitions/exposure_band" }
+      high_risk: { $ref: "#/definitions/exposure_band" }
+      uncertain: { $ref: "#/definitions/exposure_band" }
+
+  allocation:
+    type: object
+    additionalProperties: false
+    required:
+      - low_risk_volatility_threshold
+      - high_risk_volatility_threshold
+      - extreme_confidence_threshold
+      - max_flicker_transitions
+      - baseline_volatility_window
+    properties:
+      low_risk_volatility_threshold: { type: number, exclusiveMinimum: 0 }
+      high_risk_volatility_threshold: { type: number, exclusiveMinimum: 0 }
+      extreme_confidence_threshold: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_flicker_transitions: { type: integer, minimum: 0 }
+      baseline_volatility_window: { type: integer, minimum: 2 }
 
   universe:
     type: object

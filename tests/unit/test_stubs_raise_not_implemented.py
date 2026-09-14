@@ -12,18 +12,6 @@ import pytest
 from config.loader import load_settings
 
 
-def test_regime_policy_is_unimplemented() -> None:
-    """The HMM engine is implemented (Phase 5), but translating a measured
-    regime into an exposure band is still Phase 6.
-    """
-    from config.loader import load_settings
-    from core.regime.regime_policy import RegimePolicy
-
-    policy = RegimePolicy(load_settings().regime_policy)
-    with pytest.raises(NotImplementedError, match="Phase 6"):
-        policy.exposure_for(state=None, all_states=())  # type: ignore[arg-type]
-
-
 def test_stock_selector_is_unimplemented() -> None:
     from universe.stock_selector import StockSelector
 

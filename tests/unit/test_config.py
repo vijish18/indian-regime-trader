@@ -61,7 +61,7 @@ def test_diversification_validator_rejects_infeasible_holdings(
     valid_settings_dict: dict[str, Any],
 ) -> None:
     """Regression test for the min_holdings x max_single_name_pct vs.
-    calm-regime exposure invariant (see docs/ARCHITECTURE.md, "Resolved
+    low-risk-tier exposure invariant (see docs/ARCHITECTURE.md, "Resolved
     specification ambiguities").
     """
     valid_settings_dict["selection"]["min_holdings"] = 1
@@ -76,9 +76,18 @@ def test_risk_threshold_ordering_enforced(valid_settings_dict: dict[str, Any]) -
 
 
 def test_exposure_band_rejects_min_above_max(valid_settings_dict: dict[str, Any]) -> None:
-    valid_settings_dict["regime_policy"]["calm"]["min_gross_exposure"] = 0.99
-    valid_settings_dict["regime_policy"]["calm"]["max_gross_exposure"] = 0.10
+    valid_settings_dict["regime_policy"]["low_risk"]["min_gross_exposure"] = 0.99
+    valid_settings_dict["regime_policy"]["low_risk"]["max_gross_exposure"] = 0.10
     with pytest.raises(ValidationError):
+        Settings.model_validate(valid_settings_dict)
+
+
+def test_allocation_volatility_thresholds_must_be_ordered(
+    valid_settings_dict: dict[str, Any],
+) -> None:
+    valid_settings_dict["allocation"]["low_risk_volatility_threshold"] = 0.30
+    valid_settings_dict["allocation"]["high_risk_volatility_threshold"] = 0.10
+    with pytest.raises(ValidationError, match="low_risk_volatility_threshold"):
         Settings.model_validate(valid_settings_dict)
 
 

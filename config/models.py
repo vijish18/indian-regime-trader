@@ -160,12 +160,59 @@ class ExposureBand(BaseModel):
 
 
 class RegimePolicyConfig(BaseModel):
+    """Gross-exposure bands per allocation tier
+    (core/regime/allocation.py::AllocationRegime). Named by risk tier
+    (low_risk/normal_risk/high_risk/uncertain), not by the HMM's own
+    calm/normal/elevated/crisis regime labels -- see docs/ARCHITECTURE.md,
+    "Resolved specification ambiguities" (B6), for why these are two
+    deliberately separate vocabularies.
+    """
+
     model_config = {"frozen": True}
 
-    calm: ExposureBand
-    normal: ExposureBand
-    elevated: ExposureBand
-    crisis: ExposureBand
+    low_risk: ExposureBand
+    normal_risk: ExposureBand
+    high_risk: ExposureBand
+    uncertain: ExposureBand
+
+
+class AllocationConfig(BaseModel):
+    """Parameters for core/regime/allocation.py's volatility-tier
+    classification, regime-confirmation, and flicker handling.
+    """
+
+    model_config = {"frozen": True}
+
+    low_risk_volatility_threshold: float = Field(gt=0)
+    """Annualized expected/realized volatility strictly below this is
+    LOW_RISK."""
+
+    high_risk_volatility_threshold: float = Field(gt=0)
+    """Annualized expected/realized volatility at or above this is
+    HIGH_RISK; between the two thresholds is NORMAL_RISK."""
+
+    extreme_confidence_threshold: Percent = Field(gt=0, le=1)
+    """A regime observed at or above this confidence confirms immediately
+    (1 bar) rather than waiting for ``hmm.confirmation_bars`` consecutive
+    observations (docs/SPECIFICATION.md section 6, "unless confidence is
+    extreme")."""
+
+    max_flicker_transitions: int = Field(ge=0)
+    """Confirmed-regime changes tolerated within ``hmm.flicker_window_sessions``
+    before the allocation is forced to UNCERTAIN regardless of the latest
+    call."""
+
+    baseline_volatility_window: int = Field(ge=2)
+    """Trailing sessions used by the non-HMM rolling-volatility baseline
+    (core/regime/baseline_policy.py)."""
+
+    @model_validator(mode="after")
+    def _thresholds_are_ordered(self) -> AllocationConfig:
+        if self.low_risk_volatility_threshold >= self.high_risk_volatility_threshold:
+            raise ValueError(
+                "low_risk_volatility_threshold must be < high_risk_volatility_threshold"
+            )
+        return self
 
 
 class UniverseConfig(BaseModel):
@@ -303,6 +350,7 @@ class Settings(BaseModel):
     features: FeaturesConfig
     hmm: HMMConfig
     regime_policy: RegimePolicyConfig
+    allocation: AllocationConfig
     universe: UniverseConfig
     selection: SelectionConfig
     portfolio: PortfolioConfig
@@ -316,17 +364,19 @@ class Settings(BaseModel):
     monitoring: MonitoringConfig
 
     @model_validator(mode="after")
-    def _diversification_can_reach_calm_exposure(self) -> Settings:
-        """The system must be able to reach the calm-regime exposure ceiling
-        without breaching the single-name cap. See docs/ARCHITECTURE.md,
-        "Resolved specification ambiguities" (B4 in the architecture review).
+    def _diversification_can_reach_low_risk_exposure(self) -> Settings:
+        """The system must be able to reach the low-risk-tier exposure
+        ceiling without breaching the single-name cap. See
+        docs/ARCHITECTURE.md, "Resolved specification ambiguities" (B4 in the
+        architecture review).
         """
         max_reachable = self.selection.min_holdings * self.portfolio.max_single_name_pct
-        if max_reachable < self.regime_policy.calm.max_gross_exposure:
+        ceiling = self.regime_policy.low_risk.max_gross_exposure
+        if max_reachable < ceiling:
             raise ValueError(
                 "selection.min_holdings * portfolio.max_single_name_pct "
-                f"({max_reachable:.2f}) cannot reach regime_policy.calm.max_gross_exposure "
-                f"({self.regime_policy.calm.max_gross_exposure:.2f}); raise min_holdings, "
-                "raise max_single_name_pct, or lower the calm exposure ceiling."
+                f"({max_reachable:.2f}) cannot reach regime_policy.low_risk.max_gross_exposure "
+                f"({ceiling:.2f}); raise min_holdings, raise max_single_name_pct, or lower "
+                "the low_risk exposure ceiling."
             )
         return self

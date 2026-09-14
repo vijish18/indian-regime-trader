@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from config.models import PortfolioConfig
-from core.regime.regime_policy import ExposureTarget
+from core.regime.allocation import AllocationTarget
 from universe.stock_selector import CandidateScore
 
 
@@ -51,7 +51,7 @@ class PortfolioConstructor:
         raise NotImplementedError("Phase 7: portfolio construction is not implemented yet.")
 
     def scale_to_exposure_target(
-        self, capped_weights: dict[str, float], exposure_target: ExposureTarget
+        self, capped_weights: dict[str, float], exposure_target: AllocationTarget
     ) -> list[ProposedWeight]:
         """Scale capped weights so their sum falls within
         ``exposure_target``'s band.
@@ -63,7 +63,7 @@ class PortfolioConstructor:
         candidates: list[CandidateScore],
         volatilities: dict[str, float],
         sector_map: dict[str, str],
-        exposure_target: ExposureTarget,
+        exposure_target: AllocationTarget,
     ) -> list[ProposedWeight]:
         """Full pipeline: raw weights -> caps -> exposure scaling."""
         raise NotImplementedError("Phase 7: portfolio construction is not implemented yet.")

@@ -14,9 +14,9 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-5 complete: configuration, the broker-independent data layer,
-point-in-time universe construction, causal feature engineering, and the HMM
-regime engine.**
+**Phases 1-6 complete: configuration, the broker-independent data layer,
+point-in-time universe construction, causal feature engineering, the HMM
+regime engine, and regime-aware portfolio allocation.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -62,12 +62,33 @@ regime engine.**
   assigned by ranking those measurements and are reporting-only, never a
   decision input. Models persist as versioned JSON artifacts with an explicit
   approval gate.
+- **Regime-aware allocation** (`core/regime/allocation.py`) — turns a
+  `RegimeState` history into an `AllocationTarget` (a gross-exposure band and
+  a point target within it), never a stock pick: `RegimeAllocationEngine` has
+  no access to any security's price, score, or candidacy. Classification uses
+  only `expected_volatility` and `confidence` — never `RegimeLabel` — mapped
+  through two configured volatility thresholds into LOW_RISK / NORMAL_RISK /
+  HIGH_RISK, plus UNCERTAIN when the latest confidence is below
+  `hmm.min_confidence`, when no tier has ever been confirmed yet, or when the
+  confirmed tier has changed too often within the flicker window (all three
+  reasons are pure functions over plain arrays, independently tested). A new
+  tier only takes effect after `hmm.confirmation_bars` consecutive agreeing
+  observations (or one at extreme confidence); until then the previous
+  confirmed tier is held. Within a confirmed tier, the exposure target scales
+  continuously with confidence across the tier's configured band — never a
+  single fixed percentage, and never able to imply leverage (`AllocationTarget`
+  re-validates `0 <= min <= max <= 1`). `core/regime/regime_policy.py` is a
+  pure band lookup; `core/regime/baseline_policy.py`'s
+  `RollingVolatilityBaseline` is the required non-HMM comparison strategy —
+  classifying trailing realized volatility alone, with the same
+  annualization convention and the same configured bands, into the identical
+  `AllocationTarget` shape, so a later walk-forward run can swap one for the
+  other and let docs/SPECIFICATION.md section 10.3's requirement ("HMM beats
+  the simple baseline after costs") actually be checked rather than assumed.
 
-**No selection, portfolio, risk, or execution logic is implemented yet** —
-those modules remain typed stubs that define the interfaces for later phases,
-including translating a regime into an exposure band
-(`core/regime/regime_policy.py`, Phase 6). See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**No stock selection, portfolio, risk, or execution logic is implemented
+yet** — those modules remain typed stubs that define the interfaces for later
+phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather
