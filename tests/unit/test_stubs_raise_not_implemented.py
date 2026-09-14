@@ -12,19 +12,16 @@ import pytest
 from config.loader import load_settings
 
 
-def test_hmm_engine_fit_is_unimplemented() -> None:
-    from core.regime.hmm_engine import HMMRegimeEngine
+def test_regime_policy_is_unimplemented() -> None:
+    """The HMM engine is implemented (Phase 5), but translating a measured
+    regime into an exposure band is still Phase 6.
+    """
+    from config.loader import load_settings
+    from core.regime.regime_policy import RegimePolicy
 
-    engine = HMMRegimeEngine(n_states=3, covariance_type="diag", random_seed=0)
-    with pytest.raises(NotImplementedError, match="Phase 5"):
-        engine.fit(pd.DataFrame())
-
-
-def test_causal_feature_scaler_is_unimplemented() -> None:
-    from core.features.feature_scaler import CausalFeatureScaler
-
-    with pytest.raises(NotImplementedError, match="Phase 5"):
-        CausalFeatureScaler().fit(pd.DataFrame())
+    policy = RegimePolicy(load_settings().regime_policy)
+    with pytest.raises(NotImplementedError, match="Phase 6"):
+        policy.exposure_for(state=None, all_states=())  # type: ignore[arg-type]
 
 
 def test_stock_selector_is_unimplemented() -> None:

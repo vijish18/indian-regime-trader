@@ -62,6 +62,14 @@ hmm:
   confirmation_bars: 2
   flicker_window_sessions: 20
   max_covariance_condition_number: 1000000.0
+  # Every (candidate_states x random_seeds) pair is fitted; the best surviving
+  # candidate is chosen by BIC. Seeds are listed explicitly rather than derived
+  # from a count so a training run is reproducible from config alone.
+  random_seeds: [17, 29, 43, 71, 101]
+  max_iterations: 200
+  convergence_tolerance: 0.0001      # EM stops when the log-likelihood gain is below this
+  covariance_regularization: 0.000001  # ridge added to each covariance diagonal
+  min_state_occupancy: 0.02          # states occupying less than this are degenerate
 
 regime_policy:
   calm:

@@ -118,6 +118,32 @@ class HMMConfig(BaseModel):
     confirmation_bars: int = Field(ge=1)
     flicker_window_sessions: int = Field(ge=1)
     max_covariance_condition_number: float = Field(gt=0)
+    random_seeds: list[int]
+    max_iterations: int = Field(ge=1)
+    convergence_tolerance: float = Field(gt=0)
+    covariance_regularization: float = Field(gt=0)
+    min_state_occupancy: Percent = Field(gt=0, lt=1)
+
+    @model_validator(mode="after")
+    def _selection_inputs_are_usable(self) -> HMMConfig:
+        if not self.candidate_states:
+            raise ValueError("candidate_states must list at least one state count")
+        if min(self.candidate_states) < 2:
+            raise ValueError("candidate_states must all be >= 2; a 1-state HMM has no regimes")
+        if not self.random_seeds:
+            raise ValueError(
+                "random_seeds must list at least one seed; multiple seeds are how "
+                "docs/SPECIFICATION.md section 6.3's stability check is performed"
+            )
+        if len(set(self.random_seeds)) != len(self.random_seeds):
+            raise ValueError(
+                "random_seeds must be distinct; a repeated seed refits the same model"
+            )
+        if self.covariance_type not in ("diag", "full"):
+            raise ValueError(
+                f"covariance_type must be 'diag' or 'full', got {self.covariance_type!r}"
+            )
+        return self
 
 
 class ExposureBand(BaseModel):

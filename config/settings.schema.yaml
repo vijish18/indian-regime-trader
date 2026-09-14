@@ -116,6 +116,11 @@ properties:
       - confirmation_bars
       - flicker_window_sessions
       - max_covariance_condition_number
+      - random_seeds
+      - max_iterations
+      - convergence_tolerance
+      - covariance_regularization
+      - min_state_occupancy
     properties:
       candidate_states:
         type: array
@@ -128,6 +133,14 @@ properties:
       confirmation_bars: { type: integer, minimum: 1 }
       flicker_window_sessions: { type: integer, minimum: 1 }
       max_covariance_condition_number: { type: number, exclusiveMinimum: 0 }
+      random_seeds:
+        type: array
+        items: { type: integer }
+        minItems: 1
+      max_iterations: { type: integer, minimum: 1 }
+      convergence_tolerance: { type: number, exclusiveMinimum: 0 }
+      covariance_regularization: { type: number, exclusiveMinimum: 0 }
+      min_state_occupancy: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
 
   regime_policy:
     type: object

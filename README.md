@@ -14,8 +14,9 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-4 complete: configuration, the broker-independent data layer,
-point-in-time universe construction, and causal feature engineering.**
+**Phases 1-5 complete: configuration, the broker-independent data layer,
+point-in-time universe construction, causal feature engineering, and the HMM
+regime engine.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -49,9 +50,24 @@ point-in-time universe construction, and causal feature engineering.**
   train/freeze/apply feature scaler used for walk-forward fitting
   (`core/features/feature_scaler.py`) remain Phase 5.
 
-**No trading, regime, selection, portfolio, risk, or execution logic is
-implemented yet** — those modules remain typed stubs that define the interfaces
-for later phases (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- **Regime engine** (`core/regime/`) — a Gaussian HMM that classifies market
+  risk state, fitted by Baum-Welch over every (candidate state count × seed)
+  pair and selected by BIC, with candidates rejected for non-convergence,
+  degenerate states or near-singular covariance before selection. Live regime
+  calls use a dedicated forward filter computing `P(state_t | obs_1..t)` —
+  never smoothing, never Viterbi, both of which would let tomorrow's data
+  change today's answer. States are described by *measured* statistics
+  (annualized expected volatility, expected return, downside volatility,
+  occupancy, expected duration, persistence); labels like "crisis" are
+  assigned by ranking those measurements and are reporting-only, never a
+  decision input. Models persist as versioned JSON artifacts with an explicit
+  approval gate.
+
+**No selection, portfolio, risk, or execution logic is implemented yet** —
+those modules remain typed stubs that define the interfaces for later phases,
+including translating a regime into an exposure band
+(`core/regime/regime_policy.py`, Phase 6). See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather

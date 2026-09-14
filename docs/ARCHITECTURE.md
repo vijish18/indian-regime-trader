@@ -124,7 +124,7 @@ yet.")` body — not working logic.
 | 3 | Data ingestion, corporate actions, data quality | **Done** (local files; no vendor/broker feed) |
 | 3b | Point-in-time universe construction (`universe/universe.py`) | **Done** |
 | 4 | Causal feature engineering (`core/features/feature_engineering.py`) | **Done** (feature scaling for walk-forward fitting, `core/features/feature_scaler.py`, is still Phase 5) |
-| 5 | HMM engine, model registry, causal feature scaling | Stubbed |
+| 5 | HMM engine, model registry, causal feature scaling | **Done** |
 | 6 | Regime policy, stock selector | Stubbed |
 | 7 | Portfolio constructor, position sizer, risk manager | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
@@ -271,6 +271,69 @@ entire out-of-sample walk-forward fold — Phase 5, alongside the HMM that
 consumes it). Conflating the two would either bake a train/OOS split into
 every single feature calculation, or lose the continuously-adapting
 normalization that features like the VIX level actually need.
+
+## The regime engine
+
+`core/regime/` answers one question -- *how risky is the market right now* --
+and hands the answer to a risk budget. It never emits buy/sell signals, never
+sees a security, and never learns what the portfolio holds.
+
+The package is split so the most correctness-critical routine can be reviewed
+without strategy context attached:
+
+| Module | Role |
+|---|---|
+| `gaussian_hmm.py` | Pure inference math: parameters, Gaussian emissions, the forward filter, Baum-Welch, BIC/AIC |
+| `hmm_engine.py` | Candidate selection, validation gates, measured state statistics, labelling |
+| `model_registry.py` | Versioned JSON artifacts, approval gate |
+| `regime_policy.py` | Regime → exposure band (Phase 6, still stubbed) |
+
+**Filtered inference, never smoothed, never Viterbi.** The live regime call is
+`P(state_t | observations_1..t)` and nothing else. Two standard routines
+silently answer a different question, and both are easy to reach for:
+forward-backward smoothing (`gamma`, which many libraries expose as
+`predict_proba`) conditions on the *whole* sequence, and Viterbi returns a
+full-sequence most-likely path — appending tomorrow's bar can retroactively
+change which state yesterday was in. `forward_filter` is therefore a dedicated
+implementation built from `filter_step`, whose signature takes only the
+previous belief and one new observation; there is no argument through which
+future data could arrive. Smoothing exists only inside Baum-Welch, named so it
+cannot be mistaken for the live path. Tests assert the property behaviorally
+by appending a wild future observation and checking earlier rows are
+bit-identical, and separately assert that filtered and smoothed posteriors
+actually *differ* — so the filter silently becoming a smoother would fail
+loudly.
+
+**Names are reporting; measurements drive behavior.** A fitted HMM's state IDs
+are arbitrary (refit with another seed and "state 0" moves), and a label like
+"crisis" is a name someone chose, not a measurement. So `StateStatistics`
+carries annualized expected volatility, expected return, downside volatility,
+empirical occupancy, expected duration and self-transition probability —
+computed from the *actual return series* weighted by each state's
+responsibility, not from the standardized feature space, which would be
+uninterpretable. `RegimeLabel` is assigned afterwards by ranking states on
+measured volatility. `RegimePolicy.exposure_for` takes the whole `RegimeState`
+plus the full statistics set, so it can place a state's measured risk
+*relative* to the others rather than switching on a string. A test permutes a
+fitted model's state IDs and asserts every risk-relevant output is unchanged
+session by session while the IDs demonstrably change.
+
+**Selection fails closed.** Every (candidate state count × seed) pair is
+fitted, then candidates are rejected for non-convergence, degenerate
+(near-empty) states, or near-singular covariance before the lowest-BIC
+survivor is chosen. If nothing survives, `fit` raises rather than returning a
+"best effort" model: an unvalidated regime model is worse than none, because
+it would size real positions from noise. Every candidate — accepted or not —
+is retained with its rejection reason so a selection decision can be audited
+later.
+
+**Artifacts are JSON, not pickle.** A model file is loaded by the process that
+places orders, so it must not be able to execute code; it must also be
+readable by a human during an incident, and survive a library upgrade. Models
+are a handful of states over a handful of features, so there is no size
+argument against it. Saving a model does not make it live: `approve()` is a
+separate step and `load_current_approved()` raises when nothing is approved,
+rather than falling back to the newest fit.
 
 ## Why the module boundaries matter for correctness, not just style
 

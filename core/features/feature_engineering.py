@@ -93,6 +93,7 @@ exist. Both are natural follow-ups, not oversights.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -104,7 +105,10 @@ import pandas as pd
 from config.models import FeaturesConfig
 from data.models import IndexObservation
 
-_TRADING_DAYS_PER_YEAR = 252
+TRADING_DAYS_PER_YEAR = 252
+"""Sessions per year, for annualizing daily statistics."""
+
+_TRADING_DAYS_PER_YEAR = TRADING_DAYS_PER_YEAR
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +565,36 @@ class FeaturePipeline:
                     )
                 )
         return snapshots
+
+
+def feature_set_version(definitions: Sequence[FeatureDefinition]) -> str:
+    """A short, stable fingerprint of a feature set.
+
+    Derived from each feature's name and required lookback, so changing a
+    window size or adding a feature changes the version automatically. A model
+    persists the version of the feature set it was trained on
+    (``core/regime/model_registry.py``); if the features are later changed,
+    the mismatch is detectable rather than silently producing a model
+    evaluating inputs it never saw in training.
+    """
+    payload = ";".join(
+        f"{definition.name}:{definition.required_lookback}"
+        for definition in sorted(definitions, key=lambda item: item.name)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def drop_warmup_rows(matrix: pd.DataFrame) -> pd.DataFrame:
+    """Drop the leading warm-up rows where any feature is still NaN.
+
+    Model fitting requires a complete matrix; this makes removing the warm-up
+    an explicit, visible step rather than something a fitter does silently
+    (which would hide how much history a feature set actually costs).
+    """
+    if matrix.empty:
+        return matrix
+    complete = matrix.dropna(how="any")
+    return complete
 
 
 def snapshots_to_frame(snapshots: Sequence[FeatureSnapshot]) -> pd.DataFrame:
