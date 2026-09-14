@@ -14,9 +14,10 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-7 complete: configuration, the broker-independent data layer,
+**Phases 1-8 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
-regime engine, regime-aware portfolio allocation, and stock selection.**
+regime engine, regime-aware portfolio allocation, stock selection, and
+portfolio construction.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -105,9 +106,27 @@ regime engine, regime-aware portfolio allocation, and stock selection.**
   standardization only ever runs over the surviving set (tested directly).
   No fundamentals/quality factor — `data/` has no fundamentals source, and
   the gap is documented rather than faked.
+- **Portfolio construction** (`portfolio/portfolio_constructor.py`) — combines
+  the regime's risk budget (`AllocationTarget`), stock rankings (`StockScore`),
+  and every configured position limit into one `TargetPortfolio`, long-only,
+  cash-equity-only, no leverage. `construct()` runs a fixed waterfall of pure
+  reductions — candidate selection, risk-adjusted raw weights, a correlation
+  penalty between highly-correlated pairs, normalization and scaling to the
+  regime's exact target exposure, then single-name, liquidity, and sector cap
+  enforcement, and finally a minimum-weight floor — each step only ever
+  shrinks a weight, so the pipeline converges in one pass. Weight trimmed by a
+  cap becomes cash; it is never redistributed to another name, which keeps
+  every cap violation degrading toward less risk, never more. `TargetPortfolio`
+  is used structurally for both the target and the current portfolio, and
+  `required_trades()` is a pure diff between the two into BUY/SELL/EXIT/HOLD
+  actions — no order is sized or sent from this module. A defense-in-depth
+  check re-validates the finished portfolio against every configured limit
+  before returning it.
 
-**No portfolio, risk, or execution logic is implemented yet** — those
-modules remain typed stubs that define the interfaces for later phases. See
+**No position sizing, risk veto, or execution logic is implemented yet** —
+`risk/position_sizer.py` and `risk/risk_manager.py` (converting a target
+weight into a final, risk-bounded order quantity) and everything past them
+remain typed stubs that define the interfaces for later phases. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's

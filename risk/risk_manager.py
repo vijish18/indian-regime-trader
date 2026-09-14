@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from config.models import RiskConfig
-from portfolio.portfolio_constructor import ProposedWeight
+from portfolio.portfolio_constructor import TargetPosition
 from risk.circuit_breaker import CircuitBreakerStatus
 from risk.exposure import ExposureSnapshot
 from risk.position_sizer import SizedOrder
@@ -39,7 +39,7 @@ class RiskManager:
 
     def evaluate(
         self,
-        proposed_weights: list[ProposedWeight],
+        proposed_weights: list[TargetPosition],
         current_exposure: ExposureSnapshot,
         circuit_status: CircuitBreakerStatus,
     ) -> list[RiskDecision]:

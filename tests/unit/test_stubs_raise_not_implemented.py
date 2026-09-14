@@ -12,16 +12,16 @@ import pytest
 from config.loader import load_settings
 
 
-def test_portfolio_constructor_is_unimplemented() -> None:
-    """Stock selection is implemented (Phase 7), but turning ranked
-    candidates into target weights is still later work.
+def test_position_sizer_is_unimplemented() -> None:
+    """Portfolio construction (target weights) is implemented; converting a
+    target weight into a final order quantity is still later work.
     """
-    from portfolio.portfolio_constructor import PortfolioConstructor
+    from risk.position_sizer import PositionSizer
 
     settings = load_settings()
-    constructor = PortfolioConstructor(settings.portfolio)
+    sizer = PositionSizer(settings.risk)
     with pytest.raises(NotImplementedError, match="Phase 7"):
-        constructor.raw_weights(candidates=[], volatilities={})
+        sizer.weight_based_quantity(proposed=None, equity=100.0, price=10.0)  # type: ignore[arg-type]
 
 
 def test_risk_manager_is_unimplemented() -> None:

@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from config.models import RiskConfig
-from portfolio.portfolio_constructor import ProposedWeight
+from portfolio.portfolio_constructor import TargetPosition
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class PositionSizer:
     def __init__(self, config: RiskConfig) -> None:
         self.config = config
 
-    def weight_based_quantity(self, proposed: ProposedWeight, equity: float, price: float) -> int:
+    def weight_based_quantity(self, proposed: TargetPosition, equity: float, price: float) -> int:
         """Quantity implied purely by the proposed target weight."""
         raise NotImplementedError("Phase 7: position sizing is not implemented yet.")
 
@@ -55,7 +55,7 @@ class PositionSizer:
 
     def reconcile(
         self,
-        proposed: ProposedWeight,
+        proposed: TargetPosition,
         equity: float,
         price: float,
         stop_distance: float,

@@ -145,7 +145,8 @@ yet.")` body — not working logic.
 | 5 | HMM engine, model registry, causal feature scaling | **Done** |
 | 6 | Regime-aware allocation (`core/regime/allocation.py`, `regime_policy.py`, `baseline_policy.py`) | **Done** |
 | 6b | Stock selection (`universe/stock_selector.py`, `factor_calculator.py`) | **Done** |
-| 7 | Portfolio constructor, position sizer, risk manager | Stubbed |
+| 7 | Portfolio constructor (`portfolio/portfolio_constructor.py`) | **Done** (position sizer, risk manager -- converting a target weight into a final order quantity -- are still Phase 7b) |
+| 7b | Position sizer, risk manager | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
 | 9 | Walk-forward validation, stress testing | Stubbed |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
@@ -481,6 +482,75 @@ for one "when clean, point-in-time fundamental data is available" does not
 yet apply, and this phase deliberately does not fabricate one or build a new
 data pipeline to get there. The gap is documented in
 `universe/factor_calculator.py`'s module docstring, not silently absent.
+
+## Portfolio construction (Phase 7)
+
+`portfolio/portfolio_constructor.py` is where the two upstream decisions
+finally meet: `core.regime.allocation.AllocationTarget` (how much risk the
+regime layer permits, right now) and `universe.stock_selector.StockScore`
+(which names are worth holding, and in what order) combine with
+`config.models.PortfolioConfig`'s position limits into one `TargetPortfolio`
+of `TargetPosition`s. "Market regime" and "risk budget" are the same input
+here, not two — the regime *is* what determines the risk budget in this
+system, so `construct()` takes exactly one `exposure_target: AllocationTarget`
+parameter rather than a separate risk-budget argument. This module produces
+weights only; it never computes an order quantity (`risk/position_sizer.py`,
+Phase 7b) and never touches a broker.
+
+**The weighting waterfall.** `construct()` runs a fixed sequence of pure
+reductions — each step only ever shrinks a weight, never grows one, which is
+what lets the whole pipeline converge in a single pass with no iteration: (1)
+select the top `selection.max_holdings` ranked candidates, restricted to
+currently-held names only when `exposure_target.allow_new_positions` is
+False (the UNCERTAIN regime never opens a new position); (2) compute a raw,
+risk-adjusted weight per candidate, `(score - floor) / volatility`, shifted
+to be strictly positive first since composite scores are cross-sectional
+z-score sums and can be negative; (3) apply a correlation penalty, halving
+the lower-ranked half of any pair of selected candidates whose trailing
+return correlation exceeds `portfolio.max_pairwise_correlation`; (4)
+normalize to sum to 1.0 and scale by `exposure_target.target_gross_exposure`;
+(5) clip against the single-name cap, then the liquidity cap
+(`execution.max_participation_adv_pct` of average daily traded value), then
+the sector cap, in that fixed order; (6) drop anything left below
+`portfolio.min_position_weight_pct` to cash. A final defense-in-depth check
+re-validates the result against every configured limit and raises
+`PortfolioConstructionError` rather than returning a portfolio that quietly
+violates its own configuration.
+
+**Why capped weight is never redistributed.** When a cap trims a position,
+the freed weight becomes cash — it is never handed to another candidate.
+Redistribution would need another pass (a name that absorbs freed weight can
+itself now breach a cap, cascading), and it would mean a single-name or
+liquidity limit indirectly *increases* another position's risk, which is
+backwards for a control meant to reduce it. Clipping to cash instead means
+every cap violation degrades gracefully toward less exposure, never more,
+and the waterfall provably terminates in one pass.
+
+**Target vs. current vs. required trades.** `TargetPortfolio` is used
+structurally for both roles — there is no separate `CurrentPortfolio` type —
+because "what should be held" and "what currently is held" are the same
+shape of fact at two different points in time. `required_trades(target,
+current)` is a module-level function, not a `PortfolioConstructor` method: it
+needs no config and no market data, only the two portfolios being diffed
+into `RequiredTrade`s (BUY/SELL/EXIT/HOLD). No orders are sent from here;
+sizing a `RequiredTrade` into an actual order quantity is `risk/position_sizer.py`'s
+job, one layer down.
+
+**A correlation-data gap degrades, it never crashes.** `_correlation_matrix`
+fetches each candidate's adjusted price history independently and skips (not
+raises) any instrument the market data provider has no data for at all,
+exactly like one with too few overlapping bars — a data gap here must weaken
+the correlation estimate, never take down the whole construction. This
+window is deliberately a separate, independently configured lookback from
+`StockSelector`'s own history check, so the two can legitimately disagree
+about how much history is "enough" for their different purposes.
+
+**What's not here.** No sector taxonomy exists in `data/`, so the sector cap
+takes an optional `sector_map: dict[str, str]` parameter; an instrument with
+no entry defaults to its own `instrument_id` as a singleton sector (the cap
+becomes a no-op for it) rather than fabricating a classification. Converting
+a target weight to a final order quantity, and the independent risk-manager
+veto over that decision, remain Phase 7b.
 
 ## Why the module boundaries matter for correctness, not just style
 

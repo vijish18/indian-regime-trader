@@ -331,6 +331,31 @@ class PortfolioConfig(BaseModel):
 
     max_single_name_pct: Percent = Field(gt=0, le=1)
     max_sector_pct: Percent = Field(gt=0, le=1)
+    min_position_weight_pct: Percent = Field(gt=0, le=1)
+    """A position below this fraction of total equity is dropped rather than
+    held -- not worth the operational overhead of tracking it. Its freed
+    weight becomes cash, not redistributed further (portfolio/portfolio_constructor.py)."""
+
+    max_pairwise_correlation: Percent = Field(gt=0, le=1)
+    correlation_lookback_days: int = Field(ge=2)
+    correlation_penalty_pct: Percent = Field(ge=0, lt=1)
+    """Weight multiplier applied to the lower-ranked member of an
+    over-correlated pair, e.g. 0.5 halves it. Never fully excludes -- this is
+    a penalty, not a veto; risk/risk_manager.py (Phase 7/8) has veto authority."""
+
+    min_correlation_observations: int = Field(ge=2)
+    """Minimum overlapping return observations required to trust a pairwise
+    correlation estimate; below this, the pair's correlation is skipped
+    rather than acted on."""
+
+    @model_validator(mode="after")
+    def _min_weight_below_max_weight(self) -> PortfolioConfig:
+        if self.min_position_weight_pct >= self.max_single_name_pct:
+            raise ValueError(
+                "min_position_weight_pct must be < max_single_name_pct, or every "
+                "position would be simultaneously too small to hold and too large to allow"
+            )
+        return self
 
 
 class RiskConfig(BaseModel):

@@ -129,8 +129,16 @@ selection:
     liquidity: 0.10
 
 portfolio:
+  # See portfolio/portfolio_constructor.py for the exact waterfall these
+  # limits are applied in (single-name -> liquidity -> sector, each a pure
+  # reduction so the order is deterministic and always converges).
   max_single_name_pct: 0.15
   max_sector_pct: 0.30
+  min_position_weight_pct: 0.02        # positions smaller than this become cash instead
+  max_pairwise_correlation: 0.80       # trailing correlation above this triggers a weight penalty
+  correlation_lookback_days: 90
+  correlation_penalty_pct: 0.50        # halves the lower-ranked member of an over-correlated pair
+  min_correlation_observations: 40     # below this, skip the pair rather than act on a noisy estimate
 
 risk:
   max_gross_exposure: 1.00

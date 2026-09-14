@@ -234,10 +234,22 @@ properties:
   portfolio:
     type: object
     additionalProperties: false
-    required: [max_single_name_pct, max_sector_pct]
+    required:
+      - max_single_name_pct
+      - max_sector_pct
+      - min_position_weight_pct
+      - max_pairwise_correlation
+      - correlation_lookback_days
+      - correlation_penalty_pct
+      - min_correlation_observations
     properties:
       max_single_name_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
       max_sector_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      min_position_weight_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      max_pairwise_correlation: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      correlation_lookback_days: { type: integer, minimum: 2 }
+      correlation_penalty_pct: { type: number, minimum: 0, exclusiveMaximum: 1 }
+      min_correlation_observations: { type: integer, minimum: 2 }
 
   risk:
     type: object
