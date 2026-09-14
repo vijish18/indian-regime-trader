@@ -14,8 +14,8 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-3 complete: configuration, the broker-independent data layer, and
-point-in-time universe construction.**
+**Phases 1-4 complete: configuration, the broker-independent data layer,
+point-in-time universe construction, and causal feature engineering.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -35,6 +35,19 @@ point-in-time universe construction.**
   (`universe/stock_selector.py`, still stubbed) — see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the scope boundary and
   documented data limitations.
+- **Feature engineering** (`core/features/feature_engineering.py`) — a
+  deliberately small, fully-documented set of 9 causal market-regime features
+  from NIFTY 50 and India VIX (returns, realized vol, vol ratio, VIX level/
+  change, trend, drawdown, normalized ATR, volume stress). Every rolling
+  computation is a trailing, never-centered window with `min_periods` equal
+  to its declared lookback, so warm-up is NaN rather than a guess, and
+  appending future data never changes an already-computed value (tested
+  directly, not just asserted). `FeaturePipeline.audit()` produces a full
+  provenance trail (`FeatureSnapshot`: name, timestamp, value, source
+  observations, lookback) for every value. This is the HMM's *input*
+  pipeline only — the HMM itself (`core/regime/hmm_engine.py`) and the
+  train/freeze/apply feature scaler used for walk-forward fitting
+  (`core/features/feature_scaler.py`) remain Phase 5.
 
 **No trading, regime, selection, portfolio, risk, or execution logic is
 implemented yet** — those modules remain typed stubs that define the interfaces

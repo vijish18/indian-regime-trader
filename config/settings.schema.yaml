@@ -10,6 +10,7 @@ additionalProperties: false
 required:
   - market
   - data
+  - features
   - hmm
   - regime_policy
   - universe
@@ -78,6 +79,30 @@ properties:
       market_data_max_staleness_minutes: { type: integer, minimum: 1 }
       stale_price_run_sessions: { type: integer, minimum: 2 }
       volume_spike_multiple: { type: number, exclusiveMinimum: 1 }
+
+  features:
+    type: object
+    additionalProperties: false
+    required:
+      - realized_vol_window
+      - vol_ratio_short_window
+      - vol_ratio_long_window
+      - vix_zscore_window
+      - vix_change_window
+      - trend_window
+      - drawdown_window
+      - atr_window
+      - volume_stress_window
+    properties:
+      realized_vol_window: { type: integer, minimum: 2 }
+      vol_ratio_short_window: { type: integer, minimum: 2 }
+      vol_ratio_long_window: { type: integer, minimum: 2 }
+      vix_zscore_window: { type: integer, minimum: 2 }
+      vix_change_window: { type: integer, minimum: 1 }
+      trend_window: { type: integer, minimum: 2 }
+      drawdown_window: { type: integer, minimum: 2 }
+      atr_window: { type: integer, minimum: 2 }
+      volume_stress_window: { type: integer, minimum: 2 }
 
   hmm:
     type: object

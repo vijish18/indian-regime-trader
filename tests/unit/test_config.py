@@ -86,3 +86,13 @@ def test_settings_are_frozen(valid_settings_dict: dict[str, Any]) -> None:
     settings = Settings.model_validate(valid_settings_dict)
     with pytest.raises(ValidationError):
         settings.market.exchange = "BSE"
+
+
+def test_vol_ratio_windows_must_be_ordered(valid_settings_dict: dict[str, Any]) -> None:
+    """A volatility 'ratio' needs two distinct horizons -- see
+    core/features/feature_engineering.py's nifty_vol_ratio_5_20.
+    """
+    valid_settings_dict["features"]["vol_ratio_short_window"] = 20
+    valid_settings_dict["features"]["vol_ratio_long_window"] = 20
+    with pytest.raises(ValidationError, match="vol_ratio_short_window"):
+        Settings.model_validate(valid_settings_dict)

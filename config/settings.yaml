@@ -39,6 +39,20 @@ data:
   stale_price_run_sessions: 5              # identical closes before flagging staleness
   volume_spike_multiple: 20                # x median volume before flagging a spike
 
+features:
+  # Windows for core/features/feature_engineering.py. A deliberately small,
+  # fully-documented feature set -- see that module's docstring for the
+  # economic interpretation and required lookback of each feature.
+  realized_vol_window: 20        # nifty_realized_vol_20d, nifty_vol_ratio_5_20 (long leg)
+  vol_ratio_short_window: 5      # nifty_vol_ratio_5_20 (short leg)
+  vol_ratio_long_window: 20
+  vix_zscore_window: 252         # india_vix_level_z (~1 trading year)
+  vix_change_window: 5           # india_vix_change_5d
+  trend_window: 200              # nifty_trend_200d
+  drawdown_window: 252           # nifty_drawdown_from_high_252d
+  atr_window: 14                 # nifty_atr_normalized_14d
+  volume_stress_window: 20       # nifty_volume_stress_20d (skipped if volume is unavailable)
+
 hmm:
   candidate_states: [3, 4, 5]
   covariance_type: diag              # diagonal default; see docs/ARCHITECTURE.md

@@ -79,6 +79,34 @@ class DataConfig(BaseModel):
     volume_spike_multiple: float = Field(gt=1)
 
 
+class FeaturesConfig(BaseModel):
+    """Rolling-window sizes for the market-regime feature set
+    (core/features/feature_engineering.py). Deliberately few knobs: this is a
+    small, documented feature set by design, not a parameter grid.
+    """
+
+    model_config = {"frozen": True}
+
+    realized_vol_window: int = Field(ge=2)
+    vol_ratio_short_window: int = Field(ge=2)
+    vol_ratio_long_window: int = Field(ge=2)
+    vix_zscore_window: int = Field(ge=2)
+    vix_change_window: int = Field(ge=1)
+    trend_window: int = Field(ge=2)
+    drawdown_window: int = Field(ge=2)
+    atr_window: int = Field(ge=2)
+    volume_stress_window: int = Field(ge=2)
+
+    @model_validator(mode="after")
+    def _vol_ratio_windows_are_ordered(self) -> FeaturesConfig:
+        if self.vol_ratio_short_window >= self.vol_ratio_long_window:
+            raise ValueError(
+                "vol_ratio_short_window must be < vol_ratio_long_window "
+                "(a volatility 'ratio' needs two different horizons)"
+            )
+        return self
+
+
 class HMMConfig(BaseModel):
     model_config = {"frozen": True}
 
@@ -246,6 +274,7 @@ class Settings(BaseModel):
 
     market: MarketConfig
     data: DataConfig
+    features: FeaturesConfig
     hmm: HMMConfig
     regime_policy: RegimePolicyConfig
     universe: UniverseConfig

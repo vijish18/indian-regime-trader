@@ -20,11 +20,11 @@ def test_hmm_engine_fit_is_unimplemented() -> None:
         engine.fit(pd.DataFrame())
 
 
-def test_feature_engineering_is_unimplemented() -> None:
-    from core.features.feature_engineering import FeatureEngineer
+def test_causal_feature_scaler_is_unimplemented() -> None:
+    from core.features.feature_scaler import CausalFeatureScaler
 
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        FeatureEngineer().realized_volatility(pd.Series(dtype=float), window=20)
+    with pytest.raises(NotImplementedError, match="Phase 5"):
+        CausalFeatureScaler().fit(pd.DataFrame())
 
 
 def test_stock_selector_is_unimplemented() -> None:

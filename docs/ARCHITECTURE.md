@@ -123,8 +123,8 @@ yet.")` body — not working logic.
 | 2 | Market calendar, point-in-time instrument master | **Done** |
 | 3 | Data ingestion, corporate actions, data quality | **Done** (local files; no vendor/broker feed) |
 | 3b | Point-in-time universe construction (`universe/universe.py`) | **Done** |
-| 4 | Causal feature engineering + scaling, no-look-ahead tests | Stubbed |
-| 5 | HMM engine, model registry | Stubbed |
+| 4 | Causal feature engineering (`core/features/feature_engineering.py`) | **Done** (feature scaling for walk-forward fitting, `core/features/feature_scaler.py`, is still Phase 5) |
+| 5 | HMM engine, model registry, causal feature scaling | Stubbed |
 | 6 | Regime policy, stock selector | Stubbed |
 | 7 | Portfolio constructor, position sizer, risk manager | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
@@ -220,6 +220,57 @@ master's `status` or a corporate-action record will incorrectly remain
 eligible. Snapshot persistence (so a later data correction cannot retroactively
 change what a past rebalance "saw") is deferred to the storage layer, which is
 not implemented yet.
+
+## Feature engineering
+
+`core/features/feature_engineering.py` computes the market-level inputs to
+the HMM regime engine. The central discipline it enforces: the HMM is a
+market-regime classifier, not a directional stock predictor, so every
+feature is chosen for what it says about *how risky the market is*, not
+*which way it is about to move* — see docs/ARCHITECTURE.md's earlier note
+(B5) on the risk of signed-return features teaching the model direction.
+
+Three mechanisms make the module's causality guarantee structural rather
+than a convention someone has to remember:
+
+- **`MarketFeatureInputs`** aligns NIFTY 50 and India VIX by inner join on
+  session date — a date present in only one series is dropped, not
+  interpolated, so a genuine vendor gap degrades the feature matrix (fewer
+  rows) rather than fabricating a value.
+- **`rolling_standardize`** and every feature's `compute` function use
+  `pandas.Series.rolling(window=W, min_periods=W, center=False)` exclusively
+  — trailing windows only, `min_periods` equal to the declared lookback so
+  warm-up is NaN rather than a guess, and never a centered or expanding/
+  full-history statistic. `tests/unit/test_feature_engineering.py` proves
+  this behaviorally, not just by code inspection: it appends a wild future
+  outlier to a computed series and asserts every prior value is bit-identical.
+- **`FeatureDefinition`** pairs each feature's `compute` function with its
+  own documentation (economic interpretation, calculation, required
+  lookback, and a `known_at_decision_timestamp` flag) as structured data,
+  not a comment that can drift out of sync with the code. `FeaturePipeline.audit()`
+  turns this into a per-value provenance trail (`FeatureSnapshot`: name,
+  timestamp, value, source observations, lookback) derived structurally from
+  each definition's lookback and the row's position in the aligned date
+  index — not hand-maintained per feature.
+
+**Deliberately small and documented, not exhaustive.** Nine features, one per
+bullet in the feature brief, each justified in
+`core/features/feature_engineering.py`'s module docstring. Breadth stress and
+generic overnight-gap/range-expansion features from
+[SPECIFICATION.md section 5](SPECIFICATION.md#5-feature-engineering-for-the-hmm)
+are explicitly deferred (documented, not silently dropped) — breadth needs
+point-in-time index membership joined against every constituent's own price
+history, which is a heavier lift only worth taking once Phase 6 stock-level
+data flows exist.
+
+**Explicit scope boundary:** `rolling_standardize` (a continuously-updating
+trailing z-score, used inside two feature definitions) solves a different
+problem from `core/features/feature_scaler.py`'s `CausalFeatureScaler` (fit
+frozen parameters on one training window, apply them unchanged across an
+entire out-of-sample walk-forward fold — Phase 5, alongside the HMM that
+consumes it). Conflating the two would either bake a train/OOS split into
+every single feature calculation, or lose the continuously-adapting
+normalization that features like the VIX level actually need.
 
 ## Why the module boundaries matter for correctness, not just style
 
