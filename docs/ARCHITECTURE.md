@@ -120,8 +120,8 @@ yet.")` body — not working logic.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Repository, typed/validated configuration, logging, environment handling, test framework | **Done** |
-| 2 | Market calendar, point-in-time instrument master | Stubbed |
-| 3 | Data ingestion, corporate actions, data quality | Stubbed |
+| 2 | Market calendar, point-in-time instrument master | **Done** |
+| 3 | Data ingestion, corporate actions, data quality | **Done** (local files; no vendor/broker feed) |
 | 4 | Causal feature engineering + scaling, no-look-ahead tests | Stubbed |
 | 5 | HMM engine, model registry | Stubbed |
 | 6 | Regime policy, stock selector | Stubbed |
@@ -131,6 +131,48 @@ yet.")` body — not working logic.
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
 | 11 | Position tracking, reconciliation, live operational controls | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
+
+## The data layer (phases 2-3)
+
+`data/` is split into contracts and implementations so nothing above it knows
+where data came from:
+
+| Module | Role |
+|---|---|
+| `data/models.py` | `Instrument`, `DailyBar`, `Quote`, `TradingSession`, `CorporateAction`, `IndexObservation`, `IndexMembership` |
+| `data/interfaces.py` | `MarketDataProvider`, `InstrumentRepository`, `TradingCalendar`, `CorporateActionProvider`, `IndexMembershipProvider` |
+| `data/calendar.py` | `NSETradingCalendar` — holidays, weekends, special sessions |
+| `data/instrument_master.py`, `data/corporate_actions.py`, `data/membership.py` | Point-in-time reference-data implementations |
+| `data/market_data.py` | `LocalMarketDataProvider` — historical bars from files |
+| `data/storage.py` | File layout, CSV/Parquet I/O, exact `Decimal` parsing |
+| `data/data_quality.py`, `data/ingestion.py` | Validation and the validate-then-store pipeline |
+
+Four decisions in this layer are load-bearing:
+
+**Prices are `Decimal`.** Tick-size arithmetic, cost computation and price-band
+checks need exact values; a 0.05 tick is not representable in binary floating
+point. Analytics converts to float at the pandas boundary, never the reverse.
+
+**Adjusted prices are computed as-of a date.** `cumulative_adjustment_factor`
+uses only actions with `price_date < ex_date <= as_of`. The upper bound is the
+look-ahead guard: a walk-forward fold ending on T sees the series as it looked
+on T, so a split announced later cannot retroactively rewrite it.
+
+**The calendar fails closed outside its coverage.** Asking about a year the
+holiday dataset does not cover raises rather than assuming "no holidays" —
+which would turn missing data into wrong data (trading on Republic Day).
+`config/nse_holidays.csv` therefore ships empty and must be populated from
+NSE's published list; fabricating dates would be worse than refusing to run.
+
+**Parsing and validation are separate.** Models represent whatever the vendor
+sent, including impossible bars, so `data_quality` can report them instead of a
+parser silently dropping rows. Validation returns a report rather than raising,
+so one pass surfaces every problem in a file — including dates it could not
+check, which are warnings, not silent passes.
+
+Point-in-time membership (`data/membership.py`) is the survivorship-bias
+control: no constituent list is hardcoded anywhere, so a 2019 backtest sees the
+index as it was in 2019, including companies later deleted.
 
 ## Why the module boundaries matter for correctness, not just style
 

@@ -9,9 +9,49 @@ the system's own architectural constraints (see docs/ARCHITECTURE.md,
 
 from __future__ import annotations
 
+import datetime as dt
+
 from pydantic import BaseModel, Field, model_validator
 
 Percent = float  # semantic alias for a 0..1 fraction; enforced per-field below
+
+
+def _parse_time(field_name: str, value: str) -> dt.time:
+    try:
+        return dt.time.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} {value!r} is not an HH:MM time") from exc
+
+
+class SessionTimesConfig(BaseModel):
+    """Exchange session boundaries as ``HH:MM`` in the market timezone."""
+
+    model_config = {"frozen": True}
+
+    pre_open_start: str
+    pre_open_end: str
+    regular_open: str
+    regular_close: str
+
+    @model_validator(mode="after")
+    def _times_are_ordered(self) -> SessionTimesConfig:
+        times = [
+            _parse_time(name, getattr(self, name))
+            for name in ("pre_open_start", "pre_open_end", "regular_open", "regular_close")
+        ]
+        if not times[0] < times[1] <= times[2] < times[3]:
+            raise ValueError(
+                "session times must satisfy pre_open_start < pre_open_end <= "
+                "regular_open < regular_close"
+            )
+        return self
+
+    def as_times(self) -> dict[str, dt.time]:
+        """Parsed ``datetime.time`` values, keyed by field name."""
+        return {
+            name: _parse_time(name, getattr(self, name))
+            for name in ("pre_open_start", "pre_open_end", "regular_open", "regular_close")
+        }
 
 
 class MarketConfig(BaseModel):
@@ -21,6 +61,7 @@ class MarketConfig(BaseModel):
     timezone: str
     bar_timeframe: str
     execution_delay_sessions: int = Field(ge=1)
+    sessions: SessionTimesConfig
 
 
 class DataConfig(BaseModel):
@@ -28,8 +69,14 @@ class DataConfig(BaseModel):
 
     raw_data_path: str
     normalized_data_path: str
+    reference_data_path: str
+    quarantine_data_path: str
+    calendar_file: str
+    storage_format: str
     instrument_master_max_age_days: int = Field(ge=1)
     market_data_max_staleness_minutes: int = Field(ge=1)
+    stale_price_run_sessions: int = Field(ge=2)
+    volume_spike_multiple: float = Field(gt=1)
 
 
 class HMMConfig(BaseModel):

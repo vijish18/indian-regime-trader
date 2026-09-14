@@ -21,12 +21,23 @@ market:
   timezone: Asia/Kolkata
   bar_timeframe: 1D
   execution_delay_sessions: 1        # decision after session t, execution on t+1
+  sessions:                          # NSE equity segment, Asia/Kolkata
+    pre_open_start: "09:00"
+    pre_open_end: "09:08"
+    regular_open: "09:15"
+    regular_close: "15:30"
 
 data:
-  raw_data_path: data_cache/raw
+  raw_data_path: data_cache/raw            # vendor data as received; never rewritten
   normalized_data_path: data_cache/normalized
+  reference_data_path: data_cache/reference
+  quarantine_data_path: data_cache/quarantine
+  calendar_file: config/nse_holidays.csv   # must be maintained from NSE's published list
+  storage_format: parquet                  # parquet | csv
   instrument_master_max_age_days: 1
   market_data_max_staleness_minutes: 30
+  stale_price_run_sessions: 5              # identical closes before flagging staleness
+  volume_spike_multiple: 20                # x median volume before flagging a spike
 
 hmm:
   candidate_states: [3, 4, 5]

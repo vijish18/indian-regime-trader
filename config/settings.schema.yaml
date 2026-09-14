@@ -37,12 +37,21 @@ properties:
   market:
     type: object
     additionalProperties: false
-    required: [exchange, timezone, bar_timeframe, execution_delay_sessions]
+    required: [exchange, timezone, bar_timeframe, execution_delay_sessions, sessions]
     properties:
       exchange: { type: string, const: NSE }
       timezone: { type: string, const: Asia/Kolkata }
       bar_timeframe: { type: string, enum: [1D] }
       execution_delay_sessions: { type: integer, minimum: 1 }
+      sessions:
+        type: object
+        additionalProperties: false
+        required: [pre_open_start, pre_open_end, regular_open, regular_close]
+        properties:
+          pre_open_start: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+          pre_open_end: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+          regular_open: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+          regular_close: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
 
   data:
     type: object
@@ -50,13 +59,25 @@ properties:
     required:
       - raw_data_path
       - normalized_data_path
+      - reference_data_path
+      - quarantine_data_path
+      - calendar_file
+      - storage_format
       - instrument_master_max_age_days
       - market_data_max_staleness_minutes
+      - stale_price_run_sessions
+      - volume_spike_multiple
     properties:
       raw_data_path: { type: string, minLength: 1 }
       normalized_data_path: { type: string, minLength: 1 }
+      reference_data_path: { type: string, minLength: 1 }
+      quarantine_data_path: { type: string, minLength: 1 }
+      calendar_file: { type: string, minLength: 1 }
+      storage_format: { type: string, enum: [parquet, csv] }
       instrument_master_max_age_days: { type: integer, minimum: 1 }
       market_data_max_staleness_minutes: { type: integer, minimum: 1 }
+      stale_price_run_sessions: { type: integer, minimum: 2 }
+      volume_spike_multiple: { type: number, exclusiveMinimum: 1 }
 
   hmm:
     type: object

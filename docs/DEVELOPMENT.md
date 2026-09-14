@@ -81,6 +81,43 @@ Type hints and docstrings are not optional for a stub — they are the interface
 that the next phase implements against, and what the test suite in that phase will be
 written to.
 
+## Before running anything that touches the calendar
+
+`config/nse_holidays.csv` ships with only a header row. Populate it from NSE's
+published holiday list before running ingestion or a backtest:
+
+```csv
+date,description,session_type
+2026-01-26,Republic Day,closed
+2026-11-08,Muhurat Trading,special
+```
+
+`session_type` defaults to `closed`; use `special` for Muhurat sessions, which
+can fall on a weekend. The calendar treats a year with no entries as "not
+maintained" and refuses to answer for it, rather than assuming the exchange was
+open every weekday — so an unpopulated file fails loudly instead of silently
+backtesting trades on closed days.
+
+## Data file formats
+
+Ingestion accepts CSV or Parquet, chosen by file extension. Required columns:
+
+| Dataset | Required columns |
+|---|---|
+| Equity bars | `instrument_id, session_date, open, high, low, close, volume` |
+| Index observations | `index_symbol, session_date, close` |
+| Instruments | `instrument_id, symbol, exchange, segment, tick_size, price_precision, effective_from` |
+| Corporate actions | `instrument_id, action_type, ex_date` |
+| Index membership | `index_symbol, instrument_id, effective_from` |
+
+Optional columns are documented on each module's `*_COLUMNS` constant. Dates are
+ISO-8601 (`YYYY-MM-DD`); an empty `effective_to` means "still in force".
+
+Split and bonus ratios are **not** interchangeable: a 5-for-1 split is
+`ratio_new=5, ratio_old=1` (price × 1/5), while a 1:1 bonus is `ratio_new=1,
+ratio_old=1` (price × 1/2). Rights, mergers and demergers require an
+`explicit_price_factor` — no factor can be derived from their terms alone.
+
 ## Testing conventions
 
 - `tests/unit/` mirrors the top-level package layout where it's useful (e.g.

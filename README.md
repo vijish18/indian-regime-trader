@@ -14,12 +14,24 @@ before any live capital.
 
 ## Project status
 
-**Phase 1 — Repository & configuration.** This phase creates the repository
-structure, a type-safe/validated configuration system, environment handling, and
-the unit-test framework. **No trading, regime, selection, portfolio, risk, or
-execution logic is implemented yet** — those modules exist as typed stubs that
-define the intended interfaces for later phases (see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the phase plan).
+**Phases 1-3 complete: configuration, and the broker-independent data layer.**
+
+- **Phase 1** — repository structure, type-safe/validated configuration,
+  structured logging, environment handling, unit-test framework.
+- **Phases 2-3** — market calendar, point-in-time instrument master, corporate
+  actions, point-in-time index membership, local CSV/Parquet storage,
+  ingestion, and data-quality validation. Historical data only: there is no
+  broker or vendor connection, and `LocalMarketDataProvider.get_quote` raises
+  by design so a backtest cannot consult a live book.
+
+**No trading, regime, selection, portfolio, risk, or execution logic is
+implemented yet** — those modules remain typed stubs that define the interfaces
+for later phases (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+
+Before running ingestion, populate `config/nse_holidays.csv` from NSE's
+published holiday list — it ships empty and the calendar fails closed rather
+than guessing whether the exchange was open (see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 ## Repository layout
 
@@ -28,7 +40,9 @@ config/       Typed, schema-validated configuration (settings.yaml + loader)
 core/
   regime/     Market-regime detection (HMM engine, regime policy, model registry)
   features/   Feature engineering + causal feature scaling
-data/         Market data ingestion, instrument master, corporate actions, calendar
+data/         Broker-independent market data: interfaces, models, calendar,
+              instrument master, corporate actions, membership, storage,
+              ingestion, validation
 universe/     Point-in-time universe construction + stock selection
 portfolio/    Portfolio construction (target weights) + position sizing
 risk/         Independent risk management with veto authority
