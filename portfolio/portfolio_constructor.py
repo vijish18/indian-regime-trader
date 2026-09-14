@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from config.models import PortfolioConfig
 from core.regime.allocation import AllocationTarget
-from universe.stock_selector import CandidateScore
+from universe.stock_selector import StockScore
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class PortfolioConstructor:
         self.config = config
 
     def raw_weights(
-        self, candidates: list[CandidateScore], volatilities: dict[str, float]
+        self, candidates: list[StockScore], volatilities: dict[str, float]
     ) -> dict[str, float]:
         """``selection_score / volatility`` for each candidate, before caps
         or exposure scaling.
@@ -60,7 +60,7 @@ class PortfolioConstructor:
 
     def construct(
         self,
-        candidates: list[CandidateScore],
+        candidates: list[StockScore],
         volatilities: dict[str, float],
         sector_map: dict[str, str],
         exposure_target: AllocationTarget,

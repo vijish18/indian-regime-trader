@@ -143,7 +143,8 @@ yet.")` body — not working logic.
 | 3b | Point-in-time universe construction (`universe/universe.py`) | **Done** |
 | 4 | Causal feature engineering (`core/features/feature_engineering.py`) | **Done** (feature scaling for walk-forward fitting, `core/features/feature_scaler.py`, is still Phase 5) |
 | 5 | HMM engine, model registry, causal feature scaling | **Done** |
-| 6 | Regime-aware allocation (`core/regime/allocation.py`, `regime_policy.py`, `baseline_policy.py`) | **Done**; stock selector still stubbed |
+| 6 | Regime-aware allocation (`core/regime/allocation.py`, `regime_policy.py`, `baseline_policy.py`) | **Done** |
+| 6b | Stock selection (`universe/stock_selector.py`, `factor_calculator.py`) | **Done** |
 | 7 | Portfolio constructor, position sizer, risk manager | Stubbed |
 | 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
 | 9 | Walk-forward validation, stress testing | Stubbed |
@@ -222,8 +223,8 @@ a gap someone has to notice by its absence.
 
 **Explicit scope boundary:** this module decides *eligibility*, not
 *investability*. Liquidity filtering (`config.universe.min_avg_daily_value_inr`)
-and trend/momentum scoring belong to `universe/stock_selector.py` (Phase 6,
-still stubbed), applied *within* the eligible universe this module returns.
+and trend/momentum scoring belong to `universe/stock_selector.py`, applied
+*within* the eligible universe this module returns.
 Keeping the two separate is what will let a later walk-forward run attribute
 performance to selection vs. eligibility independently, rather than conflating
 "was this a real historical constituent" with "did it pass today's factor
@@ -418,6 +419,68 @@ comparison (Phase 8/9) can run the same downstream pipeline against either
 one's output. It deliberately cannot express "uncertain" (`confidence` is
 always reported as 1.0, `allow_new_positions` always True) — a documented
 limitation, and itself part of what the HMM has to justify by doing better.
+
+## Stock selection (Phase 6b)
+
+`universe/stock_selector.py` decides *which* stocks receive the risk budget
+`core/regime/allocation.py` has already set — it has no access to the current
+regime, exposure target, or any risk state, and it places no orders. For V1
+it is deliberately not a machine-learning model: six transparent,
+individually-interpretable factors (`universe/factor_calculator.py`) combined
+by configured, non-negative weights into one composite score, so every number
+behind a ranking decision can be traced back to the raw price history that
+produced it.
+
+**Six steps, two auditable stages.** `StockSelector.select(as_of)` runs, in
+order: (1) obtain the point-in-time eligible universe
+(`universe.universe.UniverseProvider`), (2) drop instruments with fewer than
+`selection.min_history_days` bars or no local data at all, (3) drop
+instruments below `universe.min_avg_daily_value_inr` average traded value,
+(4) compute factors from adjusted price history ending at `as_of`, (5)
+cross-sectionally standardize each factor *within that date's surviving
+candidate set* and combine by `selection.factor_weights`, (6) return the top
+`selection.max_holdings`. Steps 1-3 are captured as one `CandidateUniverse`
+(mirroring `universe.universe.UniverseSnapshot`'s pattern of recording every
+exclusion with a reason, never silently dropping a name); steps 4-6 produce
+ranked `StockScore`s.
+
+**Why liquidity can safely use adjusted prices.** `data.models.DailyBar.adjusted()`
+scales volume inversely to the price factor specifically so `close * volume`
+(traded value) is invariant under adjustment — a 5-for-1 split scales price by
+1/5 and volume by 5, and the product is unchanged. That single invariant means
+every factor, including the liquidity/traded-value one, can fetch one
+uniformly adjusted bar series instead of juggling raw prices for volume-based
+factors and adjusted prices for everything else — a much easier bug to
+introduce than it looks, since only the *momentum/trend/drawdown* factors are
+obviously wrong on raw prices (a split reads as an 80% crash); a raw-price
+liquidity factor would fail silently, just producing a traded-value number
+that's off by the split ratio.
+
+**Cross-sectional, not temporal, standardization.** `_cross_sectional_zscore`
+compares candidates against *each other* on one date — a different problem
+from `core.features.feature_engineering.rolling_standardize`, which compares
+one instrument against *its own history* over time. Confusing the two would
+either dilute the ranking signal (standardizing against irrelevant history) or
+break the "no future information" guarantee if implemented carelessly across
+dates. Exclusions happen before this step, so an instrument that fails
+liquidity or history checks can never distort the surviving candidates'
+relative scores — checked directly by a test that adds an obviously-illiquid
+extra instrument to the universe and confirms the other candidates' scores
+are bit-identical with and without it.
+
+**Sign convention lives in one place.** Every factor is defined so "higher is
+better" except `volatility`, which is reported as the real annualized number
+(economically meaningful on its own) — the sign flip needed to treat "calmer
+is better" as a ranking input happens exactly once, explicitly, where factors
+are combined (`StockSelector._standardize`), not hidden inside
+`factor_calculator.py`'s arithmetic.
+
+**What's not here.** No fundamentals/quality factor: `data/` has no
+fundamentals data source, so docs/SPECIFICATION.md section 7.1's allowance
+for one "when clean, point-in-time fundamental data is available" does not
+yet apply, and this phase deliberately does not fabricate one or build a new
+data pipeline to get there. The gap is documented in
+`universe/factor_calculator.py`'s module docstring, not silently absent.
 
 ## Why the module boundaries matter for correctness, not just style
 

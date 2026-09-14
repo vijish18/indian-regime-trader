@@ -107,9 +107,26 @@ universe:
   exclude_illiquid: true
 
 selection:
+  # See universe/factor_calculator.py and universe/stock_selector.py for the
+  # exact formula and point-in-time discipline behind each window.
   min_holdings: 7
   max_holdings: 10
-  momentum_lookback_months: [3, 6]
+  momentum_lookback_months: [3, 6]     # short/long horizons for blended risk-adjusted momentum
+  momentum_skip_days: 21               # exclude the most recent ~1 month (avoid short-term reversal)
+  trend_ma_window_days: 50             # moving-average window used inside trend_persistence
+  trend_window_days: 100               # how many trailing sessions are checked against that MA
+  relative_strength_window_days: 126   # ~6 months, vs. NIFTY 50 over the same window
+  volatility_window_days: 63           # ~3 months, annualized realized volatility
+  drawdown_window_days: 252            # ~1 year, distance from the trailing high
+  liquidity_window_days: 20            # average daily traded value (INR)
+  min_history_days: 252                # must cover the longest window above (drawdown, here)
+  factor_weights:
+    momentum: 0.30
+    trend_persistence: 0.15
+    relative_strength: 0.20
+    volatility: 0.15                   # applied to -volatility: calmer stocks score higher
+    drawdown: 0.10
+    liquidity: 0.10
 
 portfolio:
   max_single_name_pct: 0.15

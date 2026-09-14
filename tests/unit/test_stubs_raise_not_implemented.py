@@ -12,13 +12,16 @@ import pytest
 from config.loader import load_settings
 
 
-def test_stock_selector_is_unimplemented() -> None:
-    from universe.stock_selector import StockSelector
+def test_portfolio_constructor_is_unimplemented() -> None:
+    """Stock selection is implemented (Phase 7), but turning ranked
+    candidates into target weights is still later work.
+    """
+    from portfolio.portfolio_constructor import PortfolioConstructor
 
     settings = load_settings()
-    selector = StockSelector(settings.selection)
-    with pytest.raises(NotImplementedError, match="Phase 6"):
-        selector.liquidity_filter(universe=None, as_of=None)  # type: ignore[arg-type]
+    constructor = PortfolioConstructor(settings.portfolio)
+    with pytest.raises(NotImplementedError, match="Phase 7"):
+        constructor.raw_weights(candidates=[], volatilities={})
 
 
 def test_risk_manager_is_unimplemented() -> None:

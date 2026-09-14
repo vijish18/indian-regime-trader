@@ -224,17 +224,105 @@ class UniverseConfig(BaseModel):
     exclude_illiquid: bool
 
 
+class FactorWeights(BaseModel):
+    """Non-negative weights combining
+    ``universe.factor_calculator.FactorSet`` into one composite score
+    (``universe/stock_selector.py``). Every factor is defined so "higher is
+    better"; a weight only needs a sign flip for ``volatility``, and that
+    flip happens once, explicitly, in ``StockSelector`` -- not here.
+    """
+
+    model_config = {"frozen": True}
+
+    momentum: float = Field(ge=0)
+    trend_persistence: float = Field(ge=0)
+    relative_strength: float = Field(ge=0)
+    volatility: float = Field(ge=0)
+    drawdown: float = Field(ge=0)
+    liquidity: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _at_least_one_weight_is_positive(self) -> FactorWeights:
+        if not any(
+            weight > 0
+            for weight in (
+                self.momentum,
+                self.trend_persistence,
+                self.relative_strength,
+                self.volatility,
+                self.drawdown,
+                self.liquidity,
+            )
+        ):
+            raise ValueError(
+                "at least one factor weight must be > 0; an all-zero weight set "
+                "makes every candidate's composite score identical"
+            )
+        return self
+
+
 class SelectionConfig(BaseModel):
     model_config = {"frozen": True}
 
     min_holdings: int = Field(ge=1)
     max_holdings: int = Field(ge=1)
     momentum_lookback_months: list[int]
+    """Exactly two horizons in months, ascending: ``[short, long]``."""
+
+    momentum_skip_days: int = Field(ge=0)
+    """Most recent sessions excluded from momentum, per
+    docs/SPECIFICATION.md section 7.1 ("excluding the most recent short
+    window")."""
+
+    trend_ma_window_days: int = Field(ge=2)
+    trend_window_days: int = Field(ge=2)
+    relative_strength_window_days: int = Field(ge=2)
+    volatility_window_days: int = Field(ge=2)
+    drawdown_window_days: int = Field(ge=2)
+    liquidity_window_days: int = Field(ge=2)
+    min_history_days: int = Field(ge=2)
+    """Minimum trading-day bar count required before an instrument is even
+    considered a candidate (docs/ARCHITECTURE.md's "remove securities with
+    insufficient data" step). Validated below to always cover the longest
+    individual factor window, so "enough data" here can never mean "not
+    enough" to a specific factor."""
+
+    factor_weights: FactorWeights
 
     @model_validator(mode="after")
     def _min_not_above_max(self) -> SelectionConfig:
         if self.min_holdings > self.max_holdings:
             raise ValueError("min_holdings must be <= max_holdings")
+        return self
+
+    @model_validator(mode="after")
+    def _momentum_lookback_is_two_ascending_horizons(self) -> SelectionConfig:
+        if len(self.momentum_lookback_months) != 2:
+            raise ValueError(
+                "momentum_lookback_months must have exactly 2 entries: [short, long] months"
+            )
+        if self.momentum_lookback_months[0] >= self.momentum_lookback_months[1]:
+            raise ValueError("momentum_lookback_months short horizon must be < long horizon")
+        return self
+
+    @model_validator(mode="after")
+    def _min_history_covers_every_factor_window(self) -> SelectionConfig:
+        trading_days_per_month = 21  # approximation, used only to size the history buffer
+        longest_horizon_days = max(self.momentum_lookback_months) * trading_days_per_month
+        longest_needed = max(
+            longest_horizon_days + self.momentum_skip_days,
+            self.trend_window_days + self.trend_ma_window_days,
+            self.relative_strength_window_days,
+            self.volatility_window_days + 1,
+            self.drawdown_window_days,
+            self.liquidity_window_days,
+        )
+        if self.min_history_days < longest_needed:
+            raise ValueError(
+                f"min_history_days ({self.min_history_days}) must be >= the longest "
+                f"individual factor window ({longest_needed}); otherwise a candidate "
+                "judged to have 'enough' history could still fail to compute one factor"
+            )
         return self
 
 

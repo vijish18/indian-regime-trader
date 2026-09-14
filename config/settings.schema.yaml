@@ -27,6 +27,24 @@ required:
   - monitoring
 
 definitions:
+  factor_weights:
+    type: object
+    additionalProperties: false
+    required:
+      - momentum
+      - trend_persistence
+      - relative_strength
+      - volatility
+      - drawdown
+      - liquidity
+    properties:
+      momentum: { type: number, minimum: 0 }
+      trend_persistence: { type: number, minimum: 0 }
+      relative_strength: { type: number, minimum: 0 }
+      volatility: { type: number, minimum: 0 }
+      drawdown: { type: number, minimum: 0 }
+      liquidity: { type: number, minimum: 0 }
+
   exposure_band:
     type: object
     additionalProperties: false
@@ -182,14 +200,36 @@ properties:
   selection:
     type: object
     additionalProperties: false
-    required: [min_holdings, max_holdings, momentum_lookback_months]
+    required:
+      - min_holdings
+      - max_holdings
+      - momentum_lookback_months
+      - momentum_skip_days
+      - trend_ma_window_days
+      - trend_window_days
+      - relative_strength_window_days
+      - volatility_window_days
+      - drawdown_window_days
+      - liquidity_window_days
+      - min_history_days
+      - factor_weights
     properties:
       min_holdings: { type: integer, minimum: 1 }
       max_holdings: { type: integer, minimum: 1 }
       momentum_lookback_months:
         type: array
         items: { type: integer, minimum: 1 }
-        minItems: 1
+        minItems: 2
+        maxItems: 2
+      momentum_skip_days: { type: integer, minimum: 0 }
+      trend_ma_window_days: { type: integer, minimum: 2 }
+      trend_window_days: { type: integer, minimum: 2 }
+      relative_strength_window_days: { type: integer, minimum: 2 }
+      volatility_window_days: { type: integer, minimum: 2 }
+      drawdown_window_days: { type: integer, minimum: 2 }
+      liquidity_window_days: { type: integer, minimum: 2 }
+      min_history_days: { type: integer, minimum: 2 }
+      factor_weights: { $ref: "#/definitions/factor_weights" }
 
   portfolio:
     type: object

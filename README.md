@@ -14,9 +14,9 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-6 complete: configuration, the broker-independent data layer,
+**Phases 1-7 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
-regime engine, and regime-aware portfolio allocation.**
+regime engine, regime-aware portfolio allocation, and stock selection.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -32,8 +32,8 @@ regime engine, and regime-aware portfolio allocation.**
   to a completed merger/demerger/delisting on that exact date — the primary
   survivorship-bias control described in `docs/SPECIFICATION.md` section 2.1.
   Every exclusion is recorded with a reason rather than silently dropped.
-  Liquidity/trend/momentum filtering is a separate, later concern
-  (`universe/stock_selector.py`, still stubbed) — see
+  Liquidity/trend/momentum filtering is a separate concern
+  (`universe/stock_selector.py`, see below) — see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the scope boundary and
   documented data limitations.
 - **Feature engineering** (`core/features/feature_engineering.py`) — a
@@ -85,10 +85,30 @@ regime engine, and regime-aware portfolio allocation.**
   `AllocationTarget` shape, so a later walk-forward run can swap one for the
   other and let docs/SPECIFICATION.md section 10.3's requirement ("HMM beats
   the simple baseline after costs") actually be checked rather than assumed.
+- **Stock selection** (`universe/stock_selector.py`,
+  `universe/factor_calculator.py`) — decides *which* stocks receive the risk
+  budget the regime layer has already set; `StockSelector` has no access to
+  the current regime, exposure target, or any risk state, and places no
+  orders. Not a machine-learning model: six transparent factors (medium-term
+  momentum, trend persistence, relative strength vs. NIFTY 50, volatility,
+  drawdown, liquidity) combined by configured, non-negative weights into one
+  composite score. Every factor is computed from adjusted price history
+  ending exactly at the decision date (`price_basis=ADJUSTED`, per
+  `data.interfaces.MarketDataProvider`'s own point-in-time contract), and
+  standardized *cross-sectionally* — against the other candidates on that
+  date, never against its own history over time, which is a different
+  computation entirely
+  (`core.features.feature_engineering.rolling_standardize`). Instruments
+  with insufficient price history or below-threshold liquidity are excluded
+  with a recorded reason before ranking, never silently dropped or included
+  by default; excluding one candidate never perturbs another's score, since
+  standardization only ever runs over the surviving set (tested directly).
+  No fundamentals/quality factor — `data/` has no fundamentals source, and
+  the gap is documented rather than faked.
 
-**No stock selection, portfolio, risk, or execution logic is implemented
-yet** — those modules remain typed stubs that define the interfaces for later
-phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**No portfolio, risk, or execution logic is implemented yet** — those
+modules remain typed stubs that define the interfaces for later phases. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather

@@ -7,6 +7,18 @@ measure the regime layer's incremental value in isolation
 (docs/SPECIFICATION.md section 1.2, "IMPORTANT").
 """
 
+from universe.factor_calculator import (
+    FactorCalculator,
+    FactorSet,
+    InsufficientFactorHistoryError,
+)
+from universe.stock_selector import (
+    CandidateUniverse,
+    SelectionExclusion,
+    SelectionExclusionReason,
+    StockScore,
+    StockSelector,
+)
 from universe.universe import (
     ConstituentSnapshot,
     ExclusionReason,
@@ -16,8 +28,16 @@ from universe.universe import (
 )
 
 __all__ = [
+    "CandidateUniverse",
     "ConstituentSnapshot",
     "ExclusionReason",
+    "FactorCalculator",
+    "FactorSet",
+    "InsufficientFactorHistoryError",
+    "SelectionExclusion",
+    "SelectionExclusionReason",
+    "StockScore",
+    "StockSelector",
     "UniverseExclusion",
     "UniverseProvider",
     "UniverseSnapshot",

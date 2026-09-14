@@ -39,6 +39,7 @@ MODULES = [
     "universe",
     "universe.universe",
     "universe.stock_selector",
+    "universe.factor_calculator",
     "portfolio",
     "portfolio.portfolio_constructor",
     "risk",
