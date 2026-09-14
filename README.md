@@ -14,10 +14,11 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-9 complete: configuration, the broker-independent data layer,
+**Phases 1-10 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
-construction, and independent risk management.**
+construction, independent risk management, and the Indian transaction-cost
+model.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -141,11 +142,34 @@ construction, and independent risk management.**
   explicit, separately logged `manual_reset()` — never automatically. Every
   circuit-breaker transition and every risk rejection is logged with a
   structured reason.
+- **Indian transaction-cost model** (`backtest/costs.py`,
+  `backtest/cost_schedule.py`) — models brokerage, STT, exchange
+  transaction charges, SEBI turnover fee, GST, stamp duty, DP charges, and
+  slippage/spread/impact *separately*, never as one generic commission
+  number. Rates are versioned data (`config/cost_schedules.yaml`), never a
+  Python constant: each dated `CostSchedule` is selected by
+  `CostScheduleRepository.schedule_as_of(trade_date)`, the same
+  point-in-time pattern corporate actions and the HMM model registry use,
+  so a rate change is added as a new dated entry rather than edited in
+  place, and a trade date before the earliest known schedule fails closed
+  (`MissingCostScheduleError`) instead of guessing. `TradeCost` is the
+  fully deterministic brokerage + statutory breakdown for one trade leg;
+  `ExecutionCostEstimate` adds the *estimated* slippage on top (the section
+  9.1 research model: `max(min_bps, 0.5 * spread_bps + impact_bps(...))`).
+  Every cost line item is tagged `DETERMINISTIC` / `BROKER_DEPENDENT` /
+  `EXCHANGE_DEPENDENT` / `ESTIMATED` via `TradeCost.CATEGORY`, so which
+  costs are which is a queryable class attribute, not just documentation.
+  Every charge rounds to the nearest paisa (half-up, not Python's
+  banker's-rounding default) before being summed, so a displayed total
+  always exactly matches the sum of its displayed line items. STT applies
+  on both legs for delivery equity, stamp duty on the buy leg only, and DP
+  charges on the sell leg only — modeled per leg, never averaged.
 
-**No position sizing or execution logic is implemented yet** —
-`risk/position_sizer.py` (converting an approved target weight into a
-final, risk-bounded order quantity) and everything past it remain typed
-stubs that define the interfaces for later phases. See
+**No position sizing, backtest engine, or execution logic is implemented
+yet** — `risk/position_sizer.py` (converting an approved target weight
+into a final, risk-bounded order quantity), `backtest/engine.py`, and
+everything past them remain typed stubs that define the interfaces for
+later phases. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's

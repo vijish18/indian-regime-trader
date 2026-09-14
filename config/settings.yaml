@@ -184,16 +184,15 @@ backtest:
   include_indian_costs: true
   include_slippage: true
   point_in_time_universe: true
+  slippage_min_bps: 5.0              # floor so a tight-spread, liquid trade still carries a
+                                      # realistic minimum slippage estimate (section 9.1)
+  slippage_impact_coefficient: 50.0  # see backtest/costs.py's square-root impact model
 
+# See backtest/cost_schedule.py -- rates are versioned data, not settings
+# here, because NSE/SEBI/CDSL publish and revise them independently of this
+# repository's release cycle.
 costs:
-  brokerage_flat_inr: 0.0
-  brokerage_pct: 0.0
-  stt_delivery_pct: 0.001
-  exchange_txn_pct: 0.0000345
-  sebi_turnover_pct: 0.0000010
-  gst_pct: 0.18
-  stamp_duty_pct: 0.00015
-  dp_charges_inr: 15.93
+  schedule_file: config/cost_schedules.yaml
 
 database:
   url_env_var: DATABASE_URL

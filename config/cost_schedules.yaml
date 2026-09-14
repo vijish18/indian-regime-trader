@@ -1,0 +1,69 @@
+# Versioned Indian cash-equity (NSE, delivery/CNC) cost schedule.
+#
+# See backtest/cost_schedule.py for how this is loaded and queried.
+# CostScheduleRepository selects, for a given trade date, the entry whose
+# effective_from is the most recent one on or before that date -- so a
+# backtest run over history always prices each trade with the rates that
+# were actually in force on that trade's own date, never today's rates
+# applied retroactively.
+#
+# Add a new dated entry when NSE, SEBI, or CDSL/NSDL revise a rate. Do NOT
+# edit an existing entry's rates in place -- that would silently reprice
+# every past backtest that used it, the same reproducibility guarantee
+# core/regime/model_registry.py gives fitted models.
+#
+# The rates below are illustrative approximations of typical NSE
+# cash-equity delivery (CNC) costs -- STT/GST/SEBI-fee structure as
+# commonly published, paired with a representative zero-brokerage
+# discount-broker plan. They are NOT a substitute for the current
+# NSE/SEBI/CDSL circulars or your actual broker's rate card; verify before
+# using this for anything beyond research backtests.
+schedules:
+  - effective_from: "2019-01-01"
+    label: "Illustrative NSE delivery (CNC) cash-equity rates"
+    source: >-
+      Illustrative approximation, not a specific circular. STT/GST/SEBI-fee
+      shape follows publicly documented delivery-equity rules; brokerage
+      reflects a zero-brokerage discount-broker delivery plan. Verify
+      against current NSE/SEBI/CDSL circulars before live/paper use.
+
+    # Brokerage: broker-dependent. Zero here reflects the now-common
+    # zero-brokerage delivery plan several Indian discount brokers offer;
+    # override per broker.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+
+    # STT (Securities Transaction Tax): deterministic, set by the Finance
+    # Ministry. Delivery equity is charged on BOTH legs (unlike intraday,
+    # which is sell-side only) -- this system is delivery-only, so both
+    # apply.
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+
+    # NSE transaction charges: exchange-dependent (BSE's differ).
+    exchange_txn_pct: 0.0000345
+
+    # SEBI turnover fee: deterministic, regulator-set, same both legs.
+    sebi_turnover_pct: 0.0000010
+
+    # GST: deterministic 18% central rate, applied only to brokerage +
+    # exchange transaction charges + SEBI turnover fee -- NOT to STT or
+    # stamp duty, which are themselves taxes/duties rather than a taxable
+    # service charge.
+    gst_pct: 0.18
+
+    # Stamp duty: deterministic since the Finance Act 2019 unified,
+    # exchange-collected regime (in force since 2020-07-01) -- charged on
+    # the BUY leg only, uniformly, regardless of the buyer's state.
+    stamp_duty_buy_pct: 0.00015
+    stamp_duty_sell_pct: 0.0
+
+    # DP (Depository Participant) charges: broker-dependent (levied by the
+    # broker's own DP arm; rates vary materially between brokers). A flat
+    # per-scrip, per-sell-day charge -- applies only when securities leave
+    # the demat account, i.e. on the SELL leg, regardless of quantity.
+    dp_charges_inr: 15.93
+
+    # Placeholder for any future statutory charge not itemized above.
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0

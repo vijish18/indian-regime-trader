@@ -149,7 +149,8 @@ yet.")` body — not working logic.
 | 7 | Portfolio constructor (`portfolio/portfolio_constructor.py`) | **Done** (position sizer -- converting an approved target weight into a final order quantity -- is still Phase 7c) |
 | 7b | Independent risk management (`risk/risk_manager.py`, `risk/circuit_breaker.py`, `risk/portfolio_risk_state.py`) | **Done** |
 | 7c | Position sizer (`risk/position_sizer.py`) | Stubbed |
-| 8 | Backtest engine, Indian cost/slippage model, performance metrics | Stubbed |
+| 8 | Indian transaction-cost and execution-cost model (`backtest/costs.py`, `backtest/cost_schedule.py`) | **Done** |
+| 8b | Backtest engine, performance metrics | Stubbed |
 | 9 | Walk-forward validation, stress testing | Stubbed |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
 | 11 | Position tracking, reconciliation, live operational controls | Stubbed |
@@ -638,6 +639,82 @@ triggering metric recovers, since it was never a "critical" halt to begin
 with. Every transition, and every manual reset, is logged through
 `monitoring/logger.py` with structured `extra_fields` (`event`,
 `previous_state`, `new_state`, `triggered_by`, `reason`).
+
+## Indian transaction-cost model (Phase 8)
+
+`backtest/cost_schedule.py` and `backtest/costs.py` are what
+docs/SPECIFICATION.md section 9 means by "do this before trusting any
+backtest": a zero-commission or single-flat-fee assumption silently
+flatters every Indian delivery-equity strategy, since CNC trading carries
+several independent statutory charges on top of brokerage, each set by a
+different authority on its own schedule.
+
+**Rates are versioned data, never a Python constant.** NSE, SEBI, and
+CDSL/NSDL publish and revise their own levies independently of this
+repository's release cycle, so `config/cost_schedules.yaml` -- not
+`config/settings.yaml`, and definitely not code -- is the single source of
+truth for brokerage/STT/exchange/SEBI/GST/stamp-duty/DP rates. Each entry
+is a dated `CostSchedule`; `CostScheduleRepository.schedule_as_of(trade_date)`
+selects the most recent entry on or before that date, the same
+point-in-time pattern `data/corporate_actions.py` and
+`core/regime/model_registry.py` already use for their own versioned
+records. A rate change is *added* as a new dated entry, never edited into
+an existing one -- editing in place would silently reprice every backtest
+that already ran against it. A trade date earlier than the earliest known
+schedule raises `MissingCostScheduleError` rather than guessing with the
+oldest (or newest) rates on file.
+
+**Deterministic vs. estimated, made machine-readable.** `TradeCost` is the
+fully deterministic side -- brokerage plus every statutory levy, computed
+from a `CostSchedule` and the trade's own quantity/price/side, bit-for-bit
+reproducible given the same inputs. `ExecutionCostEstimate` adds the
+estimated side on top: slippage, from the section 9.1 research model
+(`max(min_bps, 0.5 * spread_bps + impact_bps(...))`), where `impact_bps`
+uses a square-root participation model
+(`impact_coefficient * volatility * sqrt(order_value / avg_daily_value)`).
+`CostCategory` (`DETERMINISTIC` / `BROKER_DEPENDENT` / `EXCHANGE_DEPENDENT`
+/ `ESTIMATED`) tags every `TradeCost` line item via
+`TradeCost.CATEGORY`, so "which costs are deterministic, broker-dependent,
+exchange-dependent, or estimated" is a queryable class attribute
+(`TradeCost.components_by_category()`), not something only a docstring
+claims. STT/SEBI fee/GST/stamp duty are `DETERMINISTIC` (uniform, set by
+law, same regardless of broker or exchange); brokerage and DP charges are
+`BROKER_DEPENDENT` (DP charges are levied by the Depository Participant,
+typically the broker's own DP arm); exchange transaction charges are
+`EXCHANGE_DEPENDENT` (NSE and BSE rates differ); slippage is `ESTIMATED` --
+never a charged amount, this system's best guess at market impact.
+
+**Side-dependent charges are modeled per leg, not averaged.** Delivery
+(CNC) equity STT applies on *both* the buy and sell leg (unlike intraday,
+which is sell-side only) -- this system is delivery-only long-only, so
+both legs apply, and `CostSchedule` carries `stt_buy_pct`/`stt_sell_pct`
+separately since the regulatory history has not always been symmetric.
+Stamp duty, under the Finance Act 2019's unified exchange-collected regime,
+applies on the buy leg only; DP charges apply on the sell leg only, since
+they are levied only when securities actually leave the demat account.
+GST applies to brokerage + exchange transaction charges + SEBI turnover
+fee only -- never to STT or stamp duty, which are themselves taxes/duties
+rather than a taxable service charge.
+
+**Rounding matches a real contract note.** Every individual charge is
+rounded to the nearest paisa (`ROUND_HALF_UP`, not Python's banker's-rounding
+default) *before* being summed, and GST is computed on the already-rounded
+brokerage/exchange/SEBI figures. This guarantees the displayed total is
+always exactly the sum of the displayed line items -- computing GST or the
+total from unrounded intermediates can silently produce a total that
+doesn't match its own breakdown by a paisa.
+
+**What's not here.** `net_pnl()` and `cost_pct_of_turnover()` are the only
+arithmetic this module provides toward docs/SPECIFICATION.md's "backtests
+must report gross P&L, costs, net P&L, cost as % of turnover" requirement
+-- pairing buy and sell legs into a gross P&L in the first place needs
+position tracking across time, which is the (still-stubbed) backtest
+engine's job (Phase 8b), not this module's. The rates shipped in
+`config/cost_schedules.yaml` are illustrative approximations assembled from
+publicly documented STT/GST/SEBI-fee rules and a representative
+zero-brokerage discount-broker plan -- verify against the current
+NSE/SEBI/CDSL circulars and your actual broker's rate card before using
+this for anything beyond research backtests.
 
 ## Why the module boundaries matter for correctness, not just style
 

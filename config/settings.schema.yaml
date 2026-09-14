@@ -329,6 +329,8 @@ properties:
       - include_indian_costs
       - include_slippage
       - point_in_time_universe
+      - slippage_min_bps
+      - slippage_impact_coefficient
     properties:
       training_window_sessions: { type: integer, minimum: 1 }
       test_window_sessions: { type: integer, minimum: 1 }
@@ -336,28 +338,16 @@ properties:
       include_indian_costs: { type: boolean, const: true }
       include_slippage: { type: boolean, const: true }
       point_in_time_universe: { type: boolean, const: true }
+      slippage_min_bps: { type: number, minimum: 0 }
+      slippage_impact_coefficient: { type: number, minimum: 0 }
 
   costs:
     type: object
     additionalProperties: false
     required:
-      - brokerage_flat_inr
-      - brokerage_pct
-      - stt_delivery_pct
-      - exchange_txn_pct
-      - sebi_turnover_pct
-      - gst_pct
-      - stamp_duty_pct
-      - dp_charges_inr
+      - schedule_file
     properties:
-      brokerage_flat_inr: { type: number, minimum: 0 }
-      brokerage_pct: { type: number, minimum: 0 }
-      stt_delivery_pct: { type: number, minimum: 0 }
-      exchange_txn_pct: { type: number, minimum: 0 }
-      sebi_turnover_pct: { type: number, minimum: 0 }
-      gst_pct: { type: number, minimum: 0 }
-      stamp_duty_pct: { type: number, minimum: 0 }
-      dp_charges_inr: { type: number, minimum: 0 }
+      schedule_file: { type: string, minLength: 1 }
 
   database:
     type: object

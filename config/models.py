@@ -439,19 +439,26 @@ class BacktestConfig(BaseModel):
     include_indian_costs: bool
     include_slippage: bool
     point_in_time_universe: bool
+    slippage_min_bps: float = Field(ge=0)
+    """The research slippage model's floor (docs/SPECIFICATION.md section
+    9.1's ``min_bps``) -- a tunable estimation-model parameter, not a
+    regulatory rate, so unlike ``CostsConfig`` it needs no effective date."""
+    slippage_impact_coefficient: float = Field(ge=0)
+    """Scales the square-root price-impact term in
+    ``backtest.costs.CostModel.estimate_slippage_bps`` -- also a model
+    parameter, not a statutory rate."""
 
 
 class CostsConfig(BaseModel):
     model_config = {"frozen": True}
 
-    brokerage_flat_inr: float = Field(ge=0)
-    brokerage_pct: float = Field(ge=0)
-    stt_delivery_pct: float = Field(ge=0)
-    exchange_txn_pct: float = Field(ge=0)
-    sebi_turnover_pct: float = Field(ge=0)
-    gst_pct: float = Field(ge=0)
-    stamp_duty_pct: float = Field(ge=0)
-    dp_charges_inr: float = Field(ge=0)
+    schedule_file: str
+    """Path (relative to the project root) to the versioned cost-schedule
+    data file (see ``backtest/cost_schedule.py``). Rates are never
+    hardcoded in Python -- this file is the single source of truth for
+    brokerage/STT/exchange/SEBI/GST/stamp-duty/DP rates, and it grows a new
+    dated entry whenever NSE/SEBI/CDSL publish revised levies; an existing
+    entry is never edited in place."""
 
 
 class DatabaseConfig(BaseModel):

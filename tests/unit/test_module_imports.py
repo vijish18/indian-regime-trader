@@ -60,6 +60,7 @@ MODULES = [
     "backtest",
     "backtest.engine",
     "backtest.costs",
+    "backtest.cost_schedule",
     "backtest.performance",
     "backtest.walk_forward",
     "backtest.stress_test",
