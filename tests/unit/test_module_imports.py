@@ -94,6 +94,8 @@ MODULES = [
     "monitoring.alerts",
     "monitoring.health",
     "monitoring.dashboard",
+    "monitoring.snapshot",
+    "monitoring.terminal_dashboard",
     "storage",
     "storage.models",
     "storage.database",

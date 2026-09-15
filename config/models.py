@@ -642,6 +642,12 @@ class MonitoringConfig(BaseModel):
 
     heartbeat_interval_seconds: int = Field(ge=1)
     alert_channels: list[str]
+    alert_cooldown_seconds: int = Field(ge=1)
+    """Minimum gap between two alerts of the same kind about the same
+    subject (``monitoring.alerts.AlertManager``'s rate limit). A condition
+    that stays true -- a broker that stays disconnected -- must not
+    generate one alert per monitoring-loop iteration, or the alerts that
+    matter drown in the ones that are already known."""
 
 
 class Settings(BaseModel):

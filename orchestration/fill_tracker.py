@@ -28,6 +28,7 @@ class FillTracker:
     def __init__(self, position_tracker: PositionTracker) -> None:
         self.position_tracker = position_tracker
         self._applied_fill_ids: set[str] = set()
+        self._cumulative_cash_flow = 0.0
 
     def poll(self, broker: Broker) -> list[BrokerFill]:
         """Fetches every fill the broker currently reports, applies the
@@ -40,8 +41,21 @@ class FillTracker:
             self.position_tracker.apply_fill(
                 fill.instrument_id, fill.quantity, fill.price, side, fill.as_of
             )
+            notional = fill.quantity * fill.price
+            self._cumulative_cash_flow += -notional if side is TradeSide.BUY else notional
             self._applied_fill_ids.add(fill.trade_id)
         return new_fills
+
+    def cumulative_cash_flow(self) -> float:
+        """Net cash every fill applied so far should have moved -- sells
+        positive, buys negative. **Gross of costs**: brokerage, taxes and
+        slippage are priced by ``backtest.costs.CostModel`` at fill time
+        and are not visible in a ``BrokerFill``, so this runs slightly
+        ahead of the account's real cash. Its consumer
+        (``monitoring.alerts``' unexpected-cash check) therefore compares
+        it within a tolerance, never for equality.
+        """
+        return self._cumulative_cash_flow
 
     def seen_fill_ids(self) -> set[str]:
         return set(self._applied_fill_ids)

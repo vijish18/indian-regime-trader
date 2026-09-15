@@ -249,4 +249,5 @@ logging:
 
 monitoring:
   heartbeat_interval_seconds: 60
-  alert_channels: []
+  alert_channels: []            # additional delivery channels; alerts are always logged
+  alert_cooldown_seconds: 300   # same alert, same subject: at most once per 5 minutes

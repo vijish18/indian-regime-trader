@@ -191,7 +191,8 @@ yet.")` body — not working logic.
 | 11b | Position/cash reconciliation (`execution/reconciliation.py`) | **Done** |
 | 11c | Restart recovery and broker reconciliation sequence (`execution/system_state.py`, `execution/startup.py`) | **Done** |
 | 11d | Application lifecycle and daily workflow (`orchestration/`, `risk/risk_state_builder.py`, `monitoring/health.py`) | **Done** |
-| 12 | Alerts, dashboard, production go-live gate (`monitoring/alerts.py`, `monitoring/dashboard.py`) | Stubbed (health checks, `monitoring/health.py`, were implemented in 11d) |
+| 12 | Monitoring: terminal dashboard and alerts (`monitoring/snapshot.py`, `monitoring/terminal_dashboard.py`, `monitoring/alerts.py`) | **Done** |
+| 12b | Operational analytics dashboard, production go-live gate (`monitoring/dashboard.py`) | Stubbed |
 
 ## The data layer (phases 2-3)
 
@@ -1757,6 +1758,112 @@ missing model, stale model metadata, a config failure, a tripped breaker.
 The rest cover the ongoing loop (degrade, self-heal, halt, persist every
 iteration) and shutdown (handlers installed and restored, the loop ends on
 request, positions untouched by default and closed only when configured).
+
+## Monitoring: the terminal dashboard and alerts (Phase 12)
+
+Phase 11d gave the system a lifecycle; this phase gives it a face. Two
+consumers, one source of truth: `monitoring/snapshot.py` gathers the
+numbers once into a `MonitoringSnapshot`, and both the dashboard and the
+alert rules read only that.
+
+**Why the snapshot exists at all, rather than each consumer querying for
+itself.** If the dashboard asked the broker for cash and the alert rules
+asked again a moment later, an operator could be looking at a screen that
+says one thing while an alert fires about another — and the resulting
+"the dashboard was fine" argument would be unfalsifiable. Collecting once
+makes what is displayed and what is alerted on provably the same reading.
+It also makes both testable: `render_dashboard` is a pure function from
+snapshot to string, and `evaluate_alerts` a pure function from one or two
+snapshots to a list of alerts, so every field and every condition is
+asserted directly rather than simulated.
+
+**The dashboard renders; it does not compute.** No query, no state, no
+arithmetic beyond presentation. It is plain ASCII at a fixed 80 columns,
+with no colour, no cursor control and no terminal library, because it has
+to be readable over ssh, in a Windows console and in a CI log — a
+monitoring surface that itself fails to render is worse than none. A test
+asserts every line is exactly the frame width at four different widths,
+so a long value can never break the layout.
+
+Two layout decisions came out of writing the tests rather than being
+designed up front. An overlong value is clipped with an ellipsis — and
+clipping is why the circuit-breaker line puts `MANUAL RESET REQUIRED`
+*before* the trip reason: the first version appended it, and the one piece
+of information telling an operator to do something was the piece that
+disappeared. The free-text trip reason then moved to a continuation row of
+its own, because it is the only unbounded field on the screen and it was
+otherwise competing for space with the structured part of the same line.
+
+**The regime panel shows the allocation tier and the descriptive label
+side by side, never the label alone.** `RegimeLabel` ("calm", "crisis") is
+assigned by ranking measured statistics and is reporting-only;
+`AllocationRegime` is what actually drives exposure. A dashboard showing
+only the label would imply the system acts on something it does not.
+
+**Alerts: ten conditions, and why two of them look similar but are not.**
+`MARKET_DATA_DISCONNECT` and `STALE_DATA` are separate alerts at separate
+severities because they are separate problems with separate responses —
+a feed that cannot be reached at all versus one that is merely behind.
+`HealthChecker` already draws exactly that line (`UNHEALTHY` versus
+`DEGRADED`), so the rules read it rather than re-deriving it. Likewise
+`UNEXPECTED_POSITION` and `RECONCILIATION_MISMATCH` both come from the
+reconciliation engine's mismatch list, but are split structurally on
+`local_quantity == 0`: a broker position this system has no record of at
+all means something outside the system traded the account, which is a
+stronger signal than a disagreement about size.
+
+**Some rules need two snapshots, and that is still pure.** A nonzero count
+is not news — three orders were rejected this morning and are still
+rejected this afternoon. What deserves an alert is the transition. So the
+rejection rule fires on an *increase*, and the unexpected-cash rule
+compares the change in cash against the change in observed fill cash flow.
+The memory lives in the caller (`AlertManager` holds the previous
+snapshot); the rules stay functions.
+
+**Unexpected cash is a tolerance, not an equality.** Cash between two
+snapshots should move by exactly the net cash flow of the fills observed
+between them; anything else — a dividend, a fee sweep, a manual transfer,
+a fill this system never saw — is by definition unexpected.
+`FillTracker.cumulative_cash_flow` supplies the expected side, and it is
+deliberately *gross of costs*: brokerage, taxes and slippage are priced at
+fill time and are not visible in a `BrokerFill`, so the comparison is made
+within a configurable fraction of equity that must exceed realistic cost
+drag. Pretending it could be exact would make the alert fire on every
+normal trading day.
+
+**Rate limiting is not a nicety.** Most of these conditions persist until
+someone acts on them: a disconnected broker stays disconnected through
+every iteration of the monitoring loop, which at a 60-second poll is 60
+identical alerts an hour. Without a cooldown the alerts that matter are
+buried under the ones already known — precisely the failure mode alerting
+exists to prevent. The cooldown is per alert *and subject*, so a mismatch
+on one instrument never suppresses the alert about another, and a
+suppressed alert is counted rather than discarded: the next one that gets
+through reports how many it stands for. The interval is
+`MonitoringConfig.alert_cooldown_seconds`, the one new configuration knob
+this phase adds.
+
+**An unconfigured channel fails closed.** `SUPPORTED_CHANNELS` is
+`{"log"}` today, and `AlertManager` refuses to construct if
+`alert_channels` names anything else. A channel an operator believes is
+configured but that quietly delivers nothing is worse than no alerting at
+all, so the gap is a startup error rather than a silent no-op. Alerts are
+always logged regardless — that is the audit trail, not a channel.
+
+**Wiring into the orchestrator is optional.** `Orchestrator` takes a
+`snapshot_collector` and an `alert_manager`, both defaulting to `None`;
+with neither it runs exactly as it did in Phase 11d, it just says nothing
+about itself. When present, `publish_monitoring_snapshot()` runs at the
+*end* of each monitoring-loop iteration, so what monitoring reports is the
+state that iteration actually settled on rather than a state it was
+passing through. It returns the snapshot so a caller can render it without
+collecting a second, slightly different one.
+
+`monitoring/dashboard.py` — the historical analytics views (regime
+timeline, cost attribution, execution quality) — remains a stub. That is a
+different artefact with a different audience: an operator watching a
+running system needs current state in a terminal, which is what this phase
+built first.
 
 ## Why the module boundaries matter for correctness, not just style
 

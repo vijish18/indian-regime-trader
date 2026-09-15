@@ -413,9 +413,10 @@ properties:
   monitoring:
     type: object
     additionalProperties: false
-    required: [heartbeat_interval_seconds, alert_channels]
+    required: [heartbeat_interval_seconds, alert_channels, alert_cooldown_seconds]
     properties:
       heartbeat_interval_seconds: { type: integer, minimum: 1 }
       alert_channels:
         type: array
         items: { type: string }
+      alert_cooldown_seconds: { type: integer, minimum: 1 }

@@ -49,8 +49,12 @@ from data.errors import DataNotAvailableError
 from data.models import Quote
 from execution.order_manager import OrderManager, OrderState
 from execution.position_tracker import PositionTracker
+from execution.reconciliation import ReconciliationEngine
 from execution.system_state import SystemState, SystemStateStore
+from monitoring.alerts import Alert, AlertManager, AlertType
 from monitoring.health import HealthChecker
+from monitoring.snapshot import SnapshotCollector
+from monitoring.terminal_dashboard import render_dashboard
 from orchestration.heartbeat import Heartbeat
 from orchestration.orchestrator import DailyCycleReport, Orchestrator, OrchestratorError
 from orchestration.orchestrator_state import OrchestratorState
@@ -58,6 +62,7 @@ from orchestration.regime_computation import RegimeComputer
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.portfolio_risk_state import PortfolioRiskState
 from risk.risk_manager import RiskManager
+from risk.risk_state_builder import EquityHistory
 from tests.unit._wf_support import (
     INDEX_SYMBOL,
     VIX_SYMBOL,
@@ -190,6 +195,7 @@ class Harness:
         train_end: dt.date,
         approve_model: bool = True,
         close_positions_on_shutdown: bool = False,
+        with_monitoring: bool = False,
     ) -> None:
         self.env = env
         self.as_of = as_of
@@ -247,6 +253,43 @@ class Harness:
             last_heartbeat=self.heartbeat.last,
             clock=self.clock,
         )
+        self.equity_history = EquityHistory()
+        self.alerts_received: list[Alert] = []
+        self.alert_manager: AlertManager | None = None
+        self.snapshot_collector: SnapshotCollector | None = None
+        if with_monitoring:
+            self.alert_manager = AlertManager(
+                list(settings.monitoring.alert_channels),
+                cooldown_seconds=settings.monitoring.alert_cooldown_seconds,
+                drawdown_alert_pct=0.10,
+                sink=self.alerts_received.append,
+                clock=self.clock,
+            )
+            # The suppliers close over ``self`` and are only called later,
+            # so they can reach into the orchestrator constructed below.
+            self.snapshot_collector = SnapshotCollector(
+                broker=self.broker,
+                position_tracker=self.position_tracker,
+                order_manager=self.order_manager,
+                circuit_breaker=self.circuit_breaker,
+                reconciliation_engine=ReconciliationEngine(
+                    self.position_tracker, self.order_manager, self.broker, clock=self.clock
+                ),
+                health_checker=self.health_checker,
+                calendar=env.calendar,
+                market_data=env.market_data,
+                model_registry=self.registry,
+                equity_history=self.equity_history,
+                index_symbol=INDEX_SYMBOL,
+                vix_symbol=VIX_SYMBOL,
+                state_supplier=lambda: self.orchestrator.state.value,
+                regime_supplier=lambda: self.orchestrator.last_regime_state,
+                allocation_supplier=lambda: self.orchestrator.last_allocation_target,
+                cash_flow_supplier=lambda: self.orchestrator.fill_tracker.cumulative_cash_flow(),
+                started_at=self.clock.now,
+                clock=self.clock,
+            )
+
         self.orchestrator = Orchestrator(
             calendar=env.calendar,
             market_data=env.market_data,
@@ -274,6 +317,9 @@ class Harness:
             strategy_version="strategy-v1",
             settings_loader=lambda: settings,
             heartbeat=self.heartbeat,
+            equity_history=self.equity_history,
+            snapshot_collector=self.snapshot_collector,
+            alert_manager=self.alert_manager,
             close_positions_on_shutdown=close_positions_on_shutdown,
             clock=self.clock,
         )
@@ -808,3 +854,103 @@ def test_selling_an_exited_position_reduces_the_canonical_tracker(harness: Harne
 
     harness.orchestrator.fill_tracker.poll(harness.broker)
     assert harness.position_tracker.held_quantity(instrument_id) < quantity_before
+
+
+# --------------------------------------------------------------------------
+# Monitoring wired into the running orchestrator (Phase 20)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def monitored(env: Environment, settings: Settings, tmp_path: Path) -> Harness:
+    return Harness(
+        env,
+        tmp_path,
+        as_of=env.dates[-1],
+        settings=settings,
+        train_end=env.dates[200],
+        with_monitoring=True,
+    )
+
+
+def test_a_monitored_run_publishes_a_snapshot_of_the_real_system(monitored: Harness) -> None:
+    """The collector reads live components, not fixtures: after a real
+    daily cycle the snapshot must agree with what actually happened."""
+    report = monitored.run()
+    snapshot = monitored.orchestrator.publish_monitoring_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.system.status == report.state.value
+    assert snapshot.system.broker_connected is True
+    assert snapshot.portfolio.equity > 0
+    assert snapshot.portfolio.position_count == len(
+        monitored.position_tracker.current_positions()
+    )
+    assert snapshot.execution.orders_submitted == len(report.submitted_order_ids)
+    assert snapshot.regime.regime is not None, "the cycle computed a regime; monitoring lost it"
+    assert snapshot.regime.label is not None
+
+
+def test_the_snapshot_renders_as_a_dashboard(monitored: Harness) -> None:
+    monitored.run()
+    snapshot = monitored.orchestrator.publish_monitoring_snapshot()
+    assert snapshot is not None
+
+    text = render_dashboard(snapshot)
+    for heading in ("SYSTEM", "PORTFOLIO", "REGIME", "EXECUTION", "RISK"):
+        assert heading in text
+    assert {len(line) for line in text.splitlines()} == {80}
+
+
+def test_a_clean_monitored_run_raises_no_alerts(monitored: Harness) -> None:
+    monitored.run()
+    monitored.orchestrator.publish_monitoring_snapshot()
+    assert monitored.alerts_received == []
+
+
+def test_a_broker_disconnect_during_the_loop_raises_an_alert(monitored: Harness) -> None:
+    monitored.run()
+    monitored.broker.healthy = False
+    monitored.broker.health_detail = "connection refused"
+
+    monitored.orchestrator._monitor_and_reconcile_once()
+    assert AlertType.BROKER_DISCONNECT in {
+        alert.alert_type for alert in monitored.alerts_received
+    }
+
+
+def test_an_unexpected_broker_position_alerts_through_the_loop(monitored: Harness) -> None:
+    monitored.run()
+    monitored.broker.extra_positions = [
+        BrokerPosition(instrument_id="NSE:GHOST", quantity=10, avg_price=100.0)
+    ]
+
+    monitored.orchestrator._monitor_and_reconcile_once()
+    raised = {alert.alert_type for alert in monitored.alerts_received}
+    assert AlertType.UNEXPECTED_POSITION in raised
+
+
+def test_alerts_are_rate_limited_across_loop_iterations(monitored: Harness) -> None:
+    """The condition that matters here is persistence: a broker that stays
+    down must not produce one alert per iteration."""
+    monitored.run()
+    monitored.broker.healthy = False
+
+    for _ in range(5):
+        monitored.orchestrator._monitor_and_reconcile_once()
+        monitored.clock.advance(seconds=10)
+
+    disconnects = [
+        alert
+        for alert in monitored.alerts_received
+        if alert.alert_type is AlertType.BROKER_DISCONNECT
+    ]
+    assert len(disconnects) == 1
+
+
+def test_an_orchestrator_without_monitoring_still_runs(harness: Harness) -> None:
+    """Monitoring is optional wiring: an orchestrator with neither a
+    collector nor an alert manager behaves exactly as before."""
+    assert harness.orchestrator.publish_monitoring_snapshot() is None
+    report = harness.run()
+    assert report.state is OrchestratorState.RUNNING

@@ -26,7 +26,9 @@ module that already owns it --
     16. update portfolio                  -> execution.position_tracker.PositionTracker
     17. update stops/risk rules           -> risk.circuit_breaker.CircuitBreaker (see below)
     18. persist state                     -> execution.startup.StartupSequence.persist_heartbeat
-    19. monitor health                    -> monitoring.health.HealthChecker
+    19. monitor health                    -> monitoring.health.HealthChecker,
+                                              monitoring.snapshot.SnapshotCollector,
+                                              monitoring.alerts.AlertManager
     20. reconcile periodically            -> execution.reconciliation.ReconciliationEngine
 
 Steps 1-6 (through "reconcile portfolio") are steps 5-6 of
@@ -60,7 +62,8 @@ from broker.base import Broker, BrokerQuote
 from config.loader import ConfigError, load_settings
 from config.models import ExecutionConfig, Settings
 from core.features.feature_engineering import feature_set_version
-from core.regime.allocation import AllocationRegime
+from core.regime.allocation import AllocationRegime, AllocationTarget
+from core.regime.hmm_engine import RegimeState
 from core.regime.model_registry import ModelRegistry, NoApprovedModelError
 from data.errors import DataNotAvailableError
 from data.interfaces import MarketDataProvider, TradingCalendar
@@ -70,7 +73,9 @@ from execution.position_tracker import Position, PositionTracker
 from execution.reconciliation import ReconciliationEngine, ReconciliationStatus
 from execution.startup import StartupReport, StartupSequence
 from execution.system_state import SystemState, SystemStateStore
+from monitoring.alerts import AlertManager
 from monitoring.health import ComponentHealth, HealthChecker
+from monitoring.snapshot import MonitoringSnapshot, SnapshotCollector
 from orchestration.fill_tracker import FillTracker
 from orchestration.heartbeat import Heartbeat
 from orchestration.model_validation import validate_model_metadata
@@ -164,6 +169,8 @@ class Orchestrator:
         order_reconciler: OrderReconciler | None = None,
         equity_history: EquityHistory | None = None,
         heartbeat: Heartbeat | None = None,
+        snapshot_collector: SnapshotCollector | None = None,
+        alert_manager: AlertManager | None = None,
         close_positions_on_shutdown: bool = False,
         min_order_value_inr: float = 0.0,
         clock: Callable[[], dt.datetime] | None = None,
@@ -187,6 +194,11 @@ class Orchestrator:
         self.order_reconciler = order_reconciler or OrderReconciler(clock=clock)
         self.equity_history = equity_history or EquityHistory()
         self.heartbeat = heartbeat or Heartbeat(clock)
+        # Monitoring is optional wiring: an orchestrator with no collector
+        # and no alert manager runs exactly as before, it just says
+        # nothing about itself.
+        self.snapshot_collector = snapshot_collector
+        self.alert_manager = alert_manager
         self.close_positions_on_shutdown = close_positions_on_shutdown
         self.min_order_value_inr = min_order_value_inr
         self._clock: Callable[[], dt.datetime] = clock or (lambda: dt.datetime.now(dt.UTC))
@@ -208,6 +220,12 @@ class Orchestrator:
             clock=self._clock,
         )
         self.fill_tracker = FillTracker(position_tracker)
+
+        # The most recent regime call, kept so the monitoring layer can
+        # report what the system is actually acting on rather than
+        # recomputing it (and possibly disagreeing with it).
+        self.last_regime_state: RegimeState | None = None
+        self.last_allocation_target: AllocationTarget | None = None
 
         self.state = OrchestratorState.STARTING
         self._shutdown_requested = False
@@ -393,6 +411,8 @@ class Orchestrator:
         # Step 9: compute market regime.
         try:
             regime_target, regime_state = self.regime_computer.compute_today(artifact, as_of)
+            self.last_regime_state = regime_state
+            self.last_allocation_target = regime_target
         except RegimeComputationError as exc:
             messages.append(str(exc))
             self.state = OrchestratorState.DEGRADED
@@ -628,6 +648,24 @@ class Orchestrator:
         self.startup_sequence.persist_heartbeat(
             SystemState.HALTED if self.state is OrchestratorState.HALTED else SystemState.READY
         )
+
+        # Step 19, continued: publish the monitoring snapshot and raise
+        # whatever alerts it implies. Deliberately last, so what monitoring
+        # reports is the state this iteration actually settled on.
+        self.publish_monitoring_snapshot()
+
+    def publish_monitoring_snapshot(self) -> MonitoringSnapshot | None:
+        """Collect one monitoring snapshot and evaluate alerts against it,
+        if monitoring was wired up. Returns the snapshot so a caller can
+        render it (``monitoring.terminal_dashboard``) without collecting a
+        second, slightly different one.
+        """
+        if self.snapshot_collector is None:
+            return None
+        snapshot = self.snapshot_collector.collect()
+        if self.alert_manager is not None:
+            self.alert_manager.evaluate(snapshot)
+        return snapshot
 
     def _update_stops_and_risk_rules(self) -> None:
         broker_prices = {

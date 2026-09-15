@@ -14,7 +14,7 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-19 complete: configuration, the broker-independent data layer,
+**Phases 1-20 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
@@ -22,8 +22,9 @@ model, realistic walk-forward backtesting, performance analytics, stress
 testing, a paper-trading engine, a broker abstraction with a real Zerodha
 Kite Connect adapter, India API/algo operational controls,
 production-grade order management, restart recovery/broker
-reconciliation, and the orchestration layer that runs a full trading day
-end to end (live trading disabled by default throughout).**
+reconciliation, the orchestration layer that runs a full trading day
+end to end, and a terminal dashboard with rate-limited alerting (live
+trading disabled by default throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -413,13 +414,41 @@ end to end (live trading disabled by default throughout).**
   asserting which lifecycle state each blocking condition lands in and that
   nothing downstream of it ran.
 
+- **Monitoring: terminal dashboard and alerts** (`monitoring/snapshot.py`,
+  `monitoring/terminal_dashboard.py`, `monitoring/alerts.py`) — a
+  `SnapshotCollector` gathers the whole system's state **once** into a
+  `MonitoringSnapshot`; both consumers read only that, so what an operator
+  sees on screen and what triggers an alert can never be two different
+  readings of the same moment. `render_dashboard` is a pure function from
+  snapshot to text — plain ASCII, fixed 80 columns, no colour or terminal
+  library, so it renders over ssh, in a Windows console and in a CI log —
+  showing SYSTEM (status, uptime, trading session, data-feed health,
+  broker connectivity, model version), PORTFOLIO (equity, cash, exposure,
+  daily P&L, drawdown, positions), REGIME (allocation tier *and* the
+  reporting-only HMM label, probability, confidence, persistence, India
+  VIX, NIFTY 50), EXECUTION (submitted, fills, rejected, open, pending
+  reconciliation) and RISK (risk mode, circuit breakers, concentration,
+  turnover). `evaluate_alerts` is likewise pure, covering ten conditions:
+  broker disconnect, market-data disconnect, stale data, order rejection,
+  unknown order state, reconciliation mismatch, risk halt, excessive
+  drawdown, unexpected position, and unexpected cash balance. **Alerts are
+  rate-limited per condition and subject** — a disconnected broker stays
+  disconnected through every loop iteration, and without a cooldown the
+  alerts that matter drown in the ones already known; suppressed alerts
+  are counted, not discarded, so the next one delivered reports how many
+  it stands for. A channel named in config that this system cannot
+  actually deliver to is refused at construction rather than silently
+  dropping alerts. Wiring into the orchestrator is optional.
+
 **Position sizing is not implemented yet** — `risk/position_sizer.py`
 (reconciling the weight-based and stop-distance sizing formulas into one
 canonical order quantity) remains a typed stub that defines the interface
 for a later phase; the orchestration layer sizes orders with the same
 simple weight-based shortcut the backtest engine documents for its own
-fills. Alerts and the operational dashboard (`monitoring/alerts.py`,
-`monitoring/dashboard.py`) are also still stubs. See
+fills. The historical operational analytics views (`monitoring/dashboard.py`
+— regime timeline, cost attribution, execution quality) are also still a
+stub; that is a different artefact with a different audience from the live
+terminal dashboard above. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
