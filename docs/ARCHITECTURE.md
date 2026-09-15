@@ -169,8 +169,9 @@ yet.")` body — not working logic.
 | 10 | Broker interface, paper adapter, order manager (`broker/base.py`, `broker/adapters/paper_broker.py`, `execution/order_manager.py`) | **Done** |
 | 10b | Zerodha Kite Connect v3 adapter, broker factory (`broker/zerodha/`, `broker/factory.py`) | **Done** |
 | 10c | India API/algo operational controls (`config.models.ComplianceConfig`, `broker/compliance.py`, `docs/COMPLIANCE.md`) | **Done** |
+| 10d | Production-grade order management (`execution/order_manager.py`'s `ExecutionStateMachine`, `execution/order_reconciler.py`, `execution/execution_journal.py`) | **Done** |
 | 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
-| 11b | Reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed |
+| 11b | Position/cash reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed (order-level reconciliation is Phase 10d, not this) |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
 
 ## The data layer (phases 2-3)
@@ -1342,6 +1343,119 @@ source, for the same reason: `docs/COMPLIANCE.md` is where a reader finds
 out which numbers in this codebase are broker-confirmed and which are
 still open questions, rather than that distinction being lost once the
 research becomes code.
+
+## Production-grade order management (Phase 10d)
+
+Phase 14 built a working order lifecycle (`OrderManager`, its ten-state
+`OrderState`, idempotent `create()`, and `handle_ambiguous_response` for a
+lost-response order). This phase's brief asked for that to become
+production-grade: an explicit, independently-testable state machine; a
+dedicated reconciler with stale-order, timeout, and broker-reconnect
+handling on top of single-order resolution; an append-only journal so
+"every signal must be traceable"; and — stated as the one CRITICAL
+requirement — proof that a broker accepting an order but losing the
+response never causes an automatic resubmission.
+
+**`ExecutionStateMachine` is now a standalone class, not an inline
+table.** The `_ALLOWED_TRANSITIONS` dict `OrderManager` used internally
+since Phase 14 is unchanged in spirit but now owned by its own class
+(`validate_transition`, `is_terminal`, `is_open`, `allowed_next_states`),
+composed by `OrderManager` rather than embedded in it — "what states can
+an order legally move through" is readable and testable independently of
+"how this system actually manages one," which is what the phase brief's
+"build an explicit order state machine" asked for literally.
+
+**The transition table itself had to widen, and the reason is a genuine
+correctness finding, not a convenience.** Every non-terminal,
+non-`CREATED` state can now reach *any* terminal state directly, on top
+of its normal forward-progress edges (`_ALLOWED_TRANSITIONS`'s own
+comment explains this in place). This was discovered, not designed in
+advance: an integration test reconciling a locally-`OPEN` order that the
+broker reported as `CANCELLED` (cancelled through another channel while
+disconnected) failed against the original table, which only allowed
+`OPEN -> CANCEL_REQUESTED -> CANCELLED` -- the step-by-step path *this
+system's own actions* take, which is not the only path a real broker's
+state can arrive at `CANCELLED` by. Reconciliation's entire premise is
+that the broker is authoritative and may reflect events this system never
+individually observed while disconnected; a state machine that could only
+accept locally-driven transitions would defeat that premise the first
+time reality diverged from the happy path. This is exactly the kind of
+result the phase's own closing instruction ("run failure-injection
+integration tests") exists to surface — a test that only used the
+already-passing paths would never have found it.
+
+**`execution/order_reconciler.py`'s `OrderReconciler`** builds a full
+reconciliation sweep on top of `OrderManager.handle_ambiguous_response`
+(kept, unchanged, and still what single-order `UNKNOWN` resolution
+delegates to):
+
+- **stale-order detection** (`detect_stale_orders`) flags `OPEN`/
+  `PARTIALLY_FILLED` orders this system hasn't heard an update about
+  recently, paired with `refresh_from_broker` to actually resync them.
+- **order timeout** (`detect_and_handle_timeouts`) treats an order stuck
+  in `SUBMITTED` past a configured age exactly like a submission call
+  that raised -- transitioned to `UNKNOWN`, never assumed successful,
+  never silently retried.
+- **broker reconnect** (`reconcile_after_reconnect`) is the one entry
+  point a live/paper trading loop calls after (re)establishing a
+  connection: times out stuck submissions, resolves every `UNKNOWN`,
+  refreshes every stale order, and surfaces orphans (broker-reported open
+  orders with no local record -- flagged for manual review, never acted
+  on automatically, since this system cannot safely manage an order whose
+  signal/risk lineage it does not know).
+- **`RetryPolicy`** is deliberately narrow: it retries a read (`get_order`,
+  `get_open_orders`) up to a bounded number of times with backoff, and is
+  never used for `place_order`'s initial submission -- `OrderManager.submit`
+  does not import or reference `RetryPolicy` at all, which is the
+  structural form of "no unsafe blind retry" rather than a comment saying
+  so.
+
+**Traceability is structural, not a convention a caller has to
+remember.** `OrderManager.create()` now requires `signal_id` and
+`risk_decision_id` (both opaque strings from this module's point of
+view -- a future live trading loop mints them when it calls
+`RiskManager.evaluate` and decides to act on the result); every
+`create`/`transition` call writes to an `execution.execution_journal.ExecutionJournal`
+this manager owns, so an order created without a traceable identity
+chain is not possible to construct, not merely discouraged. A second,
+new protection sits on top of the existing idempotency-key mechanism:
+reusing a `signal_id` under a *different* `idempotency_key` raises
+`DuplicateSignalError` rather than silently creating a second order --
+a legitimate retry reuses the same key; a fresh key for an already-seen
+signal is treated as a caller bug (a retry path that regenerated its key
+instead of reusing the original), exactly the kind of duplicate this
+phase's brief asks to detect beyond simple idempotency-key matching.
+
+**What "fills" and "position" mean in the traceability chain.** A
+`FILL_OBSERVED` journal entry is written whenever `transition` reports a
+higher `filled_quantity` than the order previously had -- satisfying
+"fills" directly. "Position" is satisfied structurally rather than
+re-derived: every fill this journal observes is the identical fill
+`PaperBroker`/`KiteBroker` already apply to `PositionTracker` (Phase
+14/15); correlating this journal against `PositionTracker`'s own state by
+timestamp and instrument to answer "which position resulted from which
+order" as one automated query is not built this phase -- documented as
+the honest boundary in `execution_journal.py`'s own module docstring,
+not left for a reader to assume was covered.
+
+**The CRITICAL scenario, proven end to end against a real broker, not a
+stub.** `tests/unit/test_order_reconciler.py`'s
+`test_critical_scenario_broker_accepts_order_but_response_is_lost` runs a
+real `PaperBroker` (real cost model, real position tracker) wrapped in a
+broker double that drops exactly one `place_order` response after the
+real broker has already filled the order underneath -- the literal
+"accepts an order but times out before returning the order ID" case. It
+asserts, in order: `submit` does not raise (marks `UNKNOWN`); the broker
+was called exactly once; the order was genuinely filled broker-side
+already (proving the ambiguity is real, not something this system could
+have inferred on its own); the local record reads `UNKNOWN` *before*
+reconciliation runs (a caller checking state has no way to mistake this
+for a known outcome); `OrderReconciler.resolve_unknown` determines the
+true state by querying the broker; and afterward there is still exactly
+one fill and one position -- the ambiguous submission was never
+duplicated by either the original attempt or the reconciliation that
+followed it. A second test proves reconciling an already-resolved order a
+second time is a harmless no-op, not a second query or a second write.
 
 ## Why the module boundaries matter for correctness, not just style
 

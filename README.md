@@ -14,14 +14,15 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-16 complete: configuration, the broker-independent data layer,
+**Phases 1-17 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
 model, realistic walk-forward backtesting, performance analytics, stress
 testing, a paper-trading engine, a broker abstraction with a real Zerodha
-Kite Connect adapter, and India API/algo operational controls (live
-trading disabled by default throughout).**
+Kite Connect adapter, India API/algo operational controls, and
+production-grade order management (live trading disabled by default
+throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -321,12 +322,41 @@ trading disabled by default throughout).**
   `Broker`, including reimplementing `close_position` so a position close
   is tagged and gated exactly like any other order rather than bypassing
   the gate through the inner adapter's own internal call.
+- **Production-grade order management** (`execution/order_manager.py`'s
+  `ExecutionStateMachine`, `execution/order_reconciler.py`'s
+  `OrderReconciler`/`RetryPolicy`, `execution/execution_journal.py`'s
+  `ExecutionJournal`) — the order-lifecycle transition rules are now a
+  standalone, independently-testable class rather than a table embedded
+  in `OrderManager`, and every `signal_id`/`risk_decision_id` an order is
+  created with is required, not optional: `create()` cannot produce an
+  order with no traceable identity chain. `OrderManager.journal` records
+  every create/transition automatically, so `signal_id -> risk_decision_id
+  -> client_order_id -> broker_order_id -> fills` is always
+  reconstructable (`ExecutionJournal.trace()`) without a caller having
+  remembered to log anything. `OrderReconciler` adds stale-order
+  detection, submission-timeout handling, and a `reconcile_after_reconnect`
+  sweep (resolve every `UNKNOWN`, refresh every stale order, surface
+  orphaned broker orders — never resubmitting anything) on top of the
+  existing single-order `UNKNOWN` resolution; `RetryPolicy` only ever
+  retries read-only broker queries, never `place_order`. Reconciling a
+  broker-reported state this system's own step-by-step model would never
+  have produced on its own (an order it last saw resting `OPEN`, cancelled
+  through another channel while disconnected) is exactly why every
+  non-terminal state can now reach any terminal state directly — a real
+  finding from writing this phase's failure-injection tests, not a
+  convenience. The CRITICAL scenario — a broker accepts an order but the
+  response is lost before this system sees it — is proven end to end
+  against a real `PaperBroker`: the broker is called exactly once, the
+  local record reads `UNKNOWN` before reconciliation and the true,
+  broker-confirmed state after, and the order is never duplicated by
+  either the original attempt or the reconciliation that follows it.
 
-**Position sizing and reconciliation are not implemented yet** —
-`risk/position_sizer.py` (converting an approved target weight into a
-final, risk-bounded order quantity), `execution/reconciliation.py`, and
-everything past them remain typed stubs that define the interfaces for
-later phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Position sizing and position/cash reconciliation are not implemented
+yet** — `risk/position_sizer.py` (converting an approved target weight
+into a final, risk-bounded order quantity) and
+`execution/reconciliation.py`'s position/cash side (order-level
+reconciliation is done — see above) remain typed stubs that define the
+interfaces for later phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather

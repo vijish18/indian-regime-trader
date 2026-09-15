@@ -1010,7 +1010,14 @@ def test_order_manager_end_to_end_submission_through_a_real_kite_broker() -> Non
 
     order_manager = OrderManager()
     created = order_manager.create(
-        "NSE:INFY", "buy", 10, "LIMIT", 1500.0, idempotency_key="strategy-signal-1"
+        "NSE:INFY",
+        "buy",
+        10,
+        "LIMIT",
+        1500.0,
+        idempotency_key="strategy-signal-1",
+        signal_id="sig-1",
+        risk_decision_id="rd-1",
     )
     record = order_manager.submit(created.order.client_order_id, broker)
 

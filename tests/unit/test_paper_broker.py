@@ -743,7 +743,14 @@ def test_order_manager_end_to_end_submission_through_a_real_paper_broker(
     market_data.set_quote(make_quote(ask_quantity=1000))
     order_manager = OrderManager(clock=clock)
     created = order_manager.create(
-        "NSE:INFY", "buy", 10, "limit", 100.30, idempotency_key="strategy-signal-1"
+        "NSE:INFY",
+        "buy",
+        10,
+        "limit",
+        100.30,
+        idempotency_key="strategy-signal-1",
+        signal_id="sig-1",
+        risk_decision_id="rd-1",
     )
     record = order_manager.submit(created.order.client_order_id, broker)
 
@@ -760,12 +767,26 @@ def test_order_manager_resubmission_with_the_same_idempotency_key_never_duplicat
     market_data.set_quote(make_quote(ask_quantity=1000))
     order_manager = OrderManager(clock=clock)
     first = order_manager.create(
-        "NSE:INFY", "buy", 10, "limit", 100.30, idempotency_key="strategy-signal-1"
+        "NSE:INFY",
+        "buy",
+        10,
+        "limit",
+        100.30,
+        idempotency_key="strategy-signal-1",
+        signal_id="sig-1",
+        risk_decision_id="rd-1",
     )
     order_manager.submit(first.order.client_order_id, broker)
 
     replay = order_manager.create(
-        "NSE:INFY", "buy", 10, "limit", 100.30, idempotency_key="strategy-signal-1"
+        "NSE:INFY",
+        "buy",
+        10,
+        "limit",
+        100.30,
+        idempotency_key="strategy-signal-1",
+        signal_id="sig-1",
+        risk_decision_id="rd-1",
     )
     assert replay.was_duplicate is True
     assert replay.order.client_order_id == first.order.client_order_id
@@ -781,7 +802,14 @@ def test_a_lost_submission_response_resolves_via_the_brokers_own_truth(
     market_data.set_quote(make_quote(ask_quantity=1000))
     order_manager = OrderManager(clock=clock)
     created = order_manager.create(
-        "NSE:INFY", "buy", 10, "limit", 100.30, idempotency_key="strategy-signal-1"
+        "NSE:INFY",
+        "buy",
+        10,
+        "limit",
+        100.30,
+        idempotency_key="strategy-signal-1",
+        signal_id="sig-1",
+        risk_decision_id="rd-1",
     )
     client_order_id = created.order.client_order_id
     flaky = _FlakyBroker(broker, fail_client_order_id=client_order_id)
