@@ -1,8 +1,8 @@
-"""Unit tests for ``broker/factory.py`` (Phases 15-16) -- the single place
-that decides paper vs. live. Default mode must stay PAPER, and
-constructing a live broker requires three independent confirmations
-(execution.mode, enable_live_trading, and a valid ComplianceConfig);
-none alone is enough.
+"""Unit tests for ``broker/factory.py`` (Phases 15-16, 22) -- the single
+place that decides paper vs. live. Default mode must stay PAPER, and
+constructing a live broker requires four independent confirmations
+(execution.mode, enable_live_trading, preflight_confirmed, and a valid
+ComplianceConfig); none alone is enough.
 """
 
 from __future__ import annotations
@@ -108,6 +108,7 @@ def test_live_mode_confirmed_but_missing_credentials_raises(
             cost_model,
             initial_cash=1_000_000.0,
             enable_live_trading=True,
+            preflight_confirmed=True,
         )
 
 
@@ -129,6 +130,7 @@ def test_live_mode_fully_confirmed_with_credentials_builds_a_kite_broker(
         cost_model,
         initial_cash=1_000_000.0,
         enable_live_trading=True,
+        preflight_confirmed=True,
     )
     assert isinstance(broker, ComplianceGuardedBroker)
     inner = broker.inner
@@ -137,7 +139,79 @@ def test_live_mode_fully_confirmed_with_credentials_builds_a_kite_broker(
 
 
 # --------------------------------------------------------------------------
-# Phase 16: the compliance gate is a third, independent confirmation
+# Phase 22: the pre-live checklist is a third, independent confirmation
+# --------------------------------------------------------------------------
+
+
+def test_live_mode_without_preflight_confirmation_raises(
+    settings: Settings,
+    market_data: FakeMarketDataProvider,
+    cost_model: CostModel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with credentials present and compliance fully configured,
+    omitting preflight_confirmed (its default is False) must still
+    refuse -- exactly the same "no single flag is enough" property
+    enable_live_trading and the compliance gate already have."""
+    monkeypatch.setenv("BROKER_API_KEY", "testkey")
+    monkeypatch.setenv("BROKER_API_SECRET", "testsecret")
+    live_settings = _with_valid_compliance(
+        _with_broker_provider(_with_execution_mode(settings, "live"), "zerodha")
+    )
+    with pytest.raises(BrokerFactoryError, match="preflight_confirmed"):
+        build_broker(
+            live_settings,
+            market_data,
+            cost_model,
+            initial_cash=1_000_000.0,
+            enable_live_trading=True,
+        )
+
+
+def test_live_mode_with_preflight_confirmed_explicitly_false_raises(
+    settings: Settings,
+    market_data: FakeMarketDataProvider,
+    cost_model: CostModel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BROKER_API_KEY", "testkey")
+    monkeypatch.setenv("BROKER_API_SECRET", "testsecret")
+    live_settings = _with_valid_compliance(
+        _with_broker_provider(_with_execution_mode(settings, "live"), "zerodha")
+    )
+    with pytest.raises(BrokerFactoryError, match="preflight_confirmed"):
+        build_broker(
+            live_settings,
+            market_data,
+            cost_model,
+            initial_cash=1_000_000.0,
+            enable_live_trading=True,
+            preflight_confirmed=False,
+        )
+
+
+def test_preflight_confirmation_alone_is_not_enough(
+    settings: Settings,
+    market_data: FakeMarketDataProvider,
+    cost_model: CostModel,
+) -> None:
+    """Nor is going the other way: preflight_confirmed=True with
+    enable_live_trading omitted must still refuse."""
+    live_settings = _with_valid_compliance(
+        _with_broker_provider(_with_execution_mode(settings, "live"), "zerodha")
+    )
+    with pytest.raises(BrokerFactoryError, match="enable_live_trading"):
+        build_broker(
+            live_settings,
+            market_data,
+            cost_model,
+            initial_cash=1_000_000.0,
+            preflight_confirmed=True,
+        )
+
+
+# --------------------------------------------------------------------------
+# Phase 16: the compliance gate is a fourth, independent confirmation
 # --------------------------------------------------------------------------
 
 
@@ -160,6 +234,7 @@ def test_live_mode_with_default_placeholder_compliance_raises_compliance_error(
             cost_model,
             initial_cash=1_000_000.0,
             enable_live_trading=True,
+            preflight_confirmed=True,
         )
 
 
@@ -182,6 +257,7 @@ def test_live_mode_with_broker_authorization_not_confirmed_raises(
             cost_model,
             initial_cash=1_000_000.0,
             enable_live_trading=True,
+            preflight_confirmed=True,
         )
 
 
@@ -204,6 +280,7 @@ def test_live_mode_with_placeholder_static_ip_raises(
             cost_model,
             initial_cash=1_000_000.0,
             enable_live_trading=True,
+            preflight_confirmed=True,
         )
 
 
@@ -226,4 +303,5 @@ def test_live_mode_with_placeholder_algo_identifier_raises(
             cost_model,
             initial_cash=1_000_000.0,
             enable_live_trading=True,
+            preflight_confirmed=True,
         )

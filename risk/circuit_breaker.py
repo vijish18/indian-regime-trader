@@ -295,3 +295,32 @@ class CircuitBreaker:
         )
         self._persist(new_status)
         return new_status
+
+    # -- kill switch ------------------------------------------------------
+
+    def force_halt(self, operator: str, reason: str) -> CircuitBreakerStatus:
+        """The kill switch: immediately halt trading regardless of the
+        portfolio's current risk state, bypassing :meth:`evaluate`'s
+        threshold logic entirely.
+
+        For an operator-invoked emergency stop -- "something looks wrong,
+        stop trading right now, investigate after" -- never for an
+        automatic response to a breached limit (that is exactly what
+        :meth:`evaluate` already does). See ``live.kill_switch.KillSwitch``,
+        which exists to give this exact call its own clear, discoverable
+        name at the call site.
+
+        Persists even if the breaker is already ``HALTED``, updating the
+        recorded operator/reason/timestamp -- a kill switch engaged twice
+        should still show its second invocation, not silently no-op.
+        """
+        if not operator or not reason:
+            raise CircuitBreakerError("force_halt requires a non-empty operator and reason")
+        previous = self.current_status()
+        now = dt.datetime.now(dt.UTC)
+        new_status = self._halted(
+            now, "kill_switch", f"kill switch engaged by {operator}: {reason}"
+        )
+        self._log_transition(previous.state, new_status)
+        self._persist(new_status)
+        return new_status

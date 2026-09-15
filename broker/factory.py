@@ -3,24 +3,39 @@ paper vs. live, so nothing else in the codebase branches on
 ``settings.execution.mode`` or constructs a concrete adapter directly.
 
 **Default mode stays PAPER**, and constructing a live-capable broker needs
-three independent, explicit confirmations, none of which alone is enough:
+four independent, explicit confirmations, none of which alone is enough:
 
 1. ``settings.execution.mode == "live"`` in configuration,
 2. ``enable_live_trading=True`` passed explicitly to :func:`build_broker`
-   by the caller, and
-3. ``settings.compliance`` (``config.models.ComplianceConfig``) passing
+   by the caller,
+3. ``preflight_confirmed=True`` passed explicitly, attesting the caller
+   just ran the full pre-live checklist (Phase 22,
+   ``live.preflight.run_preflight``, ``docs/PRE_LIVE_CHECKLIST.md``) and
+   it reported ``passed`` -- a remembered or hardcoded ``True`` from an
+   earlier day defeats the entire point of this gate, and
+4. ``settings.compliance`` (``config.models.ComplianceConfig``) passing
    every check in ``broker.compliance.ComplianceGate`` -- broker
    authorization confirmed, a real static IP and algo identifier on
    record, not the ``settings.yaml`` placeholders (Phase 16,
    ``docs/COMPLIANCE.md``).
 
 A config-file value alone (easy to typo, easy to leave set from a prior
-session) must never be sufficient to place a real order -- the second and
-third, independently-checked confirmations are deliberate friction, not
-an oversight. Credentials (``BROKER_API_KEY``/``BROKER_API_SECRET``) are
-read from the environment, never from ``settings.yaml`` (see
-``.env.example`` and ``config/loader.py``'s own documented secrets
-convention).
+session) must never be sufficient to place a real order -- the second,
+third and fourth, independently-checked confirmations are deliberate
+friction, not an oversight. Credentials (``BROKER_API_KEY``/
+``BROKER_API_SECRET``) are read from the environment, never from
+``settings.yaml`` (see ``.env.example`` and ``config/loader.py``'s own
+documented secrets convention).
+
+Deliberately *not* wired the other way: this module never imports
+``live.preflight`` and never re-runs the checklist itself (that would
+mean this module executing this repository's own test suite as a side
+effect of constructing a broker, and would tie ``broker/`` -- an earlier
+layer -- to ``live/``, a later one; see docs/ARCHITECTURE.md's dependency
+rules). ``preflight_confirmed`` is a plain boolean, exactly like
+``enable_live_trading`` already is: the caller is trusted to have
+obtained it honestly, the same threat model this codebase already applies
+to that flag.
 """
 
 from __future__ import annotations
@@ -52,6 +67,7 @@ def build_broker(
     *,
     position_tracker: PositionTracker | None = None,
     enable_live_trading: bool = False,
+    preflight_confirmed: bool = False,
 ) -> Broker:
     if settings.execution.mode != "live":
         return PaperBroker(
@@ -75,8 +91,17 @@ def build_broker(
             "settings.yaml, since a config-file value alone must never be enough to place "
             "a real order"
         )
+    if not preflight_confirmed:
+        raise BrokerFactoryError(
+            "execution.mode is 'live' but preflight_confirmed was not passed as True -- "
+            "this is a third, independent confirmation (Phase 22): run "
+            "`python -m app.cli preflight` (or live.preflight.run_preflight() directly), "
+            "confirm the result's .passed is True, and pass that current result here. "
+            "A remembered or hardcoded True defeats the entire point of this gate -- see "
+            "docs/PRE_LIVE_CHECKLIST.md."
+        )
 
-    # Third gate: refuses to construct anything further if compliance
+    # Fourth gate: refuses to construct anything further if compliance
     # configuration is missing or still a placeholder (Phase 16). Raises
     # broker.compliance.ComplianceError, not caught here -- a compliance
     # failure must propagate as exactly what it is, not be laundered into

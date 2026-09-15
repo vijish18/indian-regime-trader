@@ -14,7 +14,7 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-21 complete: configuration, the broker-independent data layer,
+**Phases 1-22 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
@@ -23,10 +23,13 @@ testing, a paper-trading engine, a broker abstraction with a real Zerodha
 Kite Connect adapter, India API/algo operational controls,
 production-grade order management, restart recovery/broker
 reconciliation, the orchestration layer that runs a full trading day
-end to end, a terminal dashboard with rate-limited alerting, and an
+end to end, a terminal dashboard with rate-limited alerting, an
 end-to-end paper-trading validation harness proving the whole system
-against a synthetic market with full failure injection (live
-trading disabled by default throughout).**
+against a synthetic market with full failure injection, and a live-trading
+safety gate that keeps live order submission disabled until a formal
+18-condition pre-live checklist genuinely passes — live trading is still
+disabled by default throughout, and nothing in this codebase has ever
+placed a real order.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -466,6 +469,34 @@ trading disabled by default throughout).**
   double-count a fill redelivered twice within one `get_trades()`
   response — its membership filter was computed once, up front, so a
   trade_id not yet in the applied set let both copies through.
+- **Live-trading safety gate** (`live/`, `app/cli.py`,
+  `docs/PRE_LIVE_CHECKLIST.md`) — **live order submission is still
+  disabled.** `broker.factory.build_broker` now requires a *fourth*
+  independent confirmation, `preflight_confirmed=True`, on top of
+  `execution.mode == "live"`, `enable_live_trading=True`, and a passing
+  `ComplianceGate` — a plain boolean the caller must have just obtained
+  from `python -m app.cli preflight`, the same trust model
+  `enable_live_trading` already uses (a remembered or hardcoded `True`
+  defeats the point). That command runs all eighteen pre-live conditions
+  — unit/integration/look-ahead tests, walk-forward and stress-test
+  completion, paper-trading evidence, broker reconciliation, API/
+  compliance/static-IP/order-type/risk-limit configuration, a tested kill
+  switch, restart recovery, monitoring, database backups, and two secrets
+  scans — prints PASS/FAIL with a concrete reason for each, writes
+  `docs/preflight_report.md`, and exits non-zero on any failure so it can
+  gate a deploy step. Checks 1-8 and 13-15 are genuine evidence (this
+  repository's own test suite, run as subprocesses, every single
+  invocation — never a cached result); a run with fewer conditions
+  checked (`--skip-test-suites`) can never report an overall PASS. A new
+  kill switch (`risk.circuit_breaker.CircuitBreaker.force_halt`,
+  `live.kill_switch.KillSwitch`) halts trading immediately regardless of
+  current risk state, mirroring `manual_reset`'s own established pattern
+  in the opposite direction. Run against this repository's own
+  (deliberately unconfigured) development settings, the checklist
+  correctly reports FAIL — compliance and static-IP configuration are
+  still placeholders, and `storage/database.py` is still an unimplemented
+  stub with no backup procedure to have tested — which is the checklist
+  working exactly as intended, not a defect to route around.
 
 **Position sizing is not implemented yet** — `risk/position_sizer.py`
 (reconciling the weight-based and stop-distance sizing formulas into one
@@ -502,6 +533,8 @@ backtest/     Walk-forward backtesting, cost/slippage model, performance analyti
 orchestration/ Application lifecycle + the daily workflow that sequences every layer above
 monitoring/   Structured logging, alerts, health checks, dashboard
 validation/   End-to-end paper-trading validation harness (no live credentials)
+live/         Live-trading safety gate: pre-live checklist, kill switch (live still disabled)
+app/          Operational CLI entry point (python -m app.cli)
 storage/      Persistence layer (table schemas, DB session management)
 scripts/      Operational / one-off scripts
 tests/        Unit and integration tests

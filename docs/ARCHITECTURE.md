@@ -90,6 +90,13 @@ rule or equivalent test once there is real code to check (Phase 5+):
   `core/`, `data/`, `monitoring/`, `backtest/` or `orchestration/` may import from
   `validation/` in return. A synthetic-market generator and a failure-injecting broker
   proxy belong nowhere near what a real deployment imports.
+- `live/` (Phase 14) may import from `broker/`, `risk/`, `config/` and this repository's
+  own test suite (as subprocesses); `broker/factory.py` deliberately does **not** import
+  `live/` back, even though it is the one place `live/`'s own verdict matters most --
+  see `build_broker`'s own docstring for why (an earlier layer depending on a governance
+  layer above it would invert the intended direction; `preflight_confirmed` is a plain
+  boolean instead, the same trust model `enable_live_trading` already uses). `app/cli.py`
+  is the only thing that imports `live/` to actually run it.
 - `broker/<broker_name>/` (Phase 10b: `broker/zerodha/`) is the only place any
   broker-specific detail -- endpoint paths, request/response field names, status
   vocabulary, WebSocket framing -- may appear anywhere in this codebase. `broker/factory.py`
@@ -200,6 +207,7 @@ yet.")` body — not working logic.
 | 12 | Monitoring: terminal dashboard and alerts (`monitoring/snapshot.py`, `monitoring/terminal_dashboard.py`, `monitoring/alerts.py`) | **Done** |
 | 12b | Operational analytics dashboard, production go-live gate (`monitoring/dashboard.py`) | Stubbed |
 | 13 | End-to-end paper-trading validation (`validation/`) | **Done** |
+| 14 | Live-trading safety gate (`live/`, `app/cli.py`, `docs/PRE_LIVE_CHECKLIST.md`) | **Done** (live order submission still disabled -- see below) |
 
 ## The data layer (phases 2-3)
 
@@ -1985,6 +1993,85 @@ and does not support. `tests/unit/test_e2e_validation.py` runs the same
 scenario as part of the ordinary test suite (the slowest test in the
 repository, deliberately, since only the assembled whole can make an
 end-to-end claim a per-layer unit test cannot).
+
+## The live-trading safety gate (Phase 14)
+
+Every prior phase built toward live trading being possible; this phase's
+entire job is making sure it does not happen casually. Live order
+submission is **still disabled** at the end of it -- that was explicit in
+the brief, and nothing here changes `execution.mode`'s default or removes
+any of the three confirmations `build_broker` already required.
+
+**A fourth, independent confirmation, not a replacement for the other
+three.** `broker.factory.build_broker` now requires
+`enable_live_trading=True` *and* `preflight_confirmed=True` *and*
+`execution.mode == "live"` *and* a passing `ComplianceGate` -- four
+explicit flags/checks, none sufficient alone, mirroring the exact
+"deliberate friction" pattern `enable_live_trading` already established
+in Phase 15. `preflight_confirmed` is deliberately a plain boolean, not a
+`PreflightReport` object or a file path `build_broker` reads and trusts:
+passing a rich object would tempt a caller to construct one by hand
+("just build a report that says PASS"), and reading a file would tempt a
+caller to point at a stale one from last week. A boolean the caller must
+have *just* obtained from an actual `run_preflight()` call carries the
+same honesty requirement as `enable_live_trading` itself -- see
+`build_broker`'s own docstring, and the dependency-rules note above on
+why this stays a plain flag rather than `broker/` importing `live/`.
+
+**The eighteen conditions split into two honestly different kinds, and
+`docs/PRE_LIVE_CHECKLIST.md` says so.** Conditions 1-8 and 13-15 are
+*evidence*: this repository's own test suite, actually run as a
+subprocess every single time `python -m app.cli preflight` is invoked,
+never a cached or remembered result. Conditions 9-12 and 16 are partly
+*attestation*: `ComplianceConfig.broker_authorization_confirmed` is a
+human's confirmation with the broker, not something a script can verify
+against a broker's own dashboard; `docs/PRE_LIVE_CHECKLIST.md`'s own
+"What PASS proves, and what it does not" section says this explicitly,
+so a PASS is never mistaken for more certainty than it actually carries.
+
+**Fail-closed applies to the checker itself, not just to what it
+checks.** `--skip-test-suites` exists for fast local iteration on the
+other ten conditions, but a run with it set reports those eight (nine,
+once condition 8's internal adapter-test check is counted) as FAIL, not
+skipped-and-therefore-ignored -- `run_preflight`'s own docstring is
+explicit that such a run can never report an overall PASS. An
+unverifiable prerequisite for live trading is not a satisfied one; a gate
+that could be quietly bypassed by a fast-iteration flag would not be a
+gate.
+
+**Condition 16 (database backups) reads FAIL today, and that is the
+correct answer, not a bug to route around.** `storage/database.py`
+remains the unimplemented Phase 12 stub -- there is no real database, so
+there is no backup/restore procedure to have tested. The check inspects
+the module for that stub pattern and for a backup script under `scripts/`
+rather than assuming either exists; fabricating a passing check here
+would defeat the entire phase's purpose.
+
+**The kill switch is a new, small, well-scoped addition, not a new
+concept bolted onto existing code from the outside.**
+`risk.circuit_breaker.CircuitBreaker.force_halt` mirrors `manual_reset`'s
+own exact shape (operator, reason, both required and non-empty; persists;
+logs at `CRITICAL`) but halts unconditionally, bypassing `evaluate`'s
+threshold logic entirely -- the one thing `evaluate` itself can never do
+is halt on a portfolio that looks fine, which is exactly what an
+operator-invoked emergency stop needs to be able to do. Every trading
+decision already respects a `HALTED` breaker (`RiskManager.evaluate`
+rejects every proposed position the instant it is halted;
+`Orchestrator`'s own daily cycle and monitoring loop both treat a halted
+breaker as a hard stop), so engaging the kill switch needed no new
+enforcement anywhere else -- only the halt primitive itself was missing.
+`live.kill_switch.KillSwitch` gives that one call its own discoverable
+name, matching how `live.preflight.PreflightCheck.KILL_SWITCH` refers to
+it in the generated report.
+
+**`app/cli.py` is the first genuine operational entry point this
+repository has**, distinct from `main.py` (Phase 19's Phase-1-era
+scaffold, still just configuration/logging) and from `scripts/` (one-off,
+non-interactive tooling). `python -m app.cli preflight`'s exit code is
+the primary interface, not its printed text -- `0` only when every
+condition passed, `1` otherwise -- so it can gate a deploy step
+mechanically, the same way `scripts/validate_config.py` and
+`scripts/run_e2e_validation.py` already do for their own narrower checks.
 
 ## Why the module boundaries matter for correctness, not just style
 
