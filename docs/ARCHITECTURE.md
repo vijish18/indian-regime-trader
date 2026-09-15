@@ -171,7 +171,8 @@ yet.")` body — not working logic.
 | 10c | India API/algo operational controls (`config.models.ComplianceConfig`, `broker/compliance.py`, `docs/COMPLIANCE.md`) | **Done** |
 | 10d | Production-grade order management (`execution/order_manager.py`'s `ExecutionStateMachine`, `execution/order_reconciler.py`, `execution/execution_journal.py`) | **Done** |
 | 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
-| 11b | Position/cash reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed (order-level reconciliation is Phase 10d, not this) |
+| 11b | Position/cash reconciliation (`execution/reconciliation.py`) | **Done** |
+| 11c | Restart recovery and broker reconciliation sequence (`execution/system_state.py`, `execution/startup.py`) | **Done** |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
 
 ## The data layer (phases 2-3)
@@ -1132,9 +1133,10 @@ mark every held instrument to its current quote before reporting, so `unrealized
 reflects the market a position is *currently* held in, not the price it last traded at.
 
 **What's not here.** Corporate-action identity changes and forced exits
-(`PositionTracker.apply_corporate_action`/`force_exit`) and reconciliation against a broker's
-own state (`execution/reconciliation.py`) remain Phase 11b — this phase's `PositionTracker`
-is the source of truth for a single, unreconciled run, not yet cross-checked against
+(`PositionTracker.apply_corporate_action`/`force_exit`) are not this phase's concern — this
+phase's `PositionTracker` is the source of truth for a single run; reconciliation against a
+broker's own state (`execution/reconciliation.py`, Phase 11b) and the restart-recovery
+sequence that calls it (`execution/startup.py`, Phase 11c) are what cross-check it against
 anything external. No `BacktestBroker` adapter was built to retrofit
 `backtest.engine.BacktestEngine` onto the `Broker` interface: the engine's own historical
 next-session-open execution model is a different, already thoroughly tested design, and nothing
@@ -1456,6 +1458,139 @@ one fill and one position -- the ambiguous submission was never
 duplicated by either the original attempt or the reconciliation that
 followed it. A second test proves reconciling an already-resolved order a
 second time is a harmless no-op, not a second query or a second write.
+
+## Restart recovery and broker reconciliation (Phases 11b-11c)
+
+Phase 11b had been left stubbed since Phase 7b's own note that
+position-level reconciliation "belongs with a broker connection, not
+before one exists" — order-level reconciliation arrived first, in Phase
+10d, as `OrderReconciler`. Phase 11c's brief asked for the other half:
+everything a real (re)start must do, in order, before this system is
+ever allowed to place an order again, plus persistence across the
+restart itself. Both are implemented together here because 11c's
+13-step sequence is the only caller 11b's engine has.
+
+**`execution/reconciliation.py`'s `ReconciliationEngine`** is finally the
+real thing, not the Phase 11b stub. `reconcile_positions()` compares
+`PositionTracker.current_positions()` against `Broker.get_positions()` by
+instrument, both directions — an instrument the broker reports that local
+state has never seen ("missing local record") is exactly as much a
+mismatch as a quantity that merely disagrees ("quantity mismatch"), and a
+position local state holds that the broker no longer reports is a third,
+distinct case, each worded differently in the mismatch detail so a reader
+of a reconciliation report knows which of the three actually happened
+without re-deriving it from the numbers. `reconcile_open_orders()`
+delegates entirely to `OrderReconciler.reconcile_after_reconnect`
+(Phase 10d) and reports as a mismatch only what that sweep could not
+safely resolve on its own — `orphaned_broker_orders` — because resolving
+an `UNKNOWN` order, refreshing a stale one, and timing out a stuck
+submission are each already a safe, broker-confirmed *resolution*, not a
+discrepancy this phase needs to re-report.
+
+**A mismatch is quarantined, never guessed at.** Every mismatched
+instrument this phase finds is a genuine ambiguity — the broker and this
+system's own records disagree about how much of something exists, and
+nothing in `broker.base.Broker`'s interface can say *why*, only *that*.
+Per the phase's own explicit instruction, none of that is resolved
+automatically: `StartupSequence.run()` returns a report with
+`system_state=RECONCILIATION_REQUIRED` and
+`permit_strategy_execution=False`, and the only way out is
+`StartupSequence.acknowledge_and_recover(operator, reason)` — an
+explicit, non-empty, `logger.critical`-logged, human-invoked call that
+simply re-runs the sequence. This mirrors
+`risk.circuit_breaker.CircuitBreaker.manual_reset`'s own established
+"explicit, separately logged, never automatic" pattern for exactly this
+kind of decision, deliberately reused rather than inventing a second one.
+`acknowledge_and_recover` does not itself change anything about the
+world — it is the operator's own out-of-band action (fixing local state,
+confirming the broker's numbers are correct, whatever the investigation
+concluded) that makes the next `run()` come back clean; the method's
+whole job is making that re-run explicit and logged rather than silent.
+
+**`execution/system_state.py`'s `SystemStateStore` stands in for "the
+database."** `storage/database.py` remains an unimplemented Phase 12
+stub, so this phase needed a real answer to "verify database" (step 3)
+without fabricating a database layer that does not exist yet. The honest
+answer, stated plainly in the module's own docstring rather than hidden:
+a single JSON file, using the exact persistence shape
+`CircuitBreaker` already established (`to_dict()`/`from_dict()`,
+`json.dumps(..., indent=2, sort_keys=True)`, fail-closed on a corrupted
+or wrong-shaped file via `SystemStateStoreError`) — reused deliberately
+as the project's one precedent for "state that must survive a restart,"
+not reinvented. `verify_accessible()` additionally probes that the
+directory is actually writable (writes and removes a throwaway file)
+before startup ever gets further, since a store that can be read but not
+written would otherwise only fail much later, at the final persist.
+
+**Two version concepts, deliberately kept separate.** `APP_VERSION`
+(resolved via `importlib.metadata.version(...)`, falling back to
+`"unknown"` if the package metadata is unavailable) is informational —
+changing on every release, its mismatch against the previously-persisted
+value only logged as a message, never blocking. `STATE_SCHEMA_VERSION`
+is structural — this module's own control over the *shape* of what it
+persists, and a mismatch is a hard `StartupError`: misreading an
+incompatibly-shaped persisted file could silently corrupt this system's
+understanding of its own state, which is a materially different risk
+than merely running newer application code against old data.
+
+**Step 9 ("resolve discrepancies") does not mean "make them go away" —
+it means "resolve what is safe to resolve, and never touch what isn't."**
+This distinction is the crux of the whole phase and is documented
+prominently in `execution/startup.py`'s own module docstring so it
+cannot be missed: order-level ambiguity (an `UNKNOWN` order) genuinely
+can be resolved safely, because the broker is always authoritative for
+its own order state — that is exactly what `OrderReconciler` already
+does. A position-quantity mismatch cannot be resolved the same way,
+because there is no query that explains *why* two numbers differ, only
+confirms *that* they do — so it is never auto-resolved, on principle, not
+as a missing feature.
+
+**Steps 5-7 (positions, open orders, fills) treat a redelivered fill as
+data, not as a new event.** Fills retrieved from the broker are
+deduplicated by `trade_id` (`{fill.trade_id: fill for fill in fills}`)
+before anything downstream sees them, and a message is logged whenever
+deduplication actually removed something — proving the "duplicate broker
+event" scenario is handled, not merely assumed away by a broker that
+happens not to redeliver in testing.
+
+**Step 10 (rebuild portfolio state) only runs once reconciliation is
+clean**, and is an honest simplification rather than a full live-quote
+refresh: `_mark_to_market_from_broker()` marks every held position to the
+broker's own reported `avg_price`, which is the only price this phase has
+without also standing up a live market-data connection — a real
+last-traded-price refresh belongs to whatever live trading loop runs
+after startup, not to the recovery sequence itself.
+
+**Step 11 (verify risk state) reuses `core.regime.model_registry.ModelRegistry.approved_model_id()`
+as-is** rather than inventing a new versioning concept — its natural
+`None` default (nothing approved yet) is itself the correct "block
+execution" signal, and a deployment that does not require an approved
+model at all simply does not pass a registry, in which case the check is
+skipped rather than treated as a failure. Step 12 reads
+`CircuitBreaker.current_status()` directly rather than duplicating its
+persisted content into `SystemStateStore` — a `HALTED` breaker forces
+`SystemState.HALTED`, a state distinct from `RECONCILIATION_REQUIRED`
+since the two require different operator responses (a halted breaker
+needs `CircuitBreaker.manual_reset`; a reconciliation discrepancy needs
+`StartupSequence.acknowledge_and_recover`).
+
+**The named recovery scenarios are proven against both a fully
+controllable stub broker and, for the highest-stakes one, a real broker.**
+`tests/unit/test_startup.py` covers all eight scenarios the phase brief
+names by name (clean restart, crash during order submission, crash after
+fill, database restart, broker disconnect, duplicate broker event,
+missing local record, unknown local order) plus the remaining steps not
+covered by a named scenario (a `HALTED` circuit breaker, no approved
+model, `acknowledge_and_recover`'s own validation and re-run behavior,
+schema-version incompatibility, a merely-changed app version,
+config-load failure, and `checkpoint_market_data`'s field-preserving
+update). "Crash during order submission" is additionally proven against a
+real `PaperBroker` wrapped in the same broker double
+`test_order_reconciler.py` already established for Phase 10d's own
+CRITICAL scenario — reusing it rather than only asserting the same
+outcome against a stub, so the reconciliation this phase adds is shown
+working through the same real fill/position mechanics a live run would
+actually use.
 
 ## Why the module boundaries matter for correctness, not just style
 

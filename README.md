@@ -14,15 +14,15 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-17 complete: configuration, the broker-independent data layer,
+**Phases 1-18 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
 model, realistic walk-forward backtesting, performance analytics, stress
 testing, a paper-trading engine, a broker abstraction with a real Zerodha
-Kite Connect adapter, India API/algo operational controls, and
-production-grade order management (live trading disabled by default
-throughout).**
+Kite Connect adapter, India API/algo operational controls,
+production-grade order management, and restart recovery/broker
+reconciliation (live trading disabled by default throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -285,7 +285,7 @@ throughout).**
   documented at the point it matters rather than guessed. It bridges
   Kite's broker-assigned order IDs to this system's client-generated
   ones with an in-memory map (not persisted — closing that gap is
-  Phase 11b's reconciliation work), and implements the verified
+  `execution/reconciliation.py`'s job, run at every startup), and implements the verified
   WebSocket subscribe/unsubscribe control messages and binary
   full/quote/ltp tick decoding for equities, driven by the caller one
   frame at a time rather than a background thread (no WebSocket
@@ -350,13 +350,43 @@ throughout).**
   local record reads `UNKNOWN` before reconciliation and the true,
   broker-confirmed state after, and the order is never duplicated by
   either the original attempt or the reconciliation that follows it.
+- **Restart recovery and broker reconciliation**
+  (`execution/system_state.py`'s `SystemStateStore`,
+  `execution/reconciliation.py`'s `ReconciliationEngine`,
+  `execution/startup.py`'s `StartupSequence`) — a real (re)start now runs
+  a 13-step sequence, in order, before this system is ever allowed to
+  place an order: load configuration, verify the application/schema
+  version, verify the state store, verify broker connectivity, retrieve
+  broker positions/open orders/fills (deduplicated by `trade_id`, so a
+  redelivered broker event is never double-counted), compare broker
+  state against local state, resolve what is safely resolvable (an
+  `UNKNOWN` order — never a position-quantity mismatch), rebuild
+  portfolio state, verify an approved regime model exists, verify the
+  circuit breaker is not `HALTED`, and only then permit strategy
+  execution. **A genuine discrepancy is never auto-resolved.** Any
+  position mismatch — a broker position with no local record, a local
+  position the broker no longer reports, or a plain quantity mismatch —
+  moves the system to `RECONCILIATION_REQUIRED` and blocks execution;
+  the only way out is `StartupSequence.acknowledge_and_recover(operator,
+  reason)`, an explicit, logged, human-invoked re-run, mirroring
+  `CircuitBreaker.manual_reset`'s own "never automatic" pattern rather
+  than inventing a second one. `SystemStateStore` persists system state,
+  the current model/strategy version, a portfolio snapshot, and the last
+  processed market-data timestamp/broker event across restarts, using the
+  identical JSON-file persistence shape `CircuitBreaker` already
+  established, and stands in for "the database" this phase, since
+  `storage/database.py` remains an unimplemented stub — documented as a
+  stated scope decision, not hidden. All eight recovery scenarios named
+  in this phase's brief (clean restart, crash during order submission,
+  crash after fill, database restart, broker disconnect, duplicate
+  broker event, missing local record, unknown local order) are tested;
+  "crash during order submission" is additionally proven against a real
+  `PaperBroker`, reusing Phase 10d's own CRITICAL-scenario broker double.
 
-**Position sizing and position/cash reconciliation are not implemented
-yet** — `risk/position_sizer.py` (converting an approved target weight
-into a final, risk-bounded order quantity) and
-`execution/reconciliation.py`'s position/cash side (order-level
-reconciliation is done — see above) remain typed stubs that define the
-interfaces for later phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Position sizing is not implemented yet** — `risk/position_sizer.py`
+(converting an approved target weight into a final, risk-bounded order
+quantity) remains a typed stub that defines the interface for a later
+phase. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather

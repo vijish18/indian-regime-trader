@@ -55,6 +55,8 @@ MODULES = [
     "execution.order_reconciler",
     "execution.position_tracker",
     "execution.reconciliation",
+    "execution.startup",
+    "execution.system_state",
     "broker",
     "broker.base",
     "broker.compliance",
