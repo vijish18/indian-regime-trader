@@ -161,3 +161,19 @@ def test_seen_fill_ids_reflects_applied_fills(tracker: FillTracker, broker: _Stu
     broker.trades = [_fill("T-1")]
     tracker.poll(broker)
     assert tracker.seen_fill_ids() == {"T-1"}
+
+
+def test_a_fill_redelivered_twice_in_one_poll_is_applied_only_once(
+    tracker: FillTracker, broker: _StubBroker, position_tracker: PositionTracker
+) -> None:
+    """Regression for a real bug Phase 21's failure injection found: a
+    brand-new trade_id appearing twice in a single ``get_trades()``
+    response (the same shape a redelivered broker event has) must not
+    slip past a membership check computed once against
+    ``_applied_fill_ids`` before either copy has been recorded.
+    """
+    new_fill = _fill("T-1")
+    broker.trades = [new_fill, new_fill]
+    new_fills = tracker.poll(broker)
+    assert [f.trade_id for f in new_fills] == ["T-1"]
+    assert position_tracker.held_quantity("NSE:INFY") == 10

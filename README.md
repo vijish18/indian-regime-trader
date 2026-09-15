@@ -14,7 +14,7 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-20 complete: configuration, the broker-independent data layer,
+**Phases 1-21 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
@@ -23,7 +23,9 @@ testing, a paper-trading engine, a broker abstraction with a real Zerodha
 Kite Connect adapter, India API/algo operational controls,
 production-grade order management, restart recovery/broker
 reconciliation, the orchestration layer that runs a full trading day
-end to end, and a terminal dashboard with rate-limited alerting (live
+end to end, a terminal dashboard with rate-limited alerting, and an
+end-to-end paper-trading validation harness proving the whole system
+against a synthetic market with full failure injection (live
 trading disabled by default throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
@@ -439,6 +441,31 @@ trading disabled by default throughout).**
   it stands for. A channel named in config that this system cannot
   actually deliver to is refused at construction rather than silently
   dropping alerts. Wiring into the orchestrator is optional.
+- **End-to-end paper-trading validation** (`validation/`) — proves the
+  assembled system, not just each layer in isolation: this repository's
+  own unmodified `config/settings.yaml`, a real fitted and approved HMM,
+  and a real `PaperBroker` run one coherent session — ingestion,
+  features, the HMM, ranking, portfolio construction, risk, execution,
+  fills, accounting, monitoring, shutdown, a crash, a restart, and
+  reconciliation — against a synthetic vendor drop generated and ingested
+  through the real pipeline. All eight required failure injections (lost
+  WebSocket, delayed market data, broker API timeout, rejected order,
+  partial fill, duplicate event, application crash, database restart) are
+  triggered at the point in that narrative where the real failure would
+  occur, and every invariant (no duplicate positions, no negative cash,
+  no leverage, all orders traceable, reconciliation succeeds, halted
+  state persists, restart is safe) is checked throughout and once more at
+  the very end against live state. **No live credentials, structurally**
+  — the only broker ever constructed is `PaperBroker`; `BROKER_API_KEY`/
+  `BROKER_API_SECRET` are never read. `scripts/run_e2e_validation.py`
+  writes the result to `docs/validation_report.md`; the same scenario
+  also runs inside the ordinary test suite
+  (`tests/unit/test_e2e_validation.py`, the slowest test in the
+  repository, deliberately). This phase's own "duplicate event"
+  injection found and fixed a real bug: `FillTracker.poll` could
+  double-count a fill redelivered twice within one `get_trades()`
+  response — its membership filter was computed once, up front, so a
+  trade_id not yet in the applied set let both copies through.
 
 **Position sizing is not implemented yet** — `risk/position_sizer.py`
 (reconciling the weight-based and stop-distance sizing formulas into one
@@ -474,6 +501,7 @@ broker/       Broker-neutral interface + adapters (paper adapter first)
 backtest/     Walk-forward backtesting, cost/slippage model, performance analytics, stress testing
 orchestration/ Application lifecycle + the daily workflow that sequences every layer above
 monitoring/   Structured logging, alerts, health checks, dashboard
+validation/   End-to-end paper-trading validation harness (no live credentials)
 storage/      Persistence layer (table schemas, DB session management)
 scripts/      Operational / one-off scripts
 tests/        Unit and integration tests

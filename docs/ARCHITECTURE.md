@@ -84,6 +84,12 @@ rule or equivalent test once there is real code to check (Phase 5+):
   no reason to reach for a numerical library.
   `tests/unit/test_orchestrator.py::test_the_orchestration_package_imports_no_numerical_libraries`
   enforces it.
+- `validation/` (Phase 13) is the mirror image of `orchestration/`'s own rule: it may
+  import from every other package (it exists to wire the whole system together and watch
+  it run), and nothing in `broker/`, `execution/`, `risk/`, `portfolio/`, `universe/`,
+  `core/`, `data/`, `monitoring/`, `backtest/` or `orchestration/` may import from
+  `validation/` in return. A synthetic-market generator and a failure-injecting broker
+  proxy belong nowhere near what a real deployment imports.
 - `broker/<broker_name>/` (Phase 10b: `broker/zerodha/`) is the only place any
   broker-specific detail -- endpoint paths, request/response field names, status
   vocabulary, WebSocket framing -- may appear anywhere in this codebase. `broker/factory.py`
@@ -193,6 +199,7 @@ yet.")` body — not working logic.
 | 11d | Application lifecycle and daily workflow (`orchestration/`, `risk/risk_state_builder.py`, `monitoring/health.py`) | **Done** |
 | 12 | Monitoring: terminal dashboard and alerts (`monitoring/snapshot.py`, `monitoring/terminal_dashboard.py`, `monitoring/alerts.py`) | **Done** |
 | 12b | Operational analytics dashboard, production go-live gate (`monitoring/dashboard.py`) | Stubbed |
+| 13 | End-to-end paper-trading validation (`validation/`) | **Done** |
 
 ## The data layer (phases 2-3)
 
@@ -1864,6 +1871,120 @@ timeline, cost attribution, execution quality) — remains a stub. That is a
 different artefact with a different audience: an operator watching a
 running system needs current state in a terminal, which is what this phase
 built first.
+
+## End-to-end paper-trading validation (Phase 13)
+
+Every prior phase proved its own layer in isolation. Phase 13 proves the
+assembled whole: `validation/` wires the entire system in paper mode --
+real `config/settings.yaml`, a real fitted and approved HMM, a real
+`broker.adapters.paper_broker.PaperBroker` -- against a synthetic vendor
+drop, and runs one coherent session through it: ingestion, features, the
+HMM, ranking, portfolio construction, risk, execution, fills, accounting,
+monitoring, shutdown, a crash, a restart, and reconciliation, with all
+eight required failure injections triggered at the point in that
+narrative where the real failure would actually occur.
+
+**No live credentials, structurally.** `validation/harness.py` never
+imports `broker.zerodha` and never reads `BROKER_API_KEY`/
+`BROKER_API_SECRET`; the only broker it ever constructs is `PaperBroker`.
+It does not call `broker.factory.build_broker` -- that factory hardcodes a
+wall-clock time source, and this harness needs a controllable one for a
+deterministic run -- so `settings.execution.mode == "paper"` is asserted
+directly as a second, independent guard.
+
+**The synthetic market exists to give every stage something to compute
+over, not to say anything about returns.** `validation/synthetic_market.py`
+writes vendor-shaped CSVs (bars, NIFTY 50, India VIX, an instrument master,
+index membership) through a seeded random walk with alternating calm/
+volatile blocks, so the regime engine has two genuinely different states
+to separate. This repository's own production `config/settings.yaml` is
+used unmodified -- including `hmm.training_window_days=756` and its
+`candidate_states x random_seeds` grid -- so the synthetic market is sized
+generously (1,100 sessions) to give that real config enough history to
+fit against; the fit itself takes seconds, not minutes. Everything about
+the *market* is fake; everything about the *system exercising it* is
+real.
+
+**Quotes are synthesized from the daily close, and this is stated as a
+limitation, not hidden.** `LocalMarketDataProvider` is deliberately
+historical-only (a backtest must never consult a live book), but
+`PaperBroker` genuinely needs quotes -- to price a spread, check
+staleness, reject a crossed market. `validation/paper_feed.py`'s
+`ReplayQuoteFeed` closes that gap the only honest way available without a
+live feed: the latest ingested close, stamped with the current simulated
+clock, spread and depth as configured constants. This exercises every
+path that depends on a quote existing, being fresh, and being consistent
+with the order being priced -- the price guard, the staleness check,
+partial fills against displayed depth -- honestly; it says nothing about
+real spread magnitude, and the report's own "Limitations" section says so
+explicitly rather than letting a reader assume otherwise.
+
+**Invariants are checked after every stage, but a stage's own pass/fail
+is judged separately from them.** `validation/invariants.py` checks six
+of the seven properties the phase brief lists (`RESTART_IS_SAFE` is a
+property of a *sequence* -- crash, correct refusal to trade, recovery --
+not of one moment, so `validation.scenario` proves it directly instead).
+Early in writing `validation/scenario.py`, every stage's `ok` folded in a
+blanket "did every invariant just pass" check, which is wrong for a stage
+whose entire purpose is to put the system into a state where an invariant
+is *supposed* to read FAIL until a later stage resolves it -- a crash must
+leave reconciliation failing until the operator-recovery stage runs, and
+that is the crash-handling working, not a defect. `StageResult.ok` now
+reflects only that stage's own context-aware assertion; per-stage
+invariant snapshots stay attached for audit, and `SessionReport.final_invariants`
+-- checked once, after the whole narrative including every recovery has
+run -- is the authoritative "did the session end in a genuinely
+consistent state" signal.
+
+**A real bug, found by the "duplicate event" injection and fixed here.**
+`orchestration.fill_tracker.FillTracker.poll` deduplicated incoming fills
+against `_applied_fill_ids` with a membership filter computed once, up
+front. A trade_id appearing *twice within the same `get_trades()`
+response* -- exactly what a redelivered broker event looks like --
+passed that filter both times, since neither copy was in the
+already-applied set yet when the filter ran once for the whole batch;
+both copies were then applied, double-counting the position. The fix
+dedupes within the batch as well as against history
+(`orchestration/fill_tracker.py`); `tests/unit/test_fill_tracker.py`'s
+`test_a_fill_redelivered_twice_in_one_poll_is_applied_only_once` is the
+regression test, and it is exactly the scenario `validation/scenario.py`'s
+own `_failure_duplicate_event` stage exercises against the full system.
+This is the validation phase doing its job: a bug no single layer's own
+unit tests were positioned to find, because the layers on either side of
+it (the broker's fill feed, the position tracker) were each individually
+correct -- only assembling them and injecting exactly this failure
+surfaced it.
+
+**A second finding, documented rather than fixed.** The `application
+crash` stage's recovery surfaces that `execution.execution_journal.ExecutionJournal`
+is in-memory only (Phase 17's own stated scope -- durable persistence is
+`storage/`'s unimplemented job). A crash therefore genuinely loses the
+pre-crash orders' audit trail; `all orders traceable` holds for orders
+created since the crash, not retroactively. This is an existing,
+already-documented boundary, not a Phase 13 defect -- but an end-to-end
+run is exactly what should say so in the generated report rather than
+leave it implicit in a module docstring three phases back.
+
+**Recovery in the `reconciliation` stage is the mechanism, not an
+automated feature.** Neither a position mismatch nor an orphaned open
+order is ever auto-resolved, on principle (Phase 17/18's own design): the
+scenario plays the operator's role explicitly -- seed local state from
+the broker's own reported truth for a missing position, cancel an
+orphaned order (Phase 17's own prescribed resolution, since this system
+has no signal/risk lineage for an order it never created and refuses to
+adopt one blind) -- then calls `StartupSequence.acknowledge_and_recover`.
+This demonstrates the tool Phases 17/18 provide for a human to use, not a
+system that heals itself.
+
+**The generated report is the phase's actual deliverable.**
+`validation/report.py` renders a `SessionReport` as Markdown --
+`docs/validation_report.md`, regenerated by `scripts/run_e2e_validation.py`
+-- with the full narrative table, every final invariant, and a
+"Limitations" section that states plainly what conclusions the run does
+and does not support. `tests/unit/test_e2e_validation.py` runs the same
+scenario as part of the ordinary test suite (the slowest test in the
+repository, deliberately, since only the assembled whole can make an
+end-to-end claim a per-layer unit test cannot).
 
 ## Why the module boundaries matter for correctness, not just style
 

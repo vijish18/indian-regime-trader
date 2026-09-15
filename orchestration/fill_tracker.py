@@ -33,9 +33,26 @@ class FillTracker:
     def poll(self, broker: Broker) -> list[BrokerFill]:
         """Fetches every fill the broker currently reports, applies the
         ones not yet seen to ``position_tracker``, and returns just the
-        newly-applied fills (empty if nothing new)."""
+        newly-applied fills (empty if nothing new).
+
+        Deduplicates against two things, not one: fills already applied by
+        an *earlier* ``poll()`` call (``self._applied_fill_ids``), and a
+        fill this exact response redelivers *more than once in the same
+        batch* -- a plain membership filter against
+        ``self._applied_fill_ids`` computed once up front would let two
+        copies of a genuinely-new trade_id both pass, since neither copy
+        is in that set yet when the filter runs. A within-batch duplicate
+        is exactly what a redelivered broker event looks like, so it must
+        be caught here, not assumed away.
+        """
         fills = broker.get_trades()
-        new_fills = [fill for fill in fills if fill.trade_id not in self._applied_fill_ids]
+        new_fills: list[BrokerFill] = []
+        seen_in_this_batch: set[str] = set()
+        for fill in fills:
+            if fill.trade_id in self._applied_fill_ids or fill.trade_id in seen_in_this_batch:
+                continue
+            seen_in_this_batch.add(fill.trade_id)
+            new_fills.append(fill)
         for fill in new_fills:
             side = TradeSide.BUY if fill.side.lower() == "buy" else TradeSide.SELL
             self.position_tracker.apply_fill(
