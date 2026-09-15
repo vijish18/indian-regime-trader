@@ -56,6 +56,16 @@ rejection) is ``execution/`` and ``broker/``'s job, not this backtest
 engine's -- this V1 assumes every hypothetical order fills completely at
 the next session's open.
 
+## Rebalance threshold
+
+``min_rebalance_weight_delta`` (default ``0.0``, i.e. every proposed change
+is traded, matching this engine's original behavior) reverts any position
+whose weight would move by less than the threshold back to its current
+weight instead of trading it -- a deliberately small, local control for
+"is a modest drift worth its transaction cost", used both as a real V1
+option and as one of the robustness-diagnostic dimensions
+(``backtest/robustness.py``, Phase 12).
+
 ## What's not here
 
 Real bid/ask spread data does not exist in this dataset -- ``assumed_spread_bps``
@@ -165,6 +175,13 @@ class BacktestResult:
     """Execution date -> ``{instrument_id: quantity}`` held after that
     session's fills."""
 
+    cash_history: pd.Series
+    """Indexed by execution date -- the cash balance after that session's
+    fills and dividend credits. Paired with ``equity_curve`` (same index),
+    this is what lets ``performance.PerformanceCalculator`` report percent
+    invested / percent cash without re-deriving a position's market value
+    from price history a second time."""
+
     orders: tuple[OrderRecord, ...]
     fills: tuple[FillRecord, ...]
     risk_decisions: tuple[DailyRiskDecisions, ...]
@@ -191,6 +208,7 @@ class BacktestEngine:
         min_correlation_observations: int = 20,
         rolling_drawdown_window_days: int = 5,
         max_fill_search_days: int = 5,
+        min_rebalance_weight_delta: float = 0.0,
     ) -> None:
         self.calendar = calendar
         self.market_data = market_data
@@ -205,6 +223,13 @@ class BacktestEngine:
         self.min_correlation_observations = min_correlation_observations
         self.rolling_drawdown_window_days = rolling_drawdown_window_days
         self.max_fill_search_days = max_fill_search_days
+        self.min_rebalance_weight_delta = min_rebalance_weight_delta
+        """A position whose weight would move by less than this is left
+        untouched (reverted to its current weight, or never opened) rather
+        than traded -- a rebalance-threshold control that trims needless
+        turnover/cost from tiny drifts. ``0.0`` (default) rebalances every
+        proposed change, however small, matching Phase 11's original
+        behavior."""
 
     def run(
         self,
@@ -233,6 +258,7 @@ class BacktestEngine:
         holdings: dict[str, int] = {}
         equity_history: list[float] = []
         equity_points: dict[dt.date, float] = {}
+        cash_points: dict[dt.date, float] = {}
         regime_points: dict[dt.date, str] = {}
         confidence_points: dict[dt.date, float] = {}
         turnover_points: dict[dt.date, float] = {}
@@ -268,6 +294,10 @@ class BacktestEngine:
             risk_decision_records.append(DailyRiskDecisions(signal_date, tuple(decisions)))
 
             executed_target = _apply_risk_decisions(proposed, decisions, current_target)
+            if self.min_rebalance_weight_delta > 0:
+                executed_target = _apply_rebalance_threshold(
+                    executed_target, current_target, self.min_rebalance_weight_delta
+                )
 
             trades = required_trades(executed_target, current_target)
             turnover_points[signal_date] = sum(abs(trade.delta_weight) for trade in trades)
@@ -299,6 +329,7 @@ class BacktestEngine:
             equity_at_execution = self._mark_to_market(cash, holdings, execution_date)
             equity_points[execution_date] = equity_at_execution
             positions_history[execution_date] = dict(holdings)
+            cash_points[execution_date] = cash
 
             current_target = executed_target
 
@@ -329,6 +360,7 @@ class BacktestEngine:
             confidence_history=pd.Series(confidence_points, dtype=float).sort_index(),
             turnover_history=pd.Series(turnover_points, dtype=float).sort_index(),
             positions_history=positions_history,
+            cash_history=pd.Series(cash_points, dtype=float).sort_index(),
             orders=tuple(orders),
             fills=tuple(fills),
             risk_decisions=tuple(risk_decision_records),
@@ -638,6 +670,68 @@ def _apply_risk_decisions(
         positions=tuple(final_positions),
         cash_weight=cash_weight,
         regime=proposed.regime,
+        gross_exposure=round(gross, 12),
+    )
+
+
+def _apply_rebalance_threshold(
+    executed_target: TargetPortfolio,
+    current: TargetPortfolio | None,
+    threshold: float,
+) -> TargetPortfolio:
+    """Reverts any position whose weight would move by less than
+    ``threshold`` back to its current weight (or drops it entirely if it
+    was never held) -- a small drift is left alone rather than traded.
+
+    Built directly from ``TargetPosition`` objects already present on
+    ``executed_target``/``current`` (never from ``RequiredTrade``, which
+    lacks the sector/rank/score/binding_constraint fields a
+    ``TargetPosition`` needs) so a reverted position keeps its original
+    provenance intact.
+    """
+    current_by_id = {
+        position.instrument_id: position for position in (current.positions if current else ())
+    }
+    executed_ids = {position.instrument_id for position in executed_target.positions}
+
+    final_positions: list[TargetPosition] = []
+    for position in executed_target.positions:
+        current_position = current_by_id.get(position.instrument_id)
+        current_weight = current_position.target_weight if current_position else 0.0
+        if abs(position.target_weight - current_weight) < threshold:
+            if current_position is not None:
+                final_positions.append(current_position)
+            # else: a brand-new position smaller than the threshold is
+            # simply never opened.
+        else:
+            final_positions.append(position)
+
+    for instrument_id, current_position in current_by_id.items():
+        if instrument_id in executed_ids:
+            continue
+        # A full exit is itself a weight delta equal to the current
+        # weight; below the threshold, the exit is skipped and the
+        # position stays put.
+        if current_position.target_weight < threshold:
+            final_positions.append(current_position)
+
+    gross = sum(position.target_weight for position in final_positions)
+    if gross > 1.0:
+        # Reverting a position to its (larger) current weight while other
+        # positions keep their (already within-budget) executed weight can
+        # push the total slightly over 1.0 -- the same edge case
+        # `_apply_risk_decisions` defends against, and the same fix:
+        # scale everything down proportionally rather than let it through.
+        scale = 1.0 / gross
+        final_positions = [_scale_position(position, scale) for position in final_positions]
+        gross = 1.0
+
+    cash_weight = round(1.0 - gross, 12)
+    return TargetPortfolio(
+        as_of=executed_target.as_of,
+        positions=tuple(final_positions),
+        cash_weight=cash_weight,
+        regime=executed_target.regime,
         gross_exposure=round(gross, 12),
     )
 

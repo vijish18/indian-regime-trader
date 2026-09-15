@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 from backtest.costs import TradeSide
-from backtest.engine import BacktestEngineError, _apply_risk_decisions
+from backtest.engine import (
+    BacktestEngine,
+    BacktestEngineError,
+    _apply_rebalance_threshold,
+    _apply_risk_decisions,
+)
 from core.regime.allocation import AllocationRegime, AllocationTarget
 from core.regime.regime_policy import RegimePolicy
 from portfolio.portfolio_constructor import TargetPortfolio, TargetPosition, TradeAction
@@ -340,3 +345,139 @@ def test_apply_risk_decisions_never_produces_negative_cash() -> None:
         result = _apply_risk_decisions(proposed, decisions, current)
         assert result.cash_weight >= -1e-9
         assert result.gross_exposure <= 1.0 + 1e-9
+
+
+# --------------------------------------------------------------------------
+# cash_history
+# --------------------------------------------------------------------------
+
+
+def test_cash_history_shares_the_equity_curve_index(tmp_path: Path) -> None:
+    env = Environment(n_days=120, n_stocks=3)
+    engine = env.engine(tmp_path)
+    signal_date = env.dates[80]
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("cash_test", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert list(result.cash_history.index) == list(result.equity_curve.index)
+
+
+def test_cash_history_plus_position_value_equals_equity(tmp_path: Path) -> None:
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    signal_date = env.dates[80]
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("cash_test", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    (fill,) = result.fills
+    execution_date = fill.order.execution_date
+    close = float(
+        env.market_data.get_equity_bars(fill.order.instrument_id, execution_date, execution_date)[
+            0
+        ].close
+    )
+    position_value = fill.quantity * close
+    assert result.cash_history.loc[execution_date] + position_value == pytest.approx(
+        result.equity_curve.loc[execution_date]
+    )
+
+
+# --------------------------------------------------------------------------
+# _apply_rebalance_threshold
+# --------------------------------------------------------------------------
+
+
+def test_rebalance_threshold_reverts_a_small_drift_to_the_current_weight() -> None:
+    current = _portfolio([_position("NSE:A", 0.30)])
+    executed = _portfolio([_position("NSE:A", 0.305)])  # a 0.5pp drift
+    result = _apply_rebalance_threshold(executed, current, threshold=0.02)
+    assert result.weight_for("NSE:A") == pytest.approx(0.30)
+
+
+def test_rebalance_threshold_allows_a_drift_above_the_threshold() -> None:
+    current = _portfolio([_position("NSE:A", 0.30)])
+    executed = _portfolio([_position("NSE:A", 0.40)])  # a 10pp drift
+    result = _apply_rebalance_threshold(executed, current, threshold=0.02)
+    assert result.weight_for("NSE:A") == pytest.approx(0.40)
+
+
+def test_rebalance_threshold_never_opens_a_tiny_new_position() -> None:
+    executed = _portfolio([_position("NSE:NEW", 0.01)])
+    result = _apply_rebalance_threshold(executed, current=None, threshold=0.02)
+    assert "NSE:NEW" not in result
+    assert result.cash_weight == pytest.approx(1.0)
+
+
+def test_rebalance_threshold_skips_a_small_exit() -> None:
+    current = _portfolio([_position("NSE:A", 0.01)])
+    executed = _portfolio([])  # proposal exits NSE:A entirely
+    result = _apply_rebalance_threshold(executed, current, threshold=0.02)
+    assert result.weight_for("NSE:A") == pytest.approx(0.01)
+
+
+def test_rebalance_threshold_allows_a_large_exit() -> None:
+    current = _portfolio([_position("NSE:A", 0.30)])
+    executed = _portfolio([])
+    result = _apply_rebalance_threshold(executed, current, threshold=0.02)
+    assert "NSE:A" not in result
+
+
+def test_rebalance_threshold_zero_is_a_no_op() -> None:
+    current = _portfolio([_position("NSE:A", 0.30)])
+    executed = _portfolio([_position("NSE:A", 0.305)])
+    result = _apply_rebalance_threshold(executed, current, threshold=0.0)
+    assert result.weight_for("NSE:A") == pytest.approx(0.305)
+
+
+def test_rebalance_threshold_scales_down_if_reverted_weights_exceed_one() -> None:
+    """Reverting a below-threshold exit back to its current weight while
+    another position keeps its already-near-the-cap executed weight can
+    push the total slightly over 1.0 -- must be scaled back down, never
+    let through as implied leverage."""
+    current = _portfolio([_position("NSE:A", 0.99, rank=1), _position("NSE:B", 0.005, rank=2)])
+    executed = _portfolio([_position("NSE:A", 0.99, rank=1)])  # proposal drops tiny NSE:B
+    result = _apply_rebalance_threshold(executed, current, threshold=0.01)
+    assert result.gross_exposure <= 1.0 + 1e-9
+    assert result.cash_weight >= -1e-9
+
+
+def test_engine_with_a_rebalance_threshold_produces_fewer_or_equal_fills(
+    tmp_path: Path,
+) -> None:
+    env = Environment(n_days=140, n_stocks=3)
+    band = env.regime_policy.band_for(AllocationRegime.LOW_RISK)
+    dates = env.dates[70:100]
+    targets = {
+        day: AllocationTarget(
+            as_of=day,
+            regime=AllocationRegime.LOW_RISK,
+            target_gross_exposure=band.max_gross_exposure,
+            min_gross_exposure=band.max_gross_exposure,
+            max_gross_exposure=band.max_gross_exposure,
+            allow_new_positions=True,
+            confidence=1.0,
+            expected_volatility=0.1,
+            reason="test",
+        )
+        for day in dates
+    }
+
+    unthresholded = env.engine(tmp_path / "none")
+    result_none = unthresholded.run("none", targets, dates, 1_000_000.0)
+
+    thresholded = BacktestEngine(
+        calendar=env.calendar,
+        market_data=env.market_data,
+        stock_selector=env.stock_selector,
+        portfolio_constructor=env.portfolio_constructor,
+        risk_config=env.risk_cfg,
+        cost_model=env.cost_model,
+        circuit_breaker_state_dir=tmp_path / "thresholded",
+        corporate_actions=env.corporate_actions,
+        min_rebalance_weight_delta=0.05,
+    )
+    result_thresholded = thresholded.run("thresholded", targets, dates, 1_000_000.0)
+
+    assert len(result_thresholded.fills) <= len(result_none.fills)

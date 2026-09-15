@@ -261,6 +261,14 @@ def test_compute_rejects_a_non_positive_equity_value() -> None:
 
 
 def test_by_regime_attributes_each_session_return_to_its_active_regime() -> None:
+    """``regime_history`` aligns *positionally* with ``equity_curve``, not
+    by date label (they use different date conventions in a real
+    ``BacktestResult`` -- signal date vs. execution date -- see
+    ``PerformanceCalculator.by_regime``'s docstring): its last entry is
+    dropped (nothing follows it within this window to attribute a return
+    to), and each of the remaining entries is attributed to the return
+    that follows it.
+    """
     calc = PerformanceCalculator()
     equity = curve([100.0, 105.0, 110.0, 99.0, 108.0])
     regimes = pd.Series(
@@ -269,8 +277,8 @@ def test_by_regime_attributes_each_session_return_to_its_active_regime() -> None
     report = calc.by_regime(equity, regimes)
 
     assert set(report.index) == {"low_risk", "high_risk"}
-    assert report.loc["low_risk", "sessions"] == 2  # 2 return observations within low_risk
-    assert report.loc["high_risk", "sessions"] == 2
+    assert report.loc["low_risk", "sessions"] == 3  # regimes[:-1] = 3 low_risk, 1 high_risk
+    assert report.loc["high_risk", "sessions"] == 1
 
 
 def test_by_regime_cumulative_return_compounds_within_the_regime() -> None:
@@ -281,11 +289,11 @@ def test_by_regime_cumulative_return_compounds_within_the_regime() -> None:
     assert report.loc["low_risk", "cumulative_return"] == pytest.approx(0.21)
 
 
-def test_by_regime_rejects_missing_coverage() -> None:
+def test_by_regime_rejects_a_length_mismatch_with_equity_curve() -> None:
     calc = PerformanceCalculator()
     equity = curve([100.0, 105.0, 110.0])
     regimes = pd.Series(["low_risk"], index=equity.index[:1])
-    with pytest.raises(ValueError, match="no entry"):
+    with pytest.raises(ValueError, match="entries but equity_curve has"):
         calc.by_regime(equity, regimes)
 
 
@@ -293,3 +301,235 @@ def test_by_regime_rejects_an_empty_curve() -> None:
     calc = PerformanceCalculator()
     with pytest.raises(ValueError, match="empty"):
         calc.by_regime(pd.Series(dtype=float), pd.Series(dtype=object))
+
+
+def test_by_regime_reports_drawdown_during_regime() -> None:
+    """"Drawdown during regime": a synthetic equity path built purely from
+    that regime's own (non-contiguous) returns, in order."""
+    calc = PerformanceCalculator()
+    # high_risk sessions see -10%, +0% (a real intra-regime drawdown);
+    # low_risk sessions are flat throughout.
+    equity = curve([100.0, 100.0, 90.0, 90.0, 100.0])
+    regimes = pd.Series(
+        ["low_risk", "high_risk", "high_risk", "low_risk", "low_risk"], index=equity.index
+    )
+    report = calc.by_regime(equity, regimes)
+    assert report.loc["high_risk", "max_drawdown"] == pytest.approx(0.10, rel=1e-6)
+    assert report.loc["low_risk", "max_drawdown"] == pytest.approx(0.0, abs=1e-9)
+
+
+# --------------------------------------------------------------------------
+# by_confidence
+# --------------------------------------------------------------------------
+
+
+def test_by_confidence_buckets_low_medium_high() -> None:
+    calc = PerformanceCalculator()
+    equity = curve([100.0, 101.0, 102.0, 103.0, 104.0])
+    confidence = pd.Series([0.30, 0.55, 0.70, 0.90, 0.90], index=equity.index)
+    report = calc.by_confidence(equity, confidence, low_threshold=0.60, high_threshold=0.85)
+
+    assert set(report.index) == {"low", "medium", "high"}
+    # confidence[:-1] = [0.30, 0.55, 0.70, 0.90] -> low, low, medium, high
+    assert report.loc["low", "sessions"] == 2
+    assert report.loc["medium", "sessions"] == 1
+    assert report.loc["high", "sessions"] == 1
+
+
+def test_by_confidence_rejects_invalid_threshold_ordering() -> None:
+    calc = PerformanceCalculator()
+    equity = curve([100.0, 101.0])
+    confidence = pd.Series([0.9, 0.9], index=equity.index)
+    with pytest.raises(ValueError, match="low_threshold"):
+        calc.by_confidence(equity, confidence, low_threshold=0.9, high_threshold=0.5)
+
+
+def test_by_confidence_rejects_a_length_mismatch() -> None:
+    calc = PerformanceCalculator()
+    equity = curve([100.0, 101.0, 102.0])
+    confidence = pd.Series([0.9], index=equity.index[:1])
+    with pytest.raises(ValueError, match="entries but equity_curve has"):
+        calc.by_confidence(equity, confidence)
+
+
+def test_by_confidence_rejects_an_empty_curve() -> None:
+    calc = PerformanceCalculator()
+    with pytest.raises(ValueError, match="empty"):
+        calc.by_confidence(pd.Series(dtype=float), pd.Series(dtype=object))
+
+
+# --------------------------------------------------------------------------
+# recovery_duration_days
+# --------------------------------------------------------------------------
+
+
+def test_recovery_duration_is_zero_when_the_curve_never_draws_down() -> None:
+    calc = PerformanceCalculator()
+    report = calc.compute(curve([100.0, 101.0, 102.0, 103.0]), empty_trade_log())
+    assert report.recovery_duration_days == 0
+
+
+def test_recovery_duration_counts_sessions_from_trough_to_prior_peak() -> None:
+    calc = PerformanceCalculator()
+    # Peak at 100 (index 0), trough at 80 (index 2), recovers to 101 at index 5:
+    # 3 sessions after the trough.
+    report = calc.compute(
+        curve([100.0, 90.0, 80.0, 85.0, 95.0, 101.0]), empty_trade_log()
+    )
+    assert report.recovery_duration_days == 3
+
+
+def test_recovery_duration_is_none_when_the_series_ends_still_underwater() -> None:
+    calc = PerformanceCalculator()
+    report = calc.compute(curve([100.0, 90.0, 80.0, 85.0]), empty_trade_log())
+    assert report.recovery_duration_days is None
+
+
+# --------------------------------------------------------------------------
+# average_holding_period_days
+# --------------------------------------------------------------------------
+
+
+def test_average_holding_period_for_a_single_round_trip() -> None:
+    calc = PerformanceCalculator()
+    log = trade_log(
+        [
+            {
+                "instrument_id": "NSE:A",
+                "execution_date": pd.Timestamp("2024-01-02"),
+                "side": "buy",
+                "quantity": 100,
+                "cost": 1.0,
+                "gross_value": 1000.0,
+            },
+            {
+                "instrument_id": "NSE:A",
+                "execution_date": pd.Timestamp("2024-01-12"),
+                "side": "sell",
+                "quantity": 100,
+                "cost": 1.0,
+                "gross_value": 1000.0,
+            },
+        ]
+    )
+    report = calc.compute(curve([100.0, 101.0]), log)
+    assert report.average_holding_period_days == pytest.approx(10.0)
+
+
+def test_average_holding_period_averages_multiple_closed_round_trips() -> None:
+    calc = PerformanceCalculator()
+    log = trade_log(
+        [
+            {
+                "instrument_id": "NSE:A",
+                "execution_date": pd.Timestamp("2024-01-02"),
+                "side": "buy",
+                "quantity": 100,
+                "cost": 1.0,
+                "gross_value": 1000.0,
+            },
+            {
+                "instrument_id": "NSE:A",
+                "execution_date": pd.Timestamp("2024-01-12"),
+                "side": "sell",
+                "quantity": 100,
+                "cost": 1.0,
+                "gross_value": 1000.0,
+            },
+            {
+                "instrument_id": "NSE:B",
+                "execution_date": pd.Timestamp("2024-01-02"),
+                "side": "buy",
+                "quantity": 50,
+                "cost": 1.0,
+                "gross_value": 500.0,
+            },
+            {
+                "instrument_id": "NSE:B",
+                "execution_date": pd.Timestamp("2024-01-22"),
+                "side": "sell",
+                "quantity": 50,
+                "cost": 1.0,
+                "gross_value": 500.0,
+            },
+        ]
+    )
+    report = calc.compute(curve([100.0, 101.0]), log)
+    assert report.average_holding_period_days == pytest.approx((10.0 + 20.0) / 2.0)
+
+
+def test_average_holding_period_excludes_a_position_still_open() -> None:
+    calc = PerformanceCalculator()
+    log = trade_log(
+        [
+            {
+                "instrument_id": "NSE:A",
+                "execution_date": pd.Timestamp("2024-01-02"),
+                "side": "buy",
+                "quantity": 100,
+                "cost": 1.0,
+                "gross_value": 1000.0,
+            }
+        ]
+    )
+    report = calc.compute(curve([100.0, 101.0]), log)
+    assert math.isnan(report.average_holding_period_days)
+
+
+def test_average_holding_period_is_nan_for_an_empty_trade_log() -> None:
+    calc = PerformanceCalculator()
+    report = calc.compute(curve([100.0, 101.0]), empty_trade_log())
+    assert math.isnan(report.average_holding_period_days)
+
+
+# --------------------------------------------------------------------------
+# pct_invested / pct_cash
+# --------------------------------------------------------------------------
+
+
+def test_pct_invested_and_pct_cash_are_nan_without_cash_history() -> None:
+    calc = PerformanceCalculator()
+    report = calc.compute(curve([100.0, 101.0]), empty_trade_log())
+    assert math.isnan(report.pct_invested)
+    assert math.isnan(report.pct_cash)
+
+
+def test_pct_invested_and_pct_cash_sum_to_one() -> None:
+    calc = PerformanceCalculator()
+    equity = curve([1_000_000.0, 1_010_000.0, 1_020_000.0])
+    cash_history = pd.Series([300_000.0, 300_000.0, 306_000.0], index=equity.index)
+    report = calc.compute(equity, empty_trade_log(), cash_history)
+    assert report.pct_invested + report.pct_cash == pytest.approx(1.0)
+    assert report.pct_cash == pytest.approx(0.30, rel=1e-2)
+    assert report.pct_invested == pytest.approx(0.70, rel=1e-2)
+
+
+def test_cash_history_must_share_equity_curve_index() -> None:
+    calc = PerformanceCalculator()
+    equity = curve([100.0, 101.0, 102.0])
+    mismatched_cash = pd.Series([10.0, 10.0], index=equity.index[:2])
+    with pytest.raises(ValueError, match="cash_history"):
+        calc.compute(equity, empty_trade_log(), mismatched_cash)
+
+
+# --------------------------------------------------------------------------
+# gross_return / net_return
+# --------------------------------------------------------------------------
+
+
+def test_net_return_equals_total_return() -> None:
+    calc = PerformanceCalculator()
+    report = calc.compute(curve([100.0, 90.0, 110.0]), empty_trade_log())
+    assert report.net_return == pytest.approx(report.total_return)
+
+
+def test_gross_return_is_gross_pnl_over_starting_equity() -> None:
+    calc = PerformanceCalculator()
+    log = trade_log(
+        [
+            {"cost": 100.0, "gross_value": 50_000.0},
+            {"cost": 150.0, "gross_value": 60_000.0},
+        ]
+    )
+    report = calc.compute(curve([1_000_000.0, 1_050_000.0]), log)
+    assert report.gross_return == pytest.approx(report.gross_pnl / 1_000_000.0)

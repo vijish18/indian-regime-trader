@@ -153,6 +153,7 @@ yet.")` body — not working logic.
 | 8b | Backtest engine, performance metrics (`backtest/engine.py`, `backtest/performance.py`) | **Done** |
 | 9 | Walk-forward validation (`backtest/walk_forward.py`) | **Done** |
 | 9b | Stress testing | Stubbed |
+| 9c | Performance analytics (`backtest/comparison.py`, `backtest/robustness.py`, `backtest/report.py`) | **Done** |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
 | 11 | Position tracking, reconciliation, live operational controls | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
@@ -840,6 +841,91 @@ from the registry's single-approved-production-model workflow (Phase 5),
 so each fold's model is kept in memory only, identified by a `model_id`
 label (`core/regime/model_registry.py::build_model_id`) for audit, not
 persisted to disk.
+
+## Performance analytics (Phase 9c)
+
+`backtest/comparison.py`, `backtest/robustness.py`, and `backtest/report.py`
+turn `WalkForwardValidator.run_all_strategies`'s raw `PerformanceReport`s
+into the comparison docs/SPECIFICATION.md section 10.3 actually asks for --
+and are built around one structural commitment: **nothing in this layer
+ever emits a verdict**. There is no `success: bool` field anywhere across
+the three modules, on purpose. A high Sharpe ratio has repeatedly been
+enough, in this domain, to convince someone a strategy "works" when it was
+really a short sample, one lucky regime, or an unaccounted-for cost --
+so this layer never lets a single number stand in for that judgment.
+
+**`backtest/performance.py`'s own extensions.** `PerformanceReport` now
+also reports `recovery_duration_days` (sessions from the *worst*
+drawdown's own trough back to its prior peak -- a different question from
+`drawdown_duration_days`, which is the longest single streak spent
+anywhere below the running peak, not necessarily the worst one specifically),
+`average_holding_period_days` (reconstructed by simulating a running
+per-instrument quantity across `trade_log`'s fills, in execution-date
+order, timing each *closed* round trip -- a position still open at the
+end of the window is excluded, the standard convention), and
+`pct_invested`/`pct_cash` (needs `cash_history`, an optional third
+argument to `compute()` sourced from
+`backtest.engine.BacktestResult.cash_history` -- not derivable from
+`equity_curve` alone, which conflates cash and invested value into one
+number). All three degrade to `float("nan")`/`None` when the inputs
+needed to compute them are not supplied, never a fabricated zero.
+
+**Regime and confidence breakdowns align positionally, not by date
+label.** `BacktestResult.regime_history`/`confidence_history` are indexed
+by *signal* date; `equity_curve` (and `cash_history`) by *execution* date
+-- one trading day later, by this engine's own next-session execution
+rule. The two therefore never share date labels to reindex against in the
+first place, which was a real bug in this module's first draft: `by_regime`/
+`by_confidence` now require `regime_history`/`confidence_history` to have
+exactly one entry per `equity_curve` point in the same chronological
+order, drop the series' last entry (nothing follows the final signal
+date's regime within this window to attribute a return to), and attribute
+each remaining entry to the return that follows it -- a purely positional
+correspondence, deliberately independent of whatever date convention
+either series happens to use.
+
+**`backtest/comparison.py`** computes a `MetricDelta` (`hmm - baseline`,
+uniformly signed regardless of whether the metric is higher-or-lower-is-better)
+per metric, and attaches a set of programmatically-generated `caveats` to
+every `BaselineComparison` -- never empty. One caveat is standing on every
+comparison, unconditionally: a reminder to check the robustness
+diagnostics before treating any outperformance as durable. The others are
+conditional: a low HMM `trade_count` (statistical unreliability), a high
+Sharpe alongside a large `max_drawdown` (a ratio that hides the loss an
+investor actually lived through), an HMM return advantage that comes with
+a *worse* drawdown than the baseline (return that may just be
+compensation for extra risk, not skill), an infinite `profit_factor` (no
+losing days in-window -- a short or one-sided sample, not an edge), and
+transaction costs consuming an outsized share of gross P&L.
+
+**`backtest/robustness.py`** runs a batch of already-built,
+zero-argument variant closures (the caller assembles each one -- "build a
+validator with this one setting changed, run it, return the aggregate
+performance" -- since doing that requires config/data/calendar
+dependencies this module deliberately has none of) and measures each key
+metric's `relative_range` (`(max - min) / |mean|`) across variants.
+`RobustnessDimension` names all seven required dimensions (parameter
+perturbation, training window, rebalance threshold, transaction cost,
+slippage, universe size, market period); six map directly onto existing
+config knobs the caller already has (`backtest.training_window_sessions`,
+`CostScheduleRepository`, `backtest.slippage_*`, universe/selection size,
+the `[start, end]` window) and the seventh --
+`BacktestEngine.min_rebalance_weight_delta`, new this phase -- reverts any
+position whose weight would move by less than the threshold back to its
+current weight (or never opens it) instead of trading it, trimming
+needless turnover from tiny drifts as a real V1 option in its own right,
+not only a robustness knob. `RobustnessReport.is_stable(metric, tolerance)`
+is an explicit, named, opt-in threshold check, not an automatic verdict: a
+"stable" metric by this check can still describe a bad strategy, and an
+"unstable" one is not automatically disqualifying, just something that
+needs explaining.
+
+**`backtest/report.py`** formats what the other two modules computed --
+CSV (one row per strategy or per robustness variant, one column per
+metric, for a spreadsheet), and Markdown/HTML (every comparison keeps its
+caveats printed directly beneath its numbers; the robustness section is
+never silently omitted when robustness results are supplied). It performs
+no analysis of its own.
 
 ## Why the module boundaries matter for correctness, not just style
 

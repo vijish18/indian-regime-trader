@@ -14,11 +14,11 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-11 complete: configuration, the broker-independent data layer,
+**Phases 1-12 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
-model, and realistic walk-forward backtesting.**
+model, realistic walk-forward backtesting, and performance analytics.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -183,6 +183,38 @@ model, and realistic walk-forward backtesting.**
   directly via truncation invariance: two environments built from the same
   random seed but differing amounts of data must produce bit-identical
   decisions for every date both of them cover.
+- **Performance analytics** (`backtest/comparison.py`, `backtest/robustness.py`,
+  `backtest/report.py`) — turns each strategy's `PerformanceReport` into
+  the comparison the walk-forward run exists to answer, built around one
+  rule: nothing here ever emits a `success` verdict. `PerformanceReport`
+  itself now also reports `recovery_duration_days` (time from the *worst*
+  drawdown's trough back to its prior peak), `average_holding_period_days`
+  (reconstructed from closed round trips in the trade log), and
+  `pct_invested`/`pct_cash` (needs the new `cash_history` on
+  `BacktestResult` — not derivable from the equity curve alone), plus
+  `by_confidence()` alongside the existing `by_regime()` breakdown — both
+  now aligned *positionally* with the equity curve rather than by date
+  label, after finding that regime/confidence history (signal-dated) and
+  the equity curve (execution-dated, one session later) never actually
+  share date labels to reindex against. `compare_to_baseline`/`compare_all`
+  compute a signed delta per metric between the HMM and each of the four
+  required baselines (simple volatility classifier, buy-and-hold,
+  trend-only, randomized control) and attach programmatically-generated
+  caveats to every comparison — never empty: a standing reminder to check
+  robustness, plus conditional ones for a low trade count, a high Sharpe
+  alongside a large drawdown, an outperformance that comes with *worse*
+  risk, an infinite profit factor, or cost drag eating a large share of
+  gross P&L. `RobustnessSuite` runs a batch of caller-supplied variant
+  closures across all seven required dimensions (parameter perturbation,
+  training window, rebalance threshold, transaction cost, slippage,
+  universe size, market period — the rebalance-threshold control,
+  `BacktestEngine.min_rebalance_weight_delta`, is new this phase, and a
+  real V1 option in its own right, not only a robustness knob) and reports
+  each key metric's dispersion across them, with an explicit, opt-in
+  `is_stable()` check rather than an automatic pass/fail. `backtest/report.py`
+  writes all of this to CSV (one row per strategy or variant) and to
+  Markdown/HTML (every comparison's caveats printed directly beneath its
+  numbers; the robustness section never silently dropped when supplied).
 
 **No position sizing or execution logic is implemented yet** —
 `risk/position_sizer.py` (converting an approved target weight into a
@@ -210,7 +242,7 @@ portfolio/    Portfolio construction (target weights) + position sizing
 risk/         Independent risk management with veto authority
 execution/    Order management, position tracking, reconciliation
 broker/       Broker-neutral interface + adapters (paper adapter first)
-backtest/     Walk-forward backtesting, cost/slippage model, stress testing
+backtest/     Walk-forward backtesting, cost/slippage model, performance analytics, stress testing
 monitoring/   Structured logging, alerts, health checks, dashboard
 storage/      Persistence layer (table schemas, DB session management)
 scripts/      Operational / one-off scripts
