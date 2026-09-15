@@ -6,7 +6,7 @@ A mismatch must be quarantined, not silently resolved: the affected
 instrument is frozen from new orders while the rest of the reconciled
 portfolio continues to be managed normally. See docs/ARCHITECTURE.md.
 
-Not implemented yet (Phase 11).
+Not implemented yet (Phase 11b).
 """
 
 from __future__ import annotations
@@ -43,13 +43,13 @@ class ReconciliationEngine:
     """
 
     def reconcile_positions(self) -> ReconciliationReport:
-        raise NotImplementedError("Phase 11: reconciliation is not implemented yet.")
+        raise NotImplementedError("Phase 11b: reconciliation is not implemented yet.")
 
     def reconcile_open_orders(self) -> ReconciliationReport:
-        raise NotImplementedError("Phase 11: reconciliation is not implemented yet.")
+        raise NotImplementedError("Phase 11b: reconciliation is not implemented yet.")
 
     def quarantined_instruments(self) -> set[str]:
         """Instrument IDs currently frozen from new orders due to an
         unresolved mismatch.
         """
-        raise NotImplementedError("Phase 11: reconciliation is not implemented yet.")
+        raise NotImplementedError("Phase 11b: reconciliation is not implemented yet.")

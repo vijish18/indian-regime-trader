@@ -60,6 +60,13 @@ rule or equivalent test once there is real code to check (Phase 5+):
   into one final order quantity. No other module computes a final order quantity.
 - `execution/` and `broker/` depend on `risk/`'s approved decisions; they never re-derive a
   target weight or quantity themselves.
+- `broker/adapters/paper_broker.py` and `execution/position_tracker.py` import from
+  `backtest/` (`backtest.costs.CostModel`, `backtest.engine.market_liquidity_stats`) on
+  purpose (Phase 10-11a): a paper fill must be priced through the identical Indian
+  cost/slippage model a backtest fill uses, or the two are not comparable. This is the one
+  place a later layer intentionally depends on an earlier one across the broker/backtest
+  package boundary; it does not go the other way -- `backtest/` never imports `broker/` or
+  `execution/`.
 
 ## Resolved specification ambiguities
 
@@ -154,8 +161,9 @@ yet.")` body — not working logic.
 | 9 | Walk-forward validation (`backtest/walk_forward.py`) | **Done** |
 | 9b | Stress testing (`backtest/stress_test.py`) | **Done** |
 | 9c | Performance analytics (`backtest/comparison.py`, `backtest/robustness.py`, `backtest/report.py`) | **Done** |
-| 10 | Broker interface, paper adapter, order manager | Stubbed |
-| 11 | Position tracking, reconciliation, live operational controls | Stubbed |
+| 10 | Broker interface, paper adapter, order manager (`broker/base.py`, `broker/adapters/paper_broker.py`, `execution/order_manager.py`) | **Done** |
+| 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
+| 11b | Reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
 
 ## The data layer (phases 2-3)
@@ -1027,6 +1035,104 @@ inventing a parallel data path, consistent with the project's
 reuse-not-reimplement discipline for this phase (`_drawdown_stats`,
 `_recovery_duration`, `RiskManager`, and `CircuitBreaker` are reused
 from Phases 9 and 7b outright, not reimplemented).
+
+## Paper trading engine (Phase 10-11a)
+
+`broker/base.py`'s `Broker` ABC, `broker/adapters/paper_broker.py`'s `PaperBroker`,
+`execution/order_manager.py`'s `OrderManager`, and `execution/position_tracker.py`'s
+`PositionTracker` together answer this phase's actual requirement: strategy code must never
+be able to tell whether it is talking to a paper broker or a future live one, and an order
+request that gets sent twice must never become a position twice.
+
+**Idempotency is enforced at two independent layers, not one.** `OrderManager.create()` is
+keyed by a caller-supplied `idempotency_key` (a trading intent — "this signal, this
+instrument, this side" — not the same thing as `client_order_id`, which `OrderManager`
+generates fresh): a resubmitted identical request returns the already-created order and
+never calls the broker again. `PaperBroker.place_order()` separately deduplicates by
+`client_order_id` itself, mirroring how a real broker treats a repeated `clOrdID` — this
+matters because a caller could reach the broker directly, bypassing `OrderManager`, and
+because it is the realistic place a live adapter would enforce the same guarantee. A
+`client_order_id` reused for a *different* order payload is treated as a caller bug and
+raises, rather than silently keeping whichever payload arrived first.
+
+**The order-state vocabulary is this system's own, not section 12.1's literal list.**
+`execution.order_manager.OrderState` has ten values — `CREATED`, `SUBMITTED`, `OPEN`,
+`PARTIALLY_FILLED`, `FILLED`, `CANCEL_REQUESTED`, `CANCELLED`, `REJECTED`, `EXPIRED`,
+`UNKNOWN` — broader than docs/SPECIFICATION.md section 12.1's sketch, because treating a
+partial fill as a first-class event (section 12.2) needs `OPEN` and `PARTIALLY_FILLED` to be
+distinct states, and a resting order that never fills needs a terminal state of its own
+(`EXPIRED`) rather than staying `SUBMITTED` forever. `broker.base.BrokerOrder.status` is a
+raw string every adapter reports in its own vocabulary; `OrderManager` is the one place that
+turns it into this typed state (`_adopt_broker_order`), so no caller above it pattern-matches
+on adapter-specific strings. The allowed-transition table
+(`execution.order_manager._ALLOWED_TRANSITIONS`) deliberately lets `CANCEL_REQUESTED` still
+resolve to `FILLED`/`PARTIALLY_FILLED` — a cancel request can race a fill already in flight
+broker-side, and a real broker does not guarantee the cancel wins that race.
+
+**`UNKNOWN` is resolved by querying, never by retrying.** `OrderManager.submit()` catches
+any exception `Broker.place_order` raises (a lost response, a timeout) and transitions the
+local record to `UNKNOWN` instead of propagating or blind-retrying — exactly
+docs/SPECIFICATION.md section 12.1's "UNKNOWN state -> RECONCILIATION REQUIRED", made
+concrete. `OrderManager.handle_ambiguous_response()` resolves it by calling the new
+`Broker.get_order(client_order_id)` (added to the ABC this phase specifically to make this
+resolution possible — `get_open_orders()` alone cannot distinguish "filled", "rejected", and
+"cancelled" for an order that is no longer open). `PaperBroker` itself never produces an
+ambiguous response on its own (it is synchronous and in-process, so nothing is ever actually
+lost) — the test suite exercises this path by wrapping a real `PaperBroker` in a small
+`_FlakyBroker` test double that drops exactly one response after the real broker has already
+processed the order underneath, proving `OrderManager` recovers the broker's true state
+rather than losing track of what actually happened.
+
+**`PaperBroker` prices every fill through the identical model a backtest fill uses.**
+`backtest.engine.market_liquidity_stats` (extracted this phase from
+`BacktestEngine._market_stats`, which now delegates to it, so both callers share one
+implementation rather than two copies of the same formula) supplies the trailing
+avg-daily-value/volatility estimate; `backtest.costs.CostModel.estimate_execution_cost` prices
+the fill exactly as it would in a backtest. The one deliberate improvement over the
+backtest: `PaperBroker` prices spread from a real live `Quote`
+(`data.interfaces.MarketDataProvider.get_quote`), not the single assumed constant the
+backtest falls back on for lack of real historical bid/ask data.
+
+**Fills are matched against real depth, not assumed infinite liquidity.** A marketable limit
+order fills against the quote's own `bid_quantity`/`ask_quantity`, capped per match by
+`paper_trading.max_fill_participation_pct` — an order larger than one match's share of the
+book rests `PARTIALLY_FILLED` and needs a later `PaperBroker.process_resting_orders()` call
+(the periodic "tick" a live/paper trading loop is expected to make) to fill further as fresh
+quotes arrive. A quote with no depth information at all fills in full, a documented
+simplification in the same spirit as this codebase's other stated-not-hidden simplifications
+(`backtest/engine.py`'s assumed spread constant, `PaperTradingConfig.order_expiry_seconds`
+being duration-based rather than session-aware).
+
+**Broker-side checks are defense in depth, not a re-derivation of risk's decision.**
+`PaperBroker._validate()` rejects an unsupported order type (NSE algo orders may not use
+market orders — section 13), a stale or crossed quote, a limit price outside
+`execution.order_price_guard_bps` of the mid, a sell beyond the held quantity (no shorting,
+structurally re-checked here as it is everywhere else in this codebase), and a buy beyond
+available cash. None of this re-derives a target weight or quantity — by the time an order
+reaches `PaperBroker`, `risk.risk_manager.RiskManager` has already approved it; this layer
+only checks whether *execution* itself can still proceed safely.
+
+**`PositionTracker` is the one portfolio-state shape both today's paper broker and a future
+live adapter produce.** Weighted-average cost basis on a buy, realized P&L on a sell (using
+that same cost basis, unaffected by the sell itself — the standard convention), and
+unrealized P&L from the latest mark — all computed the identical way regardless of which
+`Broker` produced the fill. Realized P&L survives a full close-and-reopen of a position
+(never reset just because quantity returned to zero), and selling more than is held raises
+rather than silently going short, the same V1 long-only invariant enforced structurally
+elsewhere in this codebase. `PaperBroker.get_account()`/`get_positions()` proactively
+mark every held instrument to its current quote before reporting, so `unrealized_pnl`
+reflects the market a position is *currently* held in, not the price it last traded at.
+
+**What's not here.** Corporate-action identity changes and forced exits
+(`PositionTracker.apply_corporate_action`/`force_exit`) and reconciliation against a broker's
+own state (`execution/reconciliation.py`) remain Phase 11b — this phase's `PositionTracker`
+is the source of truth for a single, unreconciled run, not yet cross-checked against
+anything external. No `BacktestBroker` adapter was built to retrofit
+`backtest.engine.BacktestEngine` onto the `Broker` interface: the engine's own historical
+next-session-open execution model is a different, already thoroughly tested design, and nothing
+in this phase's requirement needed it rewritten — the requirement was that `PaperBroker` and
+a future `LiveBroker` be interchangeable beneath the same interface, which `Broker` already
+guarantees structurally.
 
 ## Why the module boundaries matter for correctness, not just style
 

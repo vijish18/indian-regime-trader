@@ -20,6 +20,7 @@ required:
   - risk
   - execution
   - broker
+  - paper_trading
   - backtest
   - costs
   - database
@@ -320,6 +321,22 @@ properties:
     properties:
       provider: { type: string, minLength: 1 }
       static_ip_required: { type: boolean }
+
+  paper_trading:
+    type: object
+    additionalProperties: false
+    required:
+      - submission_latency_ms
+      - max_fill_participation_pct
+      - order_expiry_seconds
+      - default_avg_daily_value_inr
+      - default_volatility
+    properties:
+      submission_latency_ms: { type: integer, minimum: 0 }
+      max_fill_participation_pct: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      order_expiry_seconds: { type: integer, minimum: 1 }
+      default_avg_daily_value_inr: { type: number, minimum: 0 }
+      default_volatility: { type: number, minimum: 0 }
 
   backtest:
     type: object

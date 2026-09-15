@@ -23,11 +23,3 @@ def test_position_sizer_is_unimplemented() -> None:
     sizer = PositionSizer(settings.risk)
     with pytest.raises(NotImplementedError, match="Phase 7c"):
         sizer.weight_based_quantity(proposed=None, equity=100.0, price=10.0)  # type: ignore[arg-type]
-
-
-def test_broker_interface_methods_are_unimplemented() -> None:
-    from broker.adapters.paper_broker import PaperBroker
-
-    broker = PaperBroker()
-    with pytest.raises(NotImplementedError, match="Phase 10/11"):
-        broker.health_check()

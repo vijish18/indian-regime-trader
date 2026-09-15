@@ -178,6 +178,19 @@ broker:
   provider: paper
   static_ip_required: true
 
+paper_trading:
+  submission_latency_ms: 150         # a realistic retail-API round trip; simulated via
+                                      # recorded timestamps, never a real sleep
+  max_fill_participation_pct: 0.25   # a single simulated match takes at most this share of
+                                      # the quote's displayed depth, so a large order against
+                                      # a thin book fills over several partials, not one print
+  order_expiry_seconds: 21600        # 6 hours -- longer than one NSE session, so an order
+                                      # left resting overnight expires rather than lingering
+  default_avg_daily_value_inr: 0     # <=0 is CostModel's own "no reliable liquidity
+                                      # estimate" convention -- worst-case participation
+  default_volatility: 0.30           # a conservative broad-market annualized volatility
+                                      # fallback when trailing history is too short to measure
+
 backtest:
   training_window_sessions: 756
   test_window_sessions: 126

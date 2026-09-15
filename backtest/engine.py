@@ -107,6 +107,45 @@ from universe.stock_selector import StockSelector
 _TRADING_DAYS_PER_YEAR = 252
 
 
+def market_liquidity_stats(
+    market_data: MarketDataProvider,
+    instrument_id: str,
+    as_of: dt.date,
+    lookback_days: int = 20,
+) -> tuple[float, float]:
+    """``(avg_daily_value_inr, annualized_volatility)`` from raw
+    traded-value/return history over the ``lookback_days`` sessions ending
+    at (and including) ``as_of``.
+
+    A module-level function, not a method, so both this engine's historical
+    replay and ``broker.adapters.paper_broker.PaperBroker``'s live/paper
+    simulation price slippage from the identical liquidity/volatility
+    estimate -- ``backtest.costs.CostModel``'s square-root impact model
+    is meaningless without a consistent definition of "how liquid is this
+    instrument" feeding it from both callers.
+    """
+    start = as_of - dt.timedelta(days=lookback_days * 3)
+    try:
+        bars = market_data.get_equity_bars(
+            instrument_id, start, as_of, price_basis=PriceBasis.ADJUSTED
+        )
+    except DataNotAvailableError:
+        return 0.0, 0.0
+    bars = bars[-lookback_days:]
+    if len(bars) < 2:
+        return 0.0, 0.0
+    values = [float(bar.close) * bar.volume for bar in bars]
+    avg_daily_value = sum(values) / len(values)
+    closes = pd.Series([float(bar.close) for bar in bars])
+    returns = closes.pct_change().dropna()
+    volatility = (
+        float(returns.std(ddof=0) * math.sqrt(_TRADING_DAYS_PER_YEAR))
+        if not returns.empty
+        else 0.0
+    )
+    return avg_daily_value, volatility
+
+
 class BacktestEngineError(RuntimeError):
     """A backtest run could not proceed -- invalid inputs or a data gap
     fail-closed rather than silently skipping a session."""
@@ -416,26 +455,7 @@ class BacktestEngine:
         factor computation -- needed for instruments being exited that may
         no longer be in the current candidate ranking.
         """
-        start = as_of - dt.timedelta(days=lookback_days * 3)
-        try:
-            bars = self.market_data.get_equity_bars(
-                instrument_id, start, as_of, price_basis=PriceBasis.ADJUSTED
-            )
-        except DataNotAvailableError:
-            return 0.0, 0.0
-        bars = bars[-lookback_days:]
-        if len(bars) < 2:
-            return 0.0, 0.0
-        values = [float(bar.close) * bar.volume for bar in bars]
-        avg_daily_value = sum(values) / len(values)
-        closes = pd.Series([float(bar.close) for bar in bars])
-        returns = closes.pct_change().dropna()
-        volatility = (
-            float(returns.std(ddof=0) * math.sqrt(_TRADING_DAYS_PER_YEAR))
-            if not returns.empty
-            else 0.0
-        )
-        return avg_daily_value, volatility
+        return market_liquidity_stats(self.market_data, instrument_id, as_of, lookback_days)
 
     def _max_pairwise_correlation(
         self, instrument_ids: list[str], as_of: dt.date

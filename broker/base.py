@@ -6,7 +6,15 @@ broker/exchange framework in force (docs/SPECIFICATION.md section 12.2 and
 section 13; NSE's retail-algo framework does not permit market orders for
 algo-originated flow).
 
-Not implemented yet (Phase 10). This is the abstract contract only.
+Strategy, risk, and portfolio-construction code must depend only on
+:class:`Broker` -- never on a concrete adapter -- so
+``broker.adapters.paper_broker.PaperBroker`` (Phase 14) and a future
+``LiveBroker`` are interchangeable beneath it without any code above this
+interface changing. ``order_id`` throughout this interface means the
+client-generated ``client_order_id`` (docs/SPECIFICATION.md section 12.1's
+"unique client-side trade IDs"), not a broker-assigned identifier, since
+that is the one ID this system controls and can always resolve a status
+query by.
 """
 
 from __future__ import annotations
@@ -41,6 +49,24 @@ class BrokerOrder:
     order_type: str
     limit_price: float | None
     status: str
+    """A raw, broker-reported status string. Every adapter must map its own
+    vendor vocabulary onto ``execution.order_manager.OrderState``'s values
+    exactly -- ``OrderManager`` is the layer that turns this into a typed
+    state, so no caller above it should pattern-match on adapter-specific
+    strings."""
+
+    filled_quantity: int = 0
+    """Cumulative quantity filled so far -- required to treat a partial
+    fill as a first-class event (docs/SPECIFICATION.md section 12.2)
+    rather than only ever knowing "submitted" vs. "fully filled"."""
+
+    avg_fill_price: float | None = None
+    """Quantity-weighted average price across every fill this order has
+    received so far, ``None`` before the first fill."""
+
+    reject_reason: str | None = None
+    """Set only when ``status`` reports a rejection -- never free text a
+    caller has to parse out of ``status`` itself."""
 
 
 @dataclass(frozen=True)
@@ -61,7 +87,7 @@ class HealthStatus:
 
 class Broker(ABC):
     """Abstract broker interface. One concrete adapter is implemented first
-    (paper, in Phase 10/11); additional adapters can be added later without
+    (paper, Phase 14); additional adapters can be added later without
     changing any code above this interface.
     """
 
@@ -73,6 +99,17 @@ class Broker(ABC):
 
     @abstractmethod
     def get_open_orders(self) -> list[BrokerOrder]: ...
+
+    @abstractmethod
+    def get_order(self, order_id: str) -> BrokerOrder:
+        """The current status of one order by client-side ID, regardless of
+        whether it is still open -- the query
+        ``execution.order_manager.OrderManager.handle_ambiguous_response``
+        must make before ever retrying a submission whose response was
+        lost or delayed, per this module's docstring and
+        docs/SPECIFICATION.md section 12.1. Raises if the ID is unknown to
+        this broker.
+        """
 
     @abstractmethod
     def get_quotes(self, instrument_ids: list[str]) -> list[BrokerQuote]: ...

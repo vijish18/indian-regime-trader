@@ -436,6 +436,41 @@ class BrokerConfig(BaseModel):
     static_ip_required: bool
 
 
+class PaperTradingConfig(BaseModel):
+    """Simulation-only parameters for ``broker.adapters.paper_broker.PaperBroker``
+    -- never consulted by a live adapter, which experiences real latency and
+    real exchange-matching behavior instead of a configured stand-in for it.
+    """
+
+    model_config = {"frozen": True}
+
+    submission_latency_ms: int = Field(ge=0)
+    """Simulated round-trip time from ``place_order`` to broker
+    acknowledgement, reflected in the order's recorded timestamps -- the
+    paper broker never actually sleeps for this long."""
+
+    max_fill_participation_pct: Percent = Field(gt=0, le=1)
+    """The fraction of a quote's displayed depth (``bid_quantity``/
+    ``ask_quantity``) one simulated match is willing to assume is takeable,
+    so a large order against a real order book fills partially over
+    multiple matches rather than assuming unlimited depth at the touch."""
+
+    order_expiry_seconds: int = Field(ge=1)
+    """A resting (unfilled or partially filled) order past this age
+    transitions to ``EXPIRED`` the next time it is checked -- this is a
+    duration-based simplification, not session-aware (a real
+    good-for-day order expires at session close); documented, not hidden."""
+
+    default_avg_daily_value_inr: float = Field(ge=0)
+    """Fallback liquidity estimate for an instrument with fewer than two
+    trailing bars of history -- feeds the same square-root impact model as
+    ``backtest.costs.CostModel``, never a fabricated near-zero impact."""
+
+    default_volatility: float = Field(ge=0)
+    """Fallback annualized volatility estimate, same purpose as
+    ``default_avg_daily_value_inr`` above."""
+
+
 class BacktestConfig(BaseModel):
     model_config = {"frozen": True}
 
@@ -505,6 +540,7 @@ class Settings(BaseModel):
     risk: RiskConfig
     execution: ExecutionConfig
     broker: BrokerConfig
+    paper_trading: PaperTradingConfig
     backtest: BacktestConfig
     costs: CostsConfig
     database: DatabaseConfig

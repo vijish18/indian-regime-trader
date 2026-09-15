@@ -14,12 +14,12 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-13 complete: configuration, the broker-independent data layer,
+**Phases 1-14 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
-model, realistic walk-forward backtesting, performance analytics, and
-stress testing.**
+model, realistic walk-forward backtesting, performance analytics, stress
+testing, and a paper-trading engine.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -240,10 +240,36 @@ stress testing.**
   built. 8 of the 20 scenarios run as Monte Carlo sweeps (100+ trials,
   deterministic per-trial seeding) over randomized shock magnitudes rather
   than one hand-picked case.
+- **Paper-trading engine** (`broker/base.py`, `broker/adapters/paper_broker.py`,
+  `execution/order_manager.py`, `execution/position_tracker.py`) — a full
+  `Broker` implementation strategy code cannot distinguish from a future
+  live adapter, since both would sit behind the identical interface.
+  `OrderManager` owns a ten-state order lifecycle (`CREATED` through
+  `FILLED`/`CANCELLED`/`REJECTED`/`EXPIRED`, plus `UNKNOWN` for a lost or
+  ambiguous broker response) and enforces idempotency by a caller-supplied
+  key — a resubmitted identical trade request is never turned into a
+  second order; `PaperBroker` separately deduplicates by `client_order_id`
+  itself, the same guarantee a real broker would enforce. An `UNKNOWN`
+  order is resolved only by querying the broker's own truth
+  (`Broker.get_order`, added to the interface this phase specifically for
+  that), never by blind retry. `PaperBroker` prices every fill through the
+  identical `backtest.costs.CostModel` a backtest fill uses (plus a
+  genuine improvement: real bid/ask spread from a live `Quote`, not the
+  backtest's assumed constant), matches against the quote's own displayed
+  depth so an order larger than one match's share of the book partially
+  fills instead of assuming unlimited liquidity, and rejects orders a real
+  broker would (unsupported order type, stale or crossed quote, price
+  outside the configured guard band, a sell beyond the held quantity, a
+  buy beyond available cash) as defense in depth on top of whatever
+  `RiskManager` already approved upstream. `PositionTracker` is the one
+  portfolio-state shape (weighted-average cost, realized and unrealized
+  P&L) both this paper broker and a future live adapter will produce.
+  Connects to nothing real: no live broker, no live market-data feed.
 
-**No position sizing or execution logic is implemented yet** —
-`risk/position_sizer.py` (converting an approved target weight into a
-final, risk-bounded order quantity) and everything past it remain typed
+**Position sizing, reconciliation, and live operational controls are not
+implemented yet** — `risk/position_sizer.py` (converting an approved
+target weight into a final, risk-bounded order quantity),
+`execution/reconciliation.py`, and everything past them remain typed
 stubs that define the interfaces for later phases. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
