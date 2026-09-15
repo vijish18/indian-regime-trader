@@ -242,6 +242,14 @@ class BacktestEngine:
             raise BacktestEngineError("signal_dates must not be empty")
         if list(signal_dates) != sorted(signal_dates):
             raise BacktestEngineError("signal_dates must be ascending")
+        if len(signal_dates) != len(set(signal_dates)):
+            # A duplicate signal date would otherwise sort into itself and
+            # slip past the ascending check above, then replay the same
+            # session's decision twice -- the same failure mode as a
+            # duplicated broker order response. Rejected here, not just in
+            # the duplicate-order stress scenario, because this is a real
+            # input-validation gap, not only a test fixture.
+            raise BacktestEngineError("signal_dates must not contain duplicates")
         if initial_equity <= 0:
             raise BacktestEngineError(f"initial_equity must be > 0, got {initial_equity}")
         missing = [day for day in signal_dates if day not in exposure_targets]

@@ -14,11 +14,12 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-12 complete: configuration, the broker-independent data layer,
+**Phases 1-13 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
-model, realistic walk-forward backtesting, and performance analytics.**
+model, realistic walk-forward backtesting, performance analytics, and
+stress testing.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -215,6 +216,30 @@ model, realistic walk-forward backtesting, and performance analytics.**
   writes all of this to CSV (one row per strategy or variant) and to
   Markdown/HTML (every comparison's caveats printed directly beneath its
   numbers; the robustness section never silently dropped when supplied).
+- **Stress testing** (`backtest/stress_test.py`) — 20 Indian equity-market
+  failure scenarios (market/data shocks, execution/infrastructure
+  failures, model/decision failures), built around one requirement: risk
+  controls must limit damage even if the HMM is wrong. `full_exposure_targets()`
+  feeds a deliberately-not-the-HMM "always fully invested" signal through a
+  real market shock, so the crash and regime-misclassification scenarios
+  prove the circuit breaker — which watches realized P&L, not the regime
+  label — halts or reduces risk regardless of what the exposure signal
+  claims. `ShockedMarketDataProvider` applies a deterministic price/volume/
+  availability/index shock on top of a real `MarketDataProvider`;
+  `StressTestContext` rebuilds `StockSelector` and `PortfolioConstructor`
+  fresh against the shocked feed via factory callables, since both
+  otherwise capture their own market-data reference independent of the
+  engine's. An infrastructure failure the engine itself catches
+  (`BacktestEngineError`, e.g. missing mark-to-market data) is reported as
+  a fail-closed pass, not propagated as a test failure — refusing to
+  proceed on bad data is the system working as designed. No live broker or
+  database exists yet, so execution-layer scenarios (partial fill, order
+  rejection, broker outage, application restart, database failure) each
+  test the specific mechanism that already exists for that failure mode,
+  documented as such rather than simulating infrastructure that isn't
+  built. 8 of the 20 scenarios run as Monte Carlo sweeps (100+ trials,
+  deterministic per-trial seeding) over randomized shock magnitudes rather
+  than one hand-picked case.
 
 **No position sizing or execution logic is implemented yet** —
 `risk/position_sizer.py` (converting an approved target weight into a

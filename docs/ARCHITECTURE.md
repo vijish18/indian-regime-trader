@@ -152,7 +152,7 @@ yet.")` body — not working logic.
 | 8 | Indian transaction-cost and execution-cost model (`backtest/costs.py`, `backtest/cost_schedule.py`) | **Done** |
 | 8b | Backtest engine, performance metrics (`backtest/engine.py`, `backtest/performance.py`) | **Done** |
 | 9 | Walk-forward validation (`backtest/walk_forward.py`) | **Done** |
-| 9b | Stress testing | Stubbed |
+| 9b | Stress testing (`backtest/stress_test.py`) | **Done** |
 | 9c | Performance analytics (`backtest/comparison.py`, `backtest/robustness.py`, `backtest/report.py`) | **Done** |
 | 10 | Broker interface, paper adapter, order manager | Stubbed |
 | 11 | Position tracking, reconciliation, live operational controls | Stubbed |
@@ -833,8 +833,9 @@ preserved for its own sake, the same treatment earlier phases gave
 surrounding design solidified.
 
 **What's not here.** `risk/position_sizer.py`'s stop-distance
-reconciliation (Phase 7c) and `backtest/stress_test.py`'s failure-injection
-scenarios (Phase 9b) remain stubbed. No per-fold model persistence through
+reconciliation (Phase 7c) remains stubbed; `backtest/stress_test.py`'s
+failure-injection scenarios are Phase 9b, covered below. No per-fold model
+persistence through
 `core/regime/model_registry.py`: a walk-forward run fits and discards many
 models in sequence for research purposes, which is a different use case
 from the registry's single-approved-production-model workflow (Phase 5),
@@ -926,6 +927,106 @@ metric, for a spreadsheet), and Markdown/HTML (every comparison keeps its
 caveats printed directly beneath its numbers; the robustness section is
 never silently omitted when robustness results are supplied). It performs
 no analysis of its own.
+
+## Stress testing (Phase 9b)
+
+`backtest/stress_test.py` answers a different question from Phases 8b-9c:
+not "how did the strategy perform", but "does the system still behave
+safely when something goes wrong" -- across the 20 Indian equity-market
+failure scenarios named in the phase brief (`StressScenario`), grouped
+into market/data shocks, execution/infrastructure failures, and
+model/decision failures. The central claim the whole module exists to
+check: **risk controls must limit damage even if the HMM is wrong.**
+
+**Fault injection without touching every collaborator by hand.**
+`ShockedMarketDataProvider` wraps a real `MarketDataProvider` and applies
+a deterministic `MarketShock` (price crash, open gap, volume collapse,
+index spike, or outright unavailability, each scoped to an instrument set
+and date range) on top of whatever the base provider returns, delegating
+everything else unchanged. The harder problem this module had to solve:
+`StockSelector` and `PortfolioConstructor` each capture their own
+`market_data` reference at construction time, independent of
+`BacktestEngine`'s -- so swapping only the engine's copy would leave
+selection and construction reading the original, unshocked feed.
+`StressTestContext` solves this by holding factory callables
+(`stock_selector_factory`, `portfolio_constructor_factory:
+Callable[[MarketDataProvider], ...]`) rather than fixed instances;
+`StressTestContext.engine()` rebuilds all three collaborators fresh
+against whichever provider a given scenario needs. A regression test
+(`test_context_engine_uses_the_shocked_provider_for_stock_selection`)
+guards this specifically: it asserts both collaborators' `market_data`
+identity, then confirms selecting against a fully-unavailable feed
+returns no candidates (this pipeline's fail-closed response to missing
+data is candidate exclusion, not an exception).
+
+**"Even if the HMM is wrong" is made concrete, not just asserted.**
+`StressTestContext.full_exposure_targets()` builds a trivial "always
+fully invested" exposure signal -- deliberately not the HMM -- fed
+through a real market shock. `HMM_REGIME_MISCLASSIFICATION` and
+`SUDDEN_MARKET_CRASH` both run this signal against a crashing market: the
+circuit breaker, which watches realized P&L and never consults the
+regime label, must still halt or reduce risk. This is the one property
+the module cannot compromise on, because it is the phase's actual
+requirement rather than a nice-to-have coverage checkbox.
+
+**Fail-closed infrastructure failures are a pass, not a crash.** When
+`BacktestEngine.run()` itself raises `BacktestEngineError` -- missing
+mark-to-market data, an empty or malformed signal-date sequence -- the
+suite reports `system_failed_closed=True` via `_failed_run_result` rather
+than propagating the exception. A stress test's job is to observe a
+failure mode, not to crash alongside it; refusing to proceed on bad data
+is the system working as designed, matching every earlier phase's
+fail-closed convention.
+
+**Duplicate-order prevention closed a real input-validation gap.**
+`BacktestEngine.run()` previously checked only that `signal_dates` was
+ascending, which a duplicate adjacent date trivially satisfies (it sorts
+into itself) -- a duplicated broker order response would replay the same
+session's decision twice, past the check. The phase now rejects
+`signal_dates` containing duplicates outright, tightening the engine's
+own input validation, not just a test fixture.
+
+**Scope is stated honestly, not implied.** No live broker, order
+manager, or database exists yet (Phases 7c/10/11 are still stubbed), so
+`BROKER_API_OUTAGE`, `PARTIAL_FILL`, `ORDER_REJECTION`, `DELAYED_FILL`,
+`APPLICATION_RESTART`, and `DATABASE_FAILURE` each test the specific
+mechanism that already exists for that failure mode instead of
+simulating a broker that isn't built: `PortfolioRiskState.broker_connected`
+for outages, `BacktestEngine._apply_fill`'s ledger arithmetic for
+partial-size fills, `_execute`/`_next_open` returning `None` for
+undeliverable orders, `max_fill_search_days` for delayed fills, and
+`CircuitBreaker`'s on-disk JSON state file (corrupted directly, to
+simulate a database/disk failure) for restart/persistence scenarios.
+
+**Monte Carlo: deterministic despite being randomized.**
+`MONTE_CARLO_SCENARIOS` names the 8 scenarios (crash, gap, VIX spike,
+liquidity deterioration, wide spread, HMM misclassification, wrong
+ranking, sudden drawdown) whose severity is meaningfully continuous
+rather than binary. `StressTestSuite.run_monte_carlo` seeds trial `i`
+with `seed + i` and uses `numpy.random.default_rng` for magnitude
+sampling, so a fixed seed reproduces the exact same 100+ trials byte for
+byte. `test_monte_carlo_crash_scenario_reliably_triggers_risk_controls`
+checks the requirement statistically rather than in one hand-picked case
+-- across a uniform 10%-40% crash-magnitude sweep, most trials trigger
+some risk-control response. The bar is "most", deliberately not "all":
+at this environment's single-name weight cap, a mild ~10-20% cut
+legitimately stays under the daily-loss reduce threshold, so the risk
+layer correctly staying quiet on the mildest sampled shocks is expected
+behavior, not a gap. `risk_controls_fired` itself checks both an
+explicitly rejected decision *and* the circuit breaker having left
+`CircuitState.NORMAL` at any evaluated decision -- catching a
+REDUCED_RISK state that never rejected a new order because the affected
+position was already open, not only an outright halt.
+
+**What's not here.** No scenario asserts a specific dollar loss ceiling;
+the requirement is that controls *engage* under stress, not a promised
+maximum drawdown, which depends on position sizing decisions outside
+this module's scope. Corporate-action and exchange-holiday scenarios
+reuse `CorporateActionProvider`/`TradingCalendar` directly rather than
+inventing a parallel data path, consistent with the project's
+reuse-not-reimplement discipline for this phase (`_drawdown_stats`,
+`_recovery_duration`, `RiskManager`, and `CircuitBreaker` are reused
+from Phases 9 and 7b outright, not reimplemented).
 
 ## Why the module boundaries matter for correctness, not just style
 
