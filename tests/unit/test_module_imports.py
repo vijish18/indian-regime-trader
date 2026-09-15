@@ -55,6 +55,7 @@ MODULES = [
     "execution.reconciliation",
     "broker",
     "broker.base",
+    "broker.compliance",
     "broker.errors",
     "broker.factory",
     "broker.adapters",

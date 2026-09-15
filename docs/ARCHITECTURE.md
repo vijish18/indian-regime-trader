@@ -168,6 +168,7 @@ yet.")` body — not working logic.
 | 9c | Performance analytics (`backtest/comparison.py`, `backtest/robustness.py`, `backtest/report.py`) | **Done** |
 | 10 | Broker interface, paper adapter, order manager (`broker/base.py`, `broker/adapters/paper_broker.py`, `execution/order_manager.py`) | **Done** |
 | 10b | Zerodha Kite Connect v3 adapter, broker factory (`broker/zerodha/`, `broker/factory.py`) | **Done** |
+| 10c | India API/algo operational controls (`config.models.ComplianceConfig`, `broker/compliance.py`, `docs/COMPLIANCE.md`) | **Done** |
 | 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
 | 11b | Reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
@@ -1265,6 +1266,82 @@ real account carries none of the risk placing a real order does.
   `KiteBroker.authenticate()` takes the resulting `request_token` as
   input; `KiteBroker.login_url()` builds the URL a human visits to get
   one.
+
+## India API/algo operational controls (Phase 10c)
+
+`config.models.ComplianceConfig` and `broker/compliance.py` answer this
+phase's own instruction as directly as the phase name states it: "do this
+before connecting the live account." The user's exact closing instruction
+was also explicit about method -- "Do not make regulatory assumptions" --
+so before any line of this section's code was written, the applicable NSE
+circular, the SEBI framework it implements, and Zerodha's own published
+material on it were fetched and read (`docs/COMPLIANCE.md` is the full
+research record, including what could **not** be verified and why). This
+section is the design that research produced, not a description of an
+assumption.
+
+**Three independent gates, not one.** `broker/factory.py` already required
+`execution.mode == "live"` and an explicit `enable_live_trading=True`
+(Phase 10b). This phase adds a third: `ComplianceGate(settings.compliance)`
+is constructed before a `KiteBroker` ever is, and its constructor is
+itself the "refuse to operate" gate -- `broker_authorization_confirmed`
+not `True`, `static_ip_primary` still the `"0.0.0.0"` placeholder, or
+`algo_identifier` still `"UNSET"` each raise `ComplianceError` immediately,
+before any network call is even possible. `settings.yaml`'s own default
+`compliance:` section ships with exactly these placeholders -- the default
+configuration is *engineered* to fail this gate, not merely undocumented
+as unready.
+
+**Every required control maps onto a specific, cited mechanism**, not a
+generic "compliance" checkbox:
+
+| Requirement | Mechanism |
+|---|---|
+| Missing static IP / algo identifier | `ComplianceGate.__init__` refuses to construct |
+| Missing broker authorization | Same -- `broker_authorization_confirmed` |
+| Unsupported order type / validity | `ComplianceGate.check_order_type`/`check_validity`, checked independently of (in addition to, not instead of) `broker.zerodha.kite_mappings.SUPPORTED_ORDER_TYPES` |
+| Expired authentication | `ComplianceGate.check_session`, computed from `Broker.health_check().login_time` (Phase 10b) against `session_max_age_hours` |
+| Order-per-second limit | `ComplianceGate.check_rate_limit`, a client-side sliding one-second window in front of Kite's own server-side 10 OPS ceiling |
+| Algo-order tagging | `ComplianceGate.check_order` overwrites `BrokerOrder.tag` with `algo_identifier` before any order reaches an adapter |
+
+**Never substitutes a prohibited value for an allowed one** -- every one of
+the checks above either returns the (possibly tag-rewritten) order
+unchanged or raises `ComplianceError`; there is no code path that swaps a
+rejected `order_type`/`validity` for a permitted one and proceeds. This is
+tested directly (`test_check_order_never_substitutes_a_prohibited_type_it_just_refuses`):
+the order passed in is asserted unmodified after the raise, because
+nothing inside the gate ever had the chance to modify it before deciding
+to refuse.
+
+**`ComplianceGuardedBroker` applies the gate uniformly, including to
+`close_position`.** A naive wrapper that simply delegated
+`close_position`/`close_all_positions` to the inner adapter would silently
+bypass every check above -- both `PaperBroker` and `KiteBroker` build their
+closing sell order and call their *own* internal `place_order`, never the
+wrapper's. `ComplianceGuardedBroker` therefore reimplements the identical
+order-construction logic (get the position, get a quote, build a marketable
+SELL `BrokerOrder`) and routes it through its own `place_order`, so a
+position close is tagged and gated exactly like any other order --
+documented in the class's own docstring as *why* it duplicates roughly ten
+lines already present twice elsewhere, rather than leaving the duplication
+unexplained.
+
+**What Phase 16's own research could not verify, and how the code reflects
+that honestly:** `docs/COMPLIANCE.md`'s "What was not verified" section
+lists, among other gaps, that Kite Connect's own API documentation --
+re-checked directly during this phase -- makes no mention of the NSE-cited
+algo-tag digit format at all. Rather than hard-code an unconfirmed byte
+pattern into `KiteBroker`, the tag mechanism this system actually uses is
+the one field Kite's docs *do* document (`tag`, generic and pre-existing
+since Phase 10b) carrying `ComplianceConfig.algo_identifier` -- an honest,
+stated choice pending the broker's written confirmation, not a guess
+dressed up as a verified fact. The same section documents that the
+5-year default for `audit_log_retention_years` is drawn from general SEBI
+stock-broker record-keeping norms, not a retail-algo-specific primary
+source, for the same reason: `docs/COMPLIANCE.md` is where a reader finds
+out which numbers in this codebase are broker-confirmed and which are
+still open questions, rather than that distinction being lost once the
+research becomes code.
 
 ## Why the module boundaries matter for correctness, not just style
 

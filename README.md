@@ -14,13 +14,14 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-15 complete: configuration, the broker-independent data layer,
+**Phases 1-16 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
 model, realistic walk-forward backtesting, performance analytics, stress
-testing, a paper-trading engine, and a broker abstraction with a real
-Zerodha Kite Connect adapter (live trading disabled by default).**
+testing, a paper-trading engine, a broker abstraction with a real Zerodha
+Kite Connect adapter, and India API/algo operational controls (live
+trading disabled by default throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -288,22 +289,44 @@ Zerodha Kite Connect adapter (live trading disabled by default).**
   full/quote/ltp tick decoding for equities, driven by the caller one
   frame at a time rather than a background thread (no WebSocket
   transport ships by default — connecting a real socket is deliberately
-  left unwired). **Live trading is gated twice, independently**:
-  `broker/factory.py` only constructs a live-capable broker when
-  `execution.mode == "live"` *and* the caller passes
-  `enable_live_trading=True` explicitly; `KiteBroker` itself defaults
-  that flag to `False` and re-checks it before every order-placing call.
-  Credentials come from the environment (`BROKER_API_KEY`/
-  `BROKER_API_SECRET`), never from `settings.yaml`. Every test runs
-  against a scripted, in-memory fake HTTP transport — nothing here
-  makes a real network call, and default mode remains paper.
+  left unwired). **Live trading is gated three times, independently**
+  (the third added by the compliance layer below): `broker/factory.py`
+  only constructs a live-capable broker when `execution.mode == "live"`
+  *and* the caller passes `enable_live_trading=True` explicitly;
+  `KiteBroker` itself defaults that flag to `False` and re-checks it
+  before every order-placing call. Credentials come from the environment
+  (`BROKER_API_KEY`/`BROKER_API_SECRET`), never from `settings.yaml`.
+  Every test runs against a scripted, in-memory fake HTTP transport —
+  nothing here makes a real network call, and default mode remains paper.
+- **India API/algo operational controls** (`config.models.ComplianceConfig`,
+  `broker/compliance.py`, `docs/COMPLIANCE.md`) — before this phase's own
+  code was written, the applicable NSE circular and SEBI retail-algo
+  framework were researched and fetched directly (not recalled or
+  assumed); `docs/COMPLIANCE.md` is that research record, including
+  everything that could **not** be verified and why. `ComplianceGate` is
+  the third independent live-trading gate: its constructor refuses to
+  exist — `ComplianceError`, a hard failure — if
+  `broker_authorization_confirmed` is not `True`, or `static_ip_primary`/
+  `algo_identifier` are still `settings.yaml`'s default placeholders
+  (`"0.0.0.0"`/`"UNSET"`), before any network call is even possible. Per
+  order, it enforces an allow-list of order types/validities (`MARKET`
+  and `IOC` excluded, per NSE's algo rules), a session-age check against
+  `Broker.health_check().login_time` ("expired authentication" is a hard
+  failure, not a retry), and a client-side sliding-window order-per-second
+  throttle — and **never substitutes a prohibited value for an allowed
+  one**: every check either returns the order unchanged (with the
+  required algo-identifier tag applied) or raises, with no code path that
+  silently swaps in a permitted type and proceeds.
+  `ComplianceGuardedBroker` applies all of this uniformly by wrapping any
+  `Broker`, including reimplementing `close_position` so a position close
+  is tagged and gated exactly like any other order rather than bypassing
+  the gate through the inner adapter's own internal call.
 
-**Position sizing, reconciliation, and live operational controls are not
-implemented yet** — `risk/position_sizer.py` (converting an approved
-target weight into a final, risk-bounded order quantity),
-`execution/reconciliation.py`, and everything past them remain typed
-stubs that define the interfaces for later phases. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Position sizing and reconciliation are not implemented yet** —
+`risk/position_sizer.py` (converting an approved target weight into a
+final, risk-bounded order quantity), `execution/reconciliation.py`, and
+everything past them remain typed stubs that define the interfaces for
+later phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather

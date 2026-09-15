@@ -87,6 +87,7 @@ from broker.errors import (
     BrokerSessionExpiredError,
 )
 from broker.zerodha.kite_mappings import (
+    KITE_VALIDITIES,
     SUPPORTED_EXCHANGES,
     SUPPORTED_ORDER_TYPES,
     SUPPORTED_PRODUCTS,
@@ -401,9 +402,15 @@ class KiteBroker(Broker):
                 f"product {order.product!r} not supported by this adapter "
                 f"(only {sorted(SUPPORTED_PRODUCTS)})"
             )
+        if order.validity not in KITE_VALIDITIES:
+            raise BrokerCapabilityError(
+                f"validity {order.validity!r} is not a recognized Kite validity "
+                f"(one of {sorted(KITE_VALIDITIES)})"
+            )
         if order.limit_price is None or order.limit_price <= 0:
             raise BrokerRequestError("a LIMIT order requires a positive limit_price")
 
+        tag = order.tag if order.tag else order.client_order_id.replace("-", "")[:20]
         params: dict[str, object] = {
             "tradingsymbol": tradingsymbol,
             "exchange": exchange,
@@ -412,8 +419,8 @@ class KiteBroker(Broker):
             "quantity": order.quantity,
             "product": order.product,
             "price": order.limit_price,
-            "validity": "DAY",
-            "tag": order.client_order_id.replace("-", "")[:20],
+            "validity": order.validity,
+            "tag": tag[:20],
         }
         payload = _as_dict(
             self._request("POST", f"/orders/{order.variety}", params=params), "place order"

@@ -10,6 +10,7 @@ the system's own architectural constraints (see docs/ARCHITECTURE.md,
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -471,6 +472,126 @@ class PaperTradingConfig(BaseModel):
     ``default_avg_daily_value_inr`` above."""
 
 
+class ComplianceConfig(BaseModel):
+    """India API/algo operational controls (Phase 16, ``docs/COMPLIANCE.md``).
+
+    Governs whether this system may operate a live-capable broker at all,
+    not just how it behaves once running: ``broker.compliance.ComplianceGate``
+    refuses to construct itself if any of this is missing or invalid, and
+    refuses every order that would violate it -- "must produce a HARD
+    FAILURE, not a best-effort order" is this config's entire reason to
+    exist. See ``docs/COMPLIANCE.md`` for the research behind every field
+    below and, just as importantly, what remains unverified.
+    """
+
+    model_config = {"frozen": True}
+
+    compliance_version: str = Field(min_length=1)
+    """A human-readable tag for the source rules this configuration was
+    last checked against (e.g. ``"2025-11-03-nse-retail-algo-faq"``) --
+    docs/SPECIFICATION.md section 13's "compliance configuration version"
+    requirement, made concrete: a later regulatory or broker change is a
+    deliberate version bump here, not silent drift."""
+
+    broker_authorization_confirmed: bool
+    """Must be explicitly ``True``. Attests a human has confirmed with the
+    broker -- not assumed, not defaulted -- that this account's API/algo
+    setup is actually eligible for live trading (docs/COMPLIANCE.md,
+    "Broker-specific algo onboarding requirements"). ``False`` is this
+    system's honest default state before that confirmation has actually
+    happened, not a placeholder to be flipped without it."""
+
+    static_ip_primary: str = Field(min_length=1)
+    """This system's own attestation of the static IP registered with the
+    broker for order-placing endpoints (docs/COMPLIANCE.md section 2) --
+    this code has no documented API to verify the broker's own dashboard
+    state, so this field exists to make "was this actually registered" a
+    recorded human decision rather than an assumption. ``"0.0.0.0"`` is
+    the not-yet-configured placeholder used in ``settings.yaml``'s default
+    (paper-mode) configuration -- syntactically a valid IP so the file
+    loads, but ``ComplianceGate`` treats it as equivalent to missing."""
+
+    static_ip_secondary: str | None = None
+
+    algo_identifier: str = Field(min_length=1)
+    """The identifier this account/strategy must tag every order with, per
+    NSE's algo-tagging requirement -- sourced from the broker's own
+    algo-onboarding confirmation (docs/COMPLIANCE.md section 4), never
+    invented by this codebase. ``"UNSET"`` is the not-yet-configured
+    placeholder, treated as equivalent to missing by ``ComplianceGate``."""
+
+    allowed_order_types: tuple[str, ...] = Field(min_length=1)
+    """Order types (Kite's ``order_type`` vocabulary) this system may
+    submit under the retail-algo framework -- ``MARKET`` is excluded by
+    NSE's own rule (docs/COMPLIANCE.md section 5); rejected below if
+    present rather than left to a caller to remember to omit it."""
+
+    allowed_validities: tuple[str, ...] = Field(min_length=1)
+    """Order validities (Kite's ``validity`` vocabulary) this system may
+    submit -- ``IOC`` is excluded by the same rule."""
+
+    max_orders_per_second: int = Field(gt=0, le=10)
+    """The unregistered tech-savvy route's regulatory ceiling is 10 OPS
+    (docs/COMPLIANCE.md section 8); capped here by field validation so
+    this configuration cannot claim a rate the route this system actually
+    uses does not cover -- exceeding 10 OPS requires formal exchange algo
+    registration, a materially different, unimplemented compliance
+    posture, not a config value to raise."""
+
+    session_max_age_hours: float = Field(gt=0, le=24)
+    """A Kite access token is valid for one trading day only
+    (docs/COMPLIANCE.md section 9); a session older than this is treated
+    as expired authentication and refuses further order placement."""
+
+    audit_log_retention_years: int = Field(ge=1)
+    """See docs/COMPLIANCE.md section 12 -- this figure is not verified
+    against a retail-algo-specific primary source during this phase's
+    research; confirm with the broker/compliance officer before relying
+    on it as an actual retention policy."""
+
+    @model_validator(mode="after")
+    def _order_types_and_validities_exclude_what_nse_prohibits(self) -> ComplianceConfig:
+        """MARKET orders and IOC validity are not permitted for algo flow
+        (docs/COMPLIANCE.md section 5) -- Kite's own API is technically
+        permissive enough to accept both, so this system must be the one
+        to refuse them, not assume the broker will."""
+        prohibited_order_types = {"MARKET"}
+        prohibited_validities = {"IOC"}
+        found_types = prohibited_order_types & {v.upper() for v in self.allowed_order_types}
+        if found_types:
+            raise ValueError(
+                f"allowed_order_types must not include a prohibited type: {sorted(found_types)} "
+                "-- NSE's retail-algo framework does not permit market orders for algo flow "
+                "(see docs/COMPLIANCE.md section 5)"
+            )
+        found_validities = prohibited_validities & {v.upper() for v in self.allowed_validities}
+        if found_validities:
+            raise ValueError(
+                f"allowed_validities must not include a prohibited value: "
+                f"{sorted(found_validities)} -- NSE's retail-algo framework does not permit "
+                "IOC orders for algo flow (see docs/COMPLIANCE.md section 5)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _static_ips_are_well_formed(self) -> ComplianceConfig:
+        """A malformed value is exactly as unsafe as a missing one -- this
+        is a syntactic check only (does this parse as an IP address), not
+        a claim that it is actually registered with the broker; see this
+        field's own docstring and docs/COMPLIANCE.md section 2."""
+        for label, value in (
+            ("static_ip_primary", self.static_ip_primary),
+            ("static_ip_secondary", self.static_ip_secondary),
+        ):
+            if value is None:
+                continue
+            try:
+                ipaddress.ip_address(value)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a valid IP address, got {value!r}") from exc
+        return self
+
+
 class BacktestConfig(BaseModel):
     model_config = {"frozen": True}
 
@@ -541,6 +662,7 @@ class Settings(BaseModel):
     execution: ExecutionConfig
     broker: BrokerConfig
     paper_trading: PaperTradingConfig
+    compliance: ComplianceConfig
     backtest: BacktestConfig
     costs: CostsConfig
     database: DatabaseConfig

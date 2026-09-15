@@ -191,6 +191,37 @@ paper_trading:
   default_volatility: 0.30           # a conservative broad-market annualized volatility
                                       # fallback when trailing history is too short to measure
 
+# India API/algo operational controls (Phase 16, docs/COMPLIANCE.md). The
+# placeholder values below (broker_authorization_confirmed: false,
+# static_ip_primary: 0.0.0.0, algo_identifier: UNSET) are deliberately
+# non-functional -- broker.compliance.ComplianceGate treats them as
+# equivalent to missing and refuses to operate a live-capable broker until
+# a human has replaced them with values confirmed directly with the broker.
+compliance:
+  compliance_version: "2025-11-03-nse-retail-algo-faq"  # bump this whenever the
+                                      # NSE/SEBI/broker rules in docs/COMPLIANCE.md
+                                      # are re-verified or change (SPECIFICATION.md
+                                      # section 13's "rules drift" requirement)
+  broker_authorization_confirmed: false  # set true only after the broker has
+                                      # confirmed in writing this account's
+                                      # API/algo setup is eligible -- see
+                                      # docs/COMPLIANCE.md section 13
+  static_ip_primary: "0.0.0.0"       # placeholder -- replace with the IP actually
+                                      # registered in the broker's developer console
+  static_ip_secondary: null
+  algo_identifier: "UNSET"           # placeholder -- replace with the identifier the
+                                      # broker's algo onboarding assigns to this account
+  allowed_order_types: [LIMIT, SL, SL-M]  # MARKET excluded -- NSE prohibits it for
+                                      # algo flow (docs/COMPLIANCE.md section 5)
+  allowed_validities: [DAY, TTL]     # IOC excluded -- same prohibition
+  max_orders_per_second: 10          # the unregistered tech-savvy route's regulatory
+                                      # ceiling (docs/COMPLIANCE.md section 8)
+  session_max_age_hours: 12          # a Kite access token is valid for one trading
+                                      # day only (docs/COMPLIANCE.md section 9)
+  audit_log_retention_years: 5       # not verified against a retail-algo-specific
+                                      # primary source -- see docs/COMPLIANCE.md
+                                      # section 12 before relying on this figure
+
 backtest:
   training_window_sessions: 756
   test_window_sessions: 126

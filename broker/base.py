@@ -132,6 +132,23 @@ class BrokerOrder:
     distinct routes with their own rules). Defaults to the plain case;
     this system does not place any of the special varieties in V1."""
 
+    validity: str = "DAY"
+    """How long the order rests if unfilled (a Kite Connect concept:
+    ``DAY``/``IOC``/``TTL``). Defaults to ``DAY``; see
+    ``config.models.ComplianceConfig.allowed_validities`` and
+    ``docs/COMPLIANCE.md`` section 5 for why ``IOC`` is excluded from this
+    system's algo-order flow."""
+
+    tag: str | None = None
+    """An optional, adapter-defined label attached to the order --
+    ``None`` lets the adapter fall back to its own default (e.g.
+    ``KiteBroker`` uses a truncated ``client_order_id``).
+    ``broker.compliance.ComplianceGuardedBroker`` overwrites this with
+    ``ComplianceConfig.algo_identifier`` before every live order, per
+    NSE's algo-tagging requirement (``docs/COMPLIANCE.md`` section 4) --
+    this field is broker-neutral so that injection happens above any one
+    adapter, not inside ``KiteBroker`` specifically."""
+
 
 @dataclass(frozen=True)
 class BrokerFill:

@@ -2,20 +2,25 @@
 paper vs. live, so nothing else in the codebase branches on
 ``settings.execution.mode`` or constructs a concrete adapter directly.
 
-**Default mode stays PAPER**, and constructing a live-capable broker
-needs two independent, explicit confirmations, neither of which alone is
-enough:
+**Default mode stays PAPER**, and constructing a live-capable broker needs
+three independent, explicit confirmations, none of which alone is enough:
 
-1. ``settings.execution.mode == "live"`` in configuration, and
+1. ``settings.execution.mode == "live"`` in configuration,
 2. ``enable_live_trading=True`` passed explicitly to :func:`build_broker`
-   by the caller.
+   by the caller, and
+3. ``settings.compliance`` (``config.models.ComplianceConfig``) passing
+   every check in ``broker.compliance.ComplianceGate`` -- broker
+   authorization confirmed, a real static IP and algo identifier on
+   record, not the ``settings.yaml`` placeholders (Phase 16,
+   ``docs/COMPLIANCE.md``).
 
 A config-file value alone (easy to typo, easy to leave set from a prior
-session) must never be sufficient to place a real order -- the second,
-code-level confirmation is deliberate friction, not an oversight.
-Credentials (``BROKER_API_KEY``/``BROKER_API_SECRET``) are read from the
-environment, never from ``settings.yaml`` (see ``.env.example`` and
-``config/loader.py``'s own documented secrets convention).
+session) must never be sufficient to place a real order -- the second and
+third, independently-checked confirmations are deliberate friction, not
+an oversight. Credentials (``BROKER_API_KEY``/``BROKER_API_SECRET``) are
+read from the environment, never from ``settings.yaml`` (see
+``.env.example`` and ``config/loader.py``'s own documented secrets
+convention).
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import os
 from backtest.costs import CostModel
 from broker.adapters.paper_broker import PaperBroker
 from broker.base import Broker
+from broker.compliance import ComplianceGate, ComplianceGuardedBroker
 from config.models import Settings
 from data.interfaces import MarketDataProvider
 from execution.position_tracker import PositionTracker
@@ -33,7 +39,9 @@ from execution.position_tracker import PositionTracker
 class BrokerFactoryError(RuntimeError):
     """The configured broker could not be constructed -- missing
     credentials, an unsupported provider, or a live request that was not
-    explicitly confirmed."""
+    explicitly confirmed. A compliance failure raises
+    ``broker.compliance.ComplianceError`` instead (a more specific,
+    still-hard failure), not this exception."""
 
 
 def build_broker(
@@ -68,6 +76,13 @@ def build_broker(
             "a real order"
         )
 
+    # Third gate: refuses to construct anything further if compliance
+    # configuration is missing or still a placeholder (Phase 16). Raises
+    # broker.compliance.ComplianceError, not caught here -- a compliance
+    # failure must propagate as exactly what it is, not be laundered into
+    # a generic BrokerFactoryError.
+    gate = ComplianceGate(settings.compliance)
+
     api_key = os.environ.get("BROKER_API_KEY")
     api_secret = os.environ.get("BROKER_API_SECRET")
     if not api_key or not api_secret:
@@ -78,4 +93,5 @@ def build_broker(
 
     from broker.zerodha.kite_broker import KiteBroker
 
-    return KiteBroker(api_key=api_key, api_secret=api_secret, enable_live_trading=True)
+    kite_broker = KiteBroker(api_key=api_key, api_secret=api_secret, enable_live_trading=True)
+    return ComplianceGuardedBroker(inner=kite_broker, gate=gate)
