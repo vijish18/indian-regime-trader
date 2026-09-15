@@ -319,7 +319,7 @@ properties:
     additionalProperties: false
     required: [provider, static_ip_required]
     properties:
-      provider: { type: string, minLength: 1 }
+      provider: { type: string, enum: [paper, zerodha] }
       static_ip_required: { type: boolean }
 
   paper_trading:

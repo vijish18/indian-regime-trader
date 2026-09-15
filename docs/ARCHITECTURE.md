@@ -67,6 +67,11 @@ rule or equivalent test once there is real code to check (Phase 5+):
   place a later layer intentionally depends on an earlier one across the broker/backtest
   package boundary; it does not go the other way -- `backtest/` never imports `broker/` or
   `execution/`.
+- `broker/<broker_name>/` (Phase 10b: `broker/zerodha/`) is the only place any
+  broker-specific detail -- endpoint paths, request/response field names, status
+  vocabulary, WebSocket framing -- may appear anywhere in this codebase. `broker/factory.py`
+  is the only module outside `broker/zerodha/` that imports from it (to construct one);
+  strategy, risk, portfolio, and execution code depend only on `broker.base.Broker`.
 
 ## Resolved specification ambiguities
 
@@ -162,6 +167,7 @@ yet.")` body — not working logic.
 | 9b | Stress testing (`backtest/stress_test.py`) | **Done** |
 | 9c | Performance analytics (`backtest/comparison.py`, `backtest/robustness.py`, `backtest/report.py`) | **Done** |
 | 10 | Broker interface, paper adapter, order manager (`broker/base.py`, `broker/adapters/paper_broker.py`, `execution/order_manager.py`) | **Done** |
+| 10b | Zerodha Kite Connect v3 adapter, broker factory (`broker/zerodha/`, `broker/factory.py`) | **Done** |
 | 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
 | 11b | Reconciliation, live operational controls (`execution/reconciliation.py`) | Stubbed |
 | 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
@@ -1133,6 +1139,132 @@ next-session-open execution model is a different, already thoroughly tested desi
 in this phase's requirement needed it rewritten — the requirement was that `PaperBroker` and
 a future `LiveBroker` be interchangeable beneath the same interface, which `Broker` already
 guarantees structurally.
+
+## Broker abstraction and the Zerodha Kite Connect adapter (Phase 10b)
+
+This phase's own instruction was explicit and is worth restating exactly
+because it shaped the whole design: *do not guess the broker API*. Before
+any adapter code was written, the user chose Zerodha Kite Connect v3, and
+every endpoint path, request parameter, response field, status string,
+header, and WebSocket byte layout in `broker/zerodha/` was then fetched
+from Zerodha's own published documentation
+(https://kite.trade/docs/connect/v3/) and verified against the live pages
+-- not recalled from training data, not inferred from a similar broker's
+API, and not filled in with a plausible-looking guess where the docs were
+thin. Where the docs did not give a precise answer (index-instrument
+WebSocket packets, a dedicated server-time endpoint), that gap is
+documented at the point it matters in `broker/zerodha/kite_broker.py` and
+`kite_ticker.py`'s own module docstrings, not papered over.
+
+### The generic interface grew to earn its "generic" label
+
+Phase 10's original `Broker` ABC (built against `PaperBroker` alone) was
+extended, not replaced, to actually cover every required capability
+against a second, real adapter:
+
+- `BrokerCapabilities` (new) lets a caller ask what an adapter supports
+  *before* calling it, rather than discovering a gap by catching
+  `BrokerCapabilityError` -- `KiteBroker.capabilities()` reports the
+  authenticated account's own actual exchange/product/order-type
+  entitlements (fetched once from `GET /user/profile` at `authenticate()`
+  time), not just what Kite the API supports in the abstract.
+- `Account` was renamed to `BrokerAccount` and gained `account_id`, so
+  "account information" and "funds" -- two separate items in this
+  phase's required-capabilities list -- are both satisfied by one
+  `get_account()` call and one type, rather than inventing a seventh
+  dataclass this phase's own instructions did not ask for.
+- `BrokerFill` (new) and `Broker.get_trades()` answer "trade/fill
+  history" -- a fill is not the same event as an order (one order can
+  have many fills), a distinction `PaperBroker` already modeled
+  internally (`PaperFill`) but had never exposed through the generic
+  interface until now.
+- `Broker.get_order`'s existing "regardless of whether it is still open"
+  contract is honored by `KiteBroker` even though Kite's own API has no
+  client-side-ID lookup at all (see "The client_order_id bridge" below).
+- `Broker.subscribe_market_data` (new) answers "market data subscription
+  where available" literally: it is `KiteBroker`'s and `PaperBroker`'s
+  *only* required-but-optional capability -- `PaperBroker` raises
+  `BrokerCapabilityError` (no live feed exists in paper mode, by design),
+  `KiteBroker` raises the same exception only when no `KiteTicker`
+  transport was actually configured, and delegates to it otherwise.
+- `HealthStatus` gained `session_active`/`login_time` so "connection
+  health" and "broker time/session information" -- two more separate
+  required-capabilities list items -- are both satisfied by one
+  `health_check()` call. Kite Connect has no dedicated server-time
+  endpoint (verified absent, not assumed absent); session state is the
+  honest substitute, documented as such rather than left unexplained.
+
+### The client_order_id bridge
+
+`Broker`'s contract promises callers can query any order by the
+client-generated `client_order_id`. Kite's API has no such concept --
+`POST /orders/:variety` returns only Kite's own broker-assigned
+`order_id`, and every other order endpoint addresses by that same ID.
+`KiteBroker` bridges the two with an in-memory `client_order_id ->
+kite_order_id` map populated at `place_order` time (plus a truncated
+`client_order_id` in Kite's own `tag` field, a human-visible breadcrumb
+in the Kite order-book UI, not the actual lookup mechanism). This mapping
+is **not persisted** -- an order this process did not place itself has no
+known `client_order_id`, and `get_order`/`get_trades` fall back to
+reporting Kite's own `order_id` as the identifier in that case,
+documented in `kite_broker.py`'s own module docstring rather than hidden.
+Closing this gap with real reconciliation against the broker's own state
+at startup is Phase 11b's job, not this adapter's -- consistent with
+every other place this codebase has already deferred reconciliation.
+
+### Live trading is gated twice, independently
+
+Per this phase's explicit instruction ("default mode must remain PAPER";
+"do not enable live trading"), nothing in this repository can place a
+real order without two separate, explicit confirmations, neither
+sufficient alone:
+
+1. `broker/factory.py`'s `build_broker()` only ever constructs a
+   `KiteBroker` when `settings.execution.mode == "live"` *and* the caller
+   passes `enable_live_trading=True` explicitly -- a config-file value by
+   itself (easy to leave set from a prior session, easy to typo) is
+   deliberately not enough.
+2. `KiteBroker` itself defaults `enable_live_trading=False` in its own
+   constructor and checks it again, independently, inside every
+   order-placing method (`place_order`, `modify_order`, `cancel_order`,
+   `close_position`, `close_all_positions`) before making any network
+   call -- so even a caller that bypasses the factory and constructs
+   `KiteBroker` directly cannot place a real order by accident.
+
+Credentials (`BROKER_API_KEY`/`BROKER_API_SECRET`) are read from the
+environment inside `build_broker()`, never from `settings.yaml` -- the
+`.env.example` placeholders these names came from were planted in Phase
+1, anticipating exactly this phase. Read-only calls (account, positions,
+orders, quotes, health) are not gated -- authenticating and observing a
+real account carries none of the risk placing a real order does.
+
+### What Kite's own docs left genuinely ambiguous, and how that was handled
+
+- **WebSocket index-instrument packets.** The verified byte table covers
+  equity LTP/quote/full packets precisely; Kite's own docs describe the
+  shorter index-quote-mode variant only in prose, not a byte table.
+  `kite_ticker.py`'s `decode_binary_ticks` implements only the verified
+  equity layouts and documents the index gap explicitly rather than
+  guessing a layout -- this system's regime features already read
+  NIFTY/VIX through `data.interfaces.MarketDataProvider` (Phase 4), not
+  through this streaming path, so the gap costs nothing today.
+- **No real WebSocket transport ships.** `KiteTickerTransport` is a
+  `Protocol`; connecting a real `wss://` socket needs a WebSocket client
+  this codebase does not otherwise depend on, and this phase's own scope
+  is explicit that nothing should touch a real connection. URL/message
+  construction and binary decoding (the parts Kite's docs actually
+  specify precisely) are fully implemented and tested; opening a live
+  socket is left to whoever wires in a real transport when live
+  streaming is actually enabled -- documented in `kite_ticker.py`'s
+  module docstring, not silently absent.
+- **No automated browser login.** Kite's login step is a human completing
+  a form at `kite.zerodha.com` and Kite redirecting back with a
+  `request_token`; there is no documented API for automating it, and
+  attempting to script it would mean interacting with an undocumented,
+  unstable surface -- exactly what this phase's instruction forbids.
+  `KiteBroker.authenticate()` takes the resulting `request_token` as
+  input; `KiteBroker.login_url()` builds the URL a human visits to get
+  one.
 
 ## Why the module boundaries matter for correctness, not just style
 

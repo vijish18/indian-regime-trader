@@ -64,19 +64,22 @@ from __future__ import annotations
 import datetime as dt
 import math
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
 from backtest.costs import CostModel, ExecutionCostEstimate, TradeSide
 from backtest.engine import market_liquidity_stats
 from broker.base import (
-    Account,
     Broker,
+    BrokerAccount,
+    BrokerCapabilities,
+    BrokerFill,
     BrokerOrder,
     BrokerPosition,
     BrokerQuote,
     HealthStatus,
 )
+from broker.errors import BrokerCapabilityError
 from config.models import ExecutionConfig, PaperTradingConfig
 from data.errors import DataNotAvailableError
 from data.interfaces import MarketDataProvider
@@ -150,6 +153,7 @@ class PaperBroker(Broker):
         self._orders: dict[str, BrokerOrder] = {}
         self._created_at: dict[str, dt.datetime] = {}
         self._fills: list[PaperFill] = []
+        self._login_time = self._clock()
 
     @property
     def fills(self) -> tuple[PaperFill, ...]:
@@ -188,12 +192,36 @@ class PaperBroker(Broker):
 
     # -- Broker interface ---------------------------------------------
 
-    def get_account(self) -> Account:
+    def capabilities(self) -> BrokerCapabilities:
+        return BrokerCapabilities(
+            broker_name="paper",
+            supports_order_modification=True,
+            supports_market_data_streaming=False,
+            supported_exchanges=frozenset({"NSE", "BSE"}),
+            supported_products=frozenset({"CNC"}),
+            supported_order_types=frozenset({self.execution_config.order_type}),
+            supported_varieties=frozenset({"regular"}),
+        )
+
+    def authenticate(self, credentials: Mapping[str, str]) -> None:
+        """A no-op: this adapter has no real session to establish, and is
+        always ready to accept calls once constructed. Present so callers
+        can treat every ``Broker`` uniformly rather than special-casing
+        the paper adapter."""
+        self._login_time = self._clock()
+
+    def get_account(self) -> BrokerAccount:
         self._mark_positions_to_market()
         equity = self._cash
         for position in self.position_tracker.current_positions():
             equity += position.quantity * position.current_price
-        return Account(equity=equity, cash=self._cash, buying_power=self._cash, as_of=self._clock())
+        return BrokerAccount(
+            account_id="paper",
+            equity=equity,
+            cash=self._cash,
+            buying_power=self._cash,
+            as_of=self._clock(),
+        )
 
     def get_positions(self) -> list[BrokerPosition]:
         self._mark_positions_to_market()
@@ -232,6 +260,29 @@ class PaperBroker(Broker):
                 )
             )
         return quotes
+
+    def subscribe_market_data(
+        self, instrument_ids: list[str], on_tick: Callable[[BrokerQuote], None]
+    ) -> Callable[[], None]:
+        raise BrokerCapabilityError(
+            "PaperBroker has no live streaming feed -- poll get_quotes() instead"
+        )
+
+    def get_trades(self, order_id: str | None = None) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                trade_id=str(index),
+                order_id=fill.client_order_id,
+                instrument_id=fill.instrument_id,
+                side=fill.side.value,
+                quantity=fill.quantity,
+                price=fill.fill_price,
+                product="CNC",
+                as_of=fill.as_of,
+            )
+            for index, fill in enumerate(self._fills, start=1)
+            if order_id is None or fill.client_order_id == order_id
+        ]
 
     def place_order(self, order: BrokerOrder) -> BrokerOrder:
         self._expire_stale_orders()
@@ -329,6 +380,8 @@ class PaperBroker(Broker):
             healthy=True,
             detail="paper broker: in-process simulation, always reachable",
             checked_at=self._clock(),
+            session_active=True,
+            login_time=self._login_time,
         )
 
     # -- internals -------------------------------------------------------
@@ -341,7 +394,17 @@ class PaperBroker(Broker):
             a.quantity,
             a.order_type,
             a.limit_price,
-        ) == (b.instrument_id, b.side, b.quantity, b.order_type, b.limit_price)
+            a.product,
+            a.variety,
+        ) == (
+            b.instrument_id,
+            b.side,
+            b.quantity,
+            b.order_type,
+            b.limit_price,
+            b.product,
+            b.variety,
+        )
 
     def _validate(self, order: BrokerOrder) -> str | None:
         """Returns a rejection reason, or ``None`` if the order passes

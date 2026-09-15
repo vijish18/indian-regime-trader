@@ -15,6 +15,7 @@ never by reaching into ``PaperBroker``'s private state.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 import pytest
@@ -22,7 +23,16 @@ import pytest
 from backtest.cost_schedule import CostScheduleRepository
 from backtest.costs import CostModel, TradeSide
 from broker.adapters.paper_broker import PaperBroker, PaperBrokerError
-from broker.base import Account, Broker, BrokerOrder, BrokerPosition, BrokerQuote, HealthStatus
+from broker.base import (
+    Broker,
+    BrokerAccount,
+    BrokerCapabilities,
+    BrokerFill,
+    BrokerOrder,
+    BrokerPosition,
+    BrokerQuote,
+    HealthStatus,
+)
 from config.models import ExecutionConfig, PaperTradingConfig
 from data.errors import DataNotAvailableError
 from data.interfaces import MarketDataProvider
@@ -682,7 +692,13 @@ class _FlakyBroker(Broker):
             raise TimeoutError("simulated network timeout waiting for broker ack")
         return self._inner.place_order(order)
 
-    def get_account(self) -> Account:
+    def capabilities(self) -> BrokerCapabilities:
+        return self._inner.capabilities()
+
+    def authenticate(self, credentials: Mapping[str, str]) -> None:
+        self._inner.authenticate(credentials)
+
+    def get_account(self) -> BrokerAccount:
         return self._inner.get_account()
 
     def get_positions(self) -> list[BrokerPosition]:
@@ -694,8 +710,16 @@ class _FlakyBroker(Broker):
     def get_order(self, order_id: str) -> BrokerOrder:
         return self._inner.get_order(order_id)
 
+    def get_trades(self, order_id: str | None = None) -> list[BrokerFill]:
+        return self._inner.get_trades(order_id)
+
     def get_quotes(self, instrument_ids: list[str]) -> list[BrokerQuote]:
         return self._inner.get_quotes(instrument_ids)
+
+    def subscribe_market_data(
+        self, instrument_ids: list[str], on_tick: Callable[[BrokerQuote], None]
+    ) -> Callable[[], None]:
+        return self._inner.subscribe_market_data(instrument_ids, on_tick)
 
     def modify_order(self, order_id: str, changes: dict[str, object]) -> BrokerOrder:
         return self._inner.modify_order(order_id, changes)

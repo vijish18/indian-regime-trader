@@ -8,10 +8,20 @@ that).
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable, Mapping
 
 import pytest
 
-from broker.base import Account, Broker, BrokerOrder, BrokerPosition, BrokerQuote, HealthStatus
+from broker.base import (
+    Broker,
+    BrokerAccount,
+    BrokerCapabilities,
+    BrokerFill,
+    BrokerOrder,
+    BrokerPosition,
+    BrokerQuote,
+    HealthStatus,
+)
 from execution.order_manager import (
     OrderManager,
     OrderState,
@@ -42,7 +52,13 @@ class _StubBroker(Broker):
         self.orders: dict[str, BrokerOrder] = {}
         self.placed: list[BrokerOrder] = []
 
-    def get_account(self) -> Account:
+    def capabilities(self) -> BrokerCapabilities:
+        raise NotImplementedError
+
+    def authenticate(self, credentials: Mapping[str, str]) -> None:
+        raise NotImplementedError
+
+    def get_account(self) -> BrokerAccount:
         raise NotImplementedError
 
     def get_positions(self) -> list[BrokerPosition]:
@@ -57,7 +73,15 @@ class _StubBroker(Broker):
         except KeyError:
             raise RuntimeError(f"unknown order: {order_id}") from None
 
+    def get_trades(self, order_id: str | None = None) -> list[BrokerFill]:
+        raise NotImplementedError
+
     def get_quotes(self, instrument_ids: list[str]) -> list[BrokerQuote]:
+        raise NotImplementedError
+
+    def subscribe_market_data(
+        self, instrument_ids: list[str], on_tick: Callable[[BrokerQuote], None]
+    ) -> Callable[[], None]:
         raise NotImplementedError
 
     def place_order(self, order: BrokerOrder) -> BrokerOrder:

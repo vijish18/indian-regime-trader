@@ -14,12 +14,13 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-14 complete: configuration, the broker-independent data layer,
+**Phases 1-15 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
 model, realistic walk-forward backtesting, performance analytics, stress
-testing, and a paper-trading engine.**
+testing, a paper-trading engine, and a broker abstraction with a real
+Zerodha Kite Connect adapter (live trading disabled by default).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -242,8 +243,8 @@ testing, and a paper-trading engine.**
   than one hand-picked case.
 - **Paper-trading engine** (`broker/base.py`, `broker/adapters/paper_broker.py`,
   `execution/order_manager.py`, `execution/position_tracker.py`) — a full
-  `Broker` implementation strategy code cannot distinguish from a future
-  live adapter, since both would sit behind the identical interface.
+  `Broker` implementation strategy code cannot distinguish from the live
+  Zerodha adapter below, since both sit behind the identical interface.
   `OrderManager` owns a ten-state order lifecycle (`CREATED` through
   `FILLED`/`CANCELLED`/`REJECTED`/`EXPIRED`, plus `UNKNOWN` for a lost or
   ambiguous broker response) and enforces idempotency by a caller-supplied
@@ -263,8 +264,39 @@ testing, and a paper-trading engine.**
   buy beyond available cash) as defense in depth on top of whatever
   `RiskManager` already approved upstream. `PositionTracker` is the one
   portfolio-state shape (weighted-average cost, realized and unrealized
-  P&L) both this paper broker and a future live adapter will produce.
+  P&L) both this paper broker and a live adapter produce.
   Connects to nothing real: no live broker, no live market-data feed.
+- **Broker abstraction and a real Zerodha Kite Connect v3 adapter**
+  (`broker/base.py`, `broker/errors.py`, `broker/factory.py`,
+  `broker/zerodha/`) — the `Broker` interface grew `BrokerCapabilities`
+  (query what an adapter supports before calling it), `BrokerFill` and
+  `get_trades()` (trade/fill history, distinct from an order), and
+  `subscribe_market_data()` (streaming where available — both
+  `PaperBroker` and `KiteBroker` implement it, `PaperBroker` always
+  raising `BrokerCapabilityError` since no paper feed exists).
+  `broker/zerodha/kite_broker.py` is built strictly from Zerodha's
+  published Kite Connect v3 documentation, fetched and verified while
+  writing it — no invented endpoints, fields, auth methods, or
+  WebSocket behavior; every genuine gap in the docs (no client-side
+  order-ID lookup, no dedicated server-time endpoint, an
+  incompletely-documented index-instrument WebSocket packet layout) is
+  documented at the point it matters rather than guessed. It bridges
+  Kite's broker-assigned order IDs to this system's client-generated
+  ones with an in-memory map (not persisted — closing that gap is
+  Phase 11b's reconciliation work), and implements the verified
+  WebSocket subscribe/unsubscribe control messages and binary
+  full/quote/ltp tick decoding for equities, driven by the caller one
+  frame at a time rather than a background thread (no WebSocket
+  transport ships by default — connecting a real socket is deliberately
+  left unwired). **Live trading is gated twice, independently**:
+  `broker/factory.py` only constructs a live-capable broker when
+  `execution.mode == "live"` *and* the caller passes
+  `enable_live_trading=True` explicitly; `KiteBroker` itself defaults
+  that flag to `False` and re-checks it before every order-placing call.
+  Credentials come from the environment (`BROKER_API_KEY`/
+  `BROKER_API_SECRET`), never from `settings.yaml`. Every test runs
+  against a scripted, in-memory fake HTTP transport — nothing here
+  makes a real network call, and default mode remains paper.
 
 **Position sizing, reconciliation, and live operational controls are not
 implemented yet** — `risk/position_sizer.py` (converting an approved
