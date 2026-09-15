@@ -1,8 +1,14 @@
-"""Entry point.
+"""Entry point: loads configuration and logging only.
 
-Phase 1 only wires configuration and logging. Regime detection, selection,
-portfolio construction, risk, and execution are not implemented yet -- see
-docs/ARCHITECTURE.md for the phase plan.
+The trading day itself is ``orchestration.orchestrator.Orchestrator``
+(Phase 11d), which needs a composition root -- a market-data provider, a
+calendar with a populated holiday file, an approved model artifact, and a
+constructed broker -- none of which exist until this deployment is
+actually provisioned with data and credentials. That wiring is
+deliberately not faked here: see docs/ARCHITECTURE.md's "Application
+lifecycle and daily workflow" section for what an `Orchestrator` needs,
+and ``tests/unit/test_orchestrator.py``'s ``Harness`` for a complete,
+working example of assembling one.
 """
 
 from __future__ import annotations
@@ -18,7 +24,9 @@ def main() -> int:
 
     logger = get_logger("main")
     logger.info(
-        "Configuration loaded. Trading logic is not implemented yet (Phase 1 scaffold)."
+        "Configuration loaded. This entry point does not start a trading day: "
+        "construct an orchestration.orchestrator.Orchestrator with this "
+        "deployment's own data provider, calendar, model registry and broker."
     )
     return 0
 

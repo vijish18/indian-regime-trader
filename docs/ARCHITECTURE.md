@@ -8,7 +8,7 @@ had to resolve something the specification left ambiguous.
 ## Layer -> package mapping
 
 The specification asks for nine separated concerns; this repository organizes them into
-thirteen top-level packages. Two packages each cover two related concerns because they
+fourteen top-level packages. Two packages each cover two related concerns because they
 share the same causal/timing constraints:
 
 | Specification concern | Package(s) |
@@ -22,6 +22,12 @@ share the same causal/timing constraints:
 | Backtesting | `backtest/` |
 | Data storage | `storage/` (+ `data/` for the ingestion/quality side of "data") |
 | Monitoring | `monitoring/` |
+| Application lifecycle / daily workflow | `orchestration/` |
+
+`orchestration/` (Phase 11d) is the only package that is allowed to know about all the
+others at once — it sequences them into a trading day and owns the process lifecycle. It
+is deliberately the thinnest package in the repository: it contains no strategy
+mathematics, and a test enforces that structurally (see the section on it below).
 
 `core/` groups regime detection and feature engineering because both operate on the same
 causal, market-level time series and share the "no look-ahead" discipline; they are still
@@ -60,13 +66,24 @@ rule or equivalent test once there is real code to check (Phase 5+):
   into one final order quantity. No other module computes a final order quantity.
 - `execution/` and `broker/` depend on `risk/`'s approved decisions; they never re-derive a
   target weight or quantity themselves.
-- `broker/adapters/paper_broker.py` and `execution/position_tracker.py` import from
-  `backtest/` (`backtest.costs.CostModel`, `backtest.engine.market_liquidity_stats`) on
-  purpose (Phase 10-11a): a paper fill must be priced through the identical Indian
-  cost/slippage model a backtest fill uses, or the two are not comparable. This is the one
-  place a later layer intentionally depends on an earlier one across the broker/backtest
-  package boundary; it does not go the other way -- `backtest/` never imports `broker/` or
-  `execution/`.
+- `broker/adapters/paper_broker.py`, `execution/position_tracker.py` and
+  `risk/risk_state_builder.py` import from `backtest/` (`backtest.costs.CostModel`,
+  `backtest.engine.market_liquidity_stats`) on purpose (Phases 10-11a, 11d): a paper fill
+  must be priced through the identical Indian cost/slippage model a backtest fill uses,
+  and a live risk state must measure liquidity the identical way a backtested one did, or
+  neither pair is comparable. These are the places a later layer intentionally depends on
+  an earlier one across the package boundary; it does not go the other way --
+  `backtest/` never imports `broker/`, `execution/` or `orchestration/`.
+- `orchestration/` may import from every other package; nothing may import from it. In
+  particular `monitoring/health.py` must not import `orchestration/` even though the
+  orchestrator is its main caller — the dependency runs orchestrator -> health checker,
+  the same direction as every other module the orchestrator wires together.
+- No module in `orchestration/` may import `numpy` or `pandas`. This is the structural
+  form of "the orchestration layer must not contain strategy mathematics": every number in
+  this system is computed by a dedicated module, so the layer that only sequences calls has
+  no reason to reach for a numerical library.
+  `tests/unit/test_orchestrator.py::test_the_orchestration_package_imports_no_numerical_libraries`
+  enforces it.
 - `broker/<broker_name>/` (Phase 10b: `broker/zerodha/`) is the only place any
   broker-specific detail -- endpoint paths, request/response field names, status
   vocabulary, WebSocket framing -- may appear anywhere in this codebase. `broker/factory.py`
@@ -173,7 +190,8 @@ yet.")` body — not working logic.
 | 11a | Position tracking (`execution/position_tracker.py`) | **Done** |
 | 11b | Position/cash reconciliation (`execution/reconciliation.py`) | **Done** |
 | 11c | Restart recovery and broker reconciliation sequence (`execution/system_state.py`, `execution/startup.py`) | **Done** |
-| 12 | Alerts, health checks, dashboard, production go-live gate | Stubbed |
+| 11d | Application lifecycle and daily workflow (`orchestration/`, `risk/risk_state_builder.py`, `monitoring/health.py`) | **Done** |
+| 12 | Alerts, dashboard, production go-live gate (`monitoring/alerts.py`, `monitoring/dashboard.py`) | Stubbed (health checks, `monitoring/health.py`, were implemented in 11d) |
 
 ## The data layer (phases 2-3)
 
@@ -1591,6 +1609,154 @@ CRITICAL scenario — reusing it rather than only asserting the same
 outcome against a stub, so the reconciliation this phase adds is shown
 working through the same real fill/position mechanics a live run would
 actually use.
+
+## Application lifecycle and daily workflow (Phase 11d)
+
+Every layer before this one answered a question in isolation: what is the
+market doing, which stocks rank highest, what should the book look like,
+is this trade allowed, did the order reach the broker, does local state
+match the broker's. Nothing ran a *day*. `orchestration/` is that
+missing piece, and its whole design brief is a negative one: sequence the
+existing modules and own the process lifecycle, without acquiring any
+opinion of its own about what the numbers should be.
+
+**The lifecycle is a second, higher-level state machine, deliberately
+distinct from `execution.system_state.SystemState`.** That enum
+(Phase 11c) is internal bookkeeping for one `StartupSequence.run()` call;
+`orchestration.orchestrator_state.OrchestratorState` describes what the
+whole *process* is doing: `STARTING -> HEALTH_CHECK -> RECONCILING ->
+READY -> RUNNING`, with `DEGRADED`, `HALTED` and `SHUTTING_DOWN` as the
+exits. The two are related only where the orchestrator maps one onto the
+other when persisting state.
+
+**`DEGRADED` and `HALTED` mean genuinely different things, and the
+difference is "can this resolve itself?".** `DEGRADED` is for conditions
+that can clear on their own — market data that hasn't caught up yet,
+insufficient trailing history to compute a regime, a mid-session
+reconciliation break, a health check that came back degraded. Order
+submission pauses; monitoring and reconciliation keep running; the next
+clean loop iteration returns the process to `RUNNING` automatically.
+`HALTED` is for conditions that by design cannot clear themselves: a
+tripped circuit breaker, a broker that is not connected, a reconciliation
+discrepancy at the startup gate, an unusable or missing model. Those
+require an explicit operator action (`CircuitBreaker.manual_reset`,
+`StartupSequence.acknowledge_and_recover`) exactly as Phases 7b and 11c
+established. The phase brief's eight states have no separate
+"reconciliation required" state, so a reconciliation break at the startup
+gate maps onto `HALTED` and the report says which kind of halt it was,
+rather than inventing a ninth state the brief did not ask for.
+
+**Steps 1-6 are not re-implemented — they are `StartupSequence`.** The
+daily workflow's "verify broker connectivity" and "reconcile portfolio"
+are steps 4-9 of Phase 11c's own thirteen-step sequence in everything but
+name, so `Orchestrator` constructs and runs a `StartupSequence` rather
+than writing a second, subtly-different version of the same fail-closed
+checks. It adds only the two checks that sequence has no reason to know
+about: whether today is a trading day at all
+(`TradingCalendar.is_trading_day`) and whether market data is fresh enough
+to decide on (`HealthChecker.check_market_data_freshness`). Both run
+*before* the broker is contacted, so a holiday or a stale data directory
+costs nothing and touches nothing.
+
+**`monitoring/health.py` stopped being a stub.** It was written in Phase 1
+as a typed placeholder for "Phase 11/12", with exactly the five checks
+this phase needed — broker, market-data freshness, instrument-master
+freshness, model freshness, heartbeat. Implementing it there rather than
+inlining the checks in the orchestrator is the whole "keep business logic
+in dedicated modules" instruction applied literally: the orchestrator asks
+"is the system healthy?" and reacts to the answer; it does not know what
+makes market data stale. Every threshold comes from existing config
+(`DataConfig.instrument_master_max_age_days`,
+`MonitoringConfig.heartbeat_interval_seconds`,
+`HMMConfig.retrain_interval_sessions`) rather than a new knob invented for
+this phase.
+
+**The four genuinely new pieces, and why each is its own module.**
+
+- `orchestration/regime_computation.py` (`RegimeComputer`) pulls the
+  trailing index window, computes features, applies the model's *frozen*
+  scaler, filters, and asks `RegimeAllocationEngine` for today's exposure
+  target. This is the identical inference recipe
+  `WalkForwardValidator._hmm_exposure_targets` already ran out-of-sample;
+  it exists as its own module so live orchestration does not have to
+  import a backtesting class to get it. It re-fits nothing — a live
+  decision uses the approved artifact's parameters and scaler exactly as
+  persisted, which is what makes a live regime call reproducible from the
+  audit log.
+- `orchestration/trade_sizing.py` converts weight deltas into whole-share
+  orders. It is explicitly *not* `risk/position_sizer.py` (Phase 7c, still
+  stubbed), which will reconcile this weight-based formula against the
+  stop-distance risk-based one into the single canonical quantity. This
+  module uses the same simple `floor(notional / price)` shortcut
+  `backtest/engine.py` already documents for its own fills, so the paper
+  and backtest paths size trades the same way until 7c replaces both.
+- `orchestration/fill_tracker.py` applies each broker fill to the
+  canonical `PositionTracker` exactly once, deduplicated by `trade_id`.
+  This closes a real asymmetry: `PaperBroker` updates whichever
+  `PositionTracker` it was constructed with as a side effect of filling,
+  while a live adapter updates nothing. The orchestrator therefore never
+  shares its canonical tracker with the broker — the broker gets its own
+  for order validation, and fills reach the canonical one through this one
+  path for every adapter type. Without that separation, a paper fill would
+  be counted twice and a live fill not at all.
+- `risk/risk_state_builder.py` assembles the `PortfolioRiskState` the risk
+  engine needs. `BacktestEngine` builds the equivalent privately for
+  historical replay; that code was left untouched (refactoring a
+  completed, tested phase's internals is not this phase's job), so this is
+  a live reimplementation of the same approach that reuses the one piece
+  already public — `market_liquidity_stats`. The one thing a live system
+  cannot reconstruct the way a backtest does is its own equity curve, so
+  `EquityHistory` is an explicit, append-only object the orchestrator
+  maintains across the run.
+
+**Step 17 is honest about not existing yet.** "Update stops/risk rules
+where applicable" has no module to call: there is no trailing-stop or
+resting protective-stop concept anywhere in this codebase (section 1.2 of
+the specification demotes live stop orders to a last-resort control, and
+`position_sizer.py`'s future `stop_distance` is a *sizing* input, not a
+resting order). Rather than invent a stop-loss algorithm — which would be
+exactly the strategy mathematics this layer is forbidden to contain — the
+step is the defined seam such a module would plug into, and today does the
+one thing that is genuinely applicable: re-marks positions to the broker's
+latest prices and re-evaluates the circuit breaker, so the drawdown rule
+that *does* exist reflects the fills just observed rather than this
+morning's picture.
+
+**Shutdown never liquidates by default.** `SIGINT`/`SIGTERM` set a flag;
+the loop finishes its current iteration, transitions to `SHUTTING_DOWN`,
+persists final state, and returns. Positions are left exactly as they are
+unless `close_positions_on_shutdown=True` was passed at construction —
+per this phase's explicit instruction, and for the obvious reason that a
+process restart is not a trading decision. The previous signal handlers
+are restored on the way out, so an orchestrator that ran inside a larger
+process (or a test suite) leaves no trace in the process's signal table.
+
+**Marketable limits, not last-price limits.** Orders are priced at the
+touch — buy at the ask, sell at the bid — rather than resting at the last
+traded price. This is execution plumbing rather than strategy: a limit
+resting at the last trade frequently never fills, and for a
+daily-rebalanced system that means silently drifting away from the
+risk-approved target portfolio while believing it traded. How far through
+the touch an order may be priced is not this layer's call either — the
+broker's own `execution.order_price_guard_bps` check rejects anything
+outside the configured band.
+
+**The integration tests run the real pipeline, not mocks of it.**
+`tests/unit/test_orchestrator.py` wires a real `StockSelector`,
+`PortfolioConstructor`, `RiskManager`, `CircuitBreaker`, a genuinely
+fitted and approved `ModelArtifact`, `OrderManager`, `PositionTracker`,
+`StartupSequence`, `ReconciliationEngine` and a real `PaperBroker` against
+the synthetic multi-year market the walk-forward suite already uses, then
+runs the actual twenty-step workflow through them: a clean day reaches
+`RUNNING` with orders that reach the broker, fills that reach the
+canonical tracker exactly once, state persisted, and every order traceable
+back to a signal and a risk decision. Each blocking condition gets its own
+test proving *which* state it lands in and that nothing downstream ran —
+a holiday, stale data, a disconnected broker, a reconciliation break, a
+missing model, stale model metadata, a config failure, a tripped breaker.
+The rest cover the ongoing loop (degrade, self-heal, halt, persist every
+iteration) and shutdown (handlers installed and restored, the loop ends on
+request, positions untouched by default and closed only when configured).
 
 ## Why the module boundaries matter for correctness, not just style
 

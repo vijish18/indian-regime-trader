@@ -14,15 +14,16 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-18 complete: configuration, the broker-independent data layer,
+**Phases 1-19 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
 model, realistic walk-forward backtesting, performance analytics, stress
 testing, a paper-trading engine, a broker abstraction with a real Zerodha
 Kite Connect adapter, India API/algo operational controls,
-production-grade order management, and restart recovery/broker
-reconciliation (live trading disabled by default throughout).**
+production-grade order management, restart recovery/broker
+reconciliation, and the orchestration layer that runs a full trading day
+end to end (live trading disabled by default throughout).**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -383,10 +384,43 @@ reconciliation (live trading disabled by default throughout).**
   "crash during order submission" is additionally proven against a real
   `PaperBroker`, reusing Phase 10d's own CRITICAL-scenario broker double.
 
+- **Application lifecycle and daily workflow** (`orchestration/`,
+  `monitoring/health.py`, `risk/risk_state_builder.py`) — the layer that
+  finally runs a *day*: a state-driven lifecycle
+  (`STARTING → HEALTH_CHECK → RECONCILING → READY → RUNNING`, with
+  `DEGRADED`, `HALTED` and `SHUTTING_DOWN` as exits) around a twenty-step
+  workflow — load and validate configuration, verify the market calendar,
+  data availability and broker connectivity, reconcile the portfolio, load
+  and validate the approved model, compute the regime, rank stocks,
+  construct the target portfolio, run the risk engine, calculate required
+  trades, submit permitted orders, track fills, update the portfolio and
+  risk rules, persist state, monitor health, and reconcile periodically.
+  **It computes nothing itself**: every decision is delegated to the module
+  that already owns it, and a test enforces structurally that no module in
+  `orchestration/` imports a numerical library. Steps 1-6 delegate to Phase
+  18's `StartupSequence` rather than re-implementing the same fail-closed
+  checks a second time. `DEGRADED` means "this can clear on its own" (stale
+  data, a mid-session reconciliation break — the next clean loop iteration
+  returns to `RUNNING`); `HALTED` means "only an operator can clear this" (a
+  tripped circuit breaker, a disconnected broker, an unusable model).
+  `SIGINT`/`SIGTERM` are handled gracefully — the current iteration
+  finishes, final state is persisted, the previous signal handlers are
+  restored, and **positions are never closed merely because the process is
+  shutting down** unless `close_positions_on_shutdown` was explicitly
+  configured. Integration tests run the real pipeline (real selector,
+  constructor, risk manager, circuit breaker, fitted/approved model, order
+  manager and a real `PaperBroker`) against a synthetic multi-year market,
+  asserting which lifecycle state each blocking condition lands in and that
+  nothing downstream of it ran.
+
 **Position sizing is not implemented yet** — `risk/position_sizer.py`
-(converting an approved target weight into a final, risk-bounded order
-quantity) remains a typed stub that defines the interface for a later
-phase. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+(reconciling the weight-based and stop-distance sizing formulas into one
+canonical order quantity) remains a typed stub that defines the interface
+for a later phase; the orchestration layer sizes orders with the same
+simple weight-based shortcut the backtest engine documents for its own
+fills. Alerts and the operational dashboard (`monitoring/alerts.py`,
+`monitoring/dashboard.py`) are also still stubs. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Before running ingestion, populate `config/nse_holidays.csv` from NSE's
 published holiday list — it ships empty and the calendar fails closed rather
@@ -406,9 +440,10 @@ data/         Broker-independent market data: interfaces, models, calendar,
 universe/     Point-in-time universe construction + stock selection
 portfolio/    Portfolio construction (target weights) + position sizing
 risk/         Independent risk management with veto authority
-execution/    Order management, position tracking, reconciliation
+execution/    Order management, position tracking, reconciliation, restart recovery
 broker/       Broker-neutral interface + adapters (paper adapter first)
 backtest/     Walk-forward backtesting, cost/slippage model, performance analytics, stress testing
+orchestration/ Application lifecycle + the daily workflow that sequences every layer above
 monitoring/   Structured logging, alerts, health checks, dashboard
 storage/      Persistence layer (table schemas, DB session management)
 scripts/      Operational / one-off scripts

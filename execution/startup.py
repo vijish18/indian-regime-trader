@@ -428,6 +428,25 @@ class StartupSequence:
         )
         self.state_store.save(state)
 
+    def persist_heartbeat(self, system_state: SystemState) -> None:
+        """Persists the current picture -- state, model/strategy version,
+        portfolio snapshot, last processed timestamps -- without
+        re-running verification, for a caller (``orchestration.orchestrator.Orchestrator``'s
+        own ongoing monitoring loop) that already knows it is past startup
+        and just wants Phase 19 step 18 ("persist state") done repeatedly
+        with whatever ``system_state`` it has independently determined.
+        Carries forward everything else from the last persisted state.
+        """
+        previous = self.state_store.load()
+        self._persist(
+            self._clock(),
+            system_state=system_state,
+            model_version=previous.model_version if previous else None,
+            last_broker_event_id=None,
+            last_broker_event_timestamp=None,
+            carry_forward=previous,
+        )
+
     def checkpoint_market_data(self, timestamp: dt.datetime) -> None:
         """Updates only the persisted "last processed market-data
         timestamp", preserving every other field -- called by a live
