@@ -254,3 +254,17 @@ def test_a_parsed_action_never_carries_an_invented_price_factor() -> None:
         [_record("Demerger"), _record("Bonus 1:1"), _record("Rights 21:100 @ Premium Rs 76")]
     )
     assert all(action.explicit_price_factor is None for action in result.actions)
+
+
+def test_a_malformed_amount_does_not_abort_the_ingest() -> None:
+    r"""Regression: an eleven-year backfill died on this.
+
+    The amount pattern was ``[\d.]+``, which matches "." and "1.2.3" as
+    happily as "11"; Decimal then raised InvalidOperation and took down a
+    run that had already parsed 2,885 sessions of universe data. One
+    malformed record out of tens of thousands must be reported, not fatal.
+    """
+    for subject in ("Dividend - Rs . Per Share", "Dividend - Rs 1.2.3 Per Share"):
+        result = to_corporate_actions([_record(subject)])
+        assert result.actions == (), subject
+        assert len(result.unparsed) == 1, subject

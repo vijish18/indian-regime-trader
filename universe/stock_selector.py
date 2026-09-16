@@ -372,8 +372,16 @@ class StockSelector:
             self.config.min_history_days,
         )
         start = as_of - dt.timedelta(days=longest_window * 2)
+        # The *benchmark*, from universe_config.index_reference -- not the
+        # symbol the universe is keyed on. Those coincided while the
+        # universe was literally an index's constituents, and stopped
+        # coinciding the moment it became a liquidity-derived set
+        # (universe.bhavcopy_universe, registered as NSE_LIQUID). Relative
+        # strength is measured against a real traded index; a derived
+        # universe has no index level to measure against, and asking for
+        # one raises DataNotAvailableError, which is how this was found.
         observations = self.market_data.get_index_observations(
-            self.universe_provider.index_symbol, start, as_of
+            self.universe_config.index_reference, start, as_of
         )
         return pd.Series(
             [float(observation.close) for observation in observations],

@@ -193,9 +193,18 @@ def parse_bhavcopy(
     reader = csv.DictReader(io.StringIO(text))
     fields = {name.strip() for name in (reader.fieldnames or [])}
     if _NEW_COLUMNS["symbol"] in fields:
-        columns, date_column, date_format = _NEW_COLUMNS, "TradDt", "%Y-%m-%d"
+        columns: dict[str, str] = _NEW_COLUMNS
+        date_column = "TradDt"
+        date_formats: tuple[str, ...] = ("%Y-%m-%d",)
     elif _OLD_COLUMNS["symbol"] in fields:
-        columns, date_column, date_format = _OLD_COLUMNS, "TIMESTAMP", "%d-%b-%Y"
+        # Two accepted spellings, because NSE used both. 2020-07-13 is
+        # published with a two-digit year ("13-Jul-20") while every
+        # neighbouring session uses four. Accepting only the common one
+        # silently drops that session, and a missing session is a hole
+        # in the universe that looks exactly like a quiet day.
+        columns = _OLD_COLUMNS
+        date_column = "TIMESTAMP"
+        date_formats = ("%d-%b-%Y", "%d-%b-%y")
     else:
         raise BhavcopyError(
             f"unrecognised bhavcopy layout; columns were {sorted(fields)}. "
@@ -212,9 +221,9 @@ def parse_bhavcopy(
         if str(record.get(columns["series"], "")).strip().upper() != EQUITY_SERIES:
             continue
         try:
-            session_date = dt.datetime.strptime(
-                str(record[date_column]).strip(), date_format
-            ).date()
+            session_date = _parse_session_date(
+                str(record[date_column]).strip(), date_formats
+            )
             rows.append(
                 BhavcopyRow(
                     symbol=str(record[columns["symbol"]]).strip(),
@@ -246,6 +255,15 @@ def parse_bhavcopy(
             )
 
     return tuple(rows)
+
+
+def _parse_session_date(raw: str, formats: tuple[str, ...]) -> dt.date:
+    for date_format in formats:
+        try:
+            return dt.datetime.strptime(raw, date_format).date()
+        except ValueError:
+            continue
+    raise ValueError(f"unparseable session date {raw!r} (tried {list(formats)})")
 
 
 def load_bhavcopy(

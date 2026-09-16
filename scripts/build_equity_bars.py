@@ -227,6 +227,28 @@ def main(argv: list[str]) -> int:
                 )
         total += len(rows_out)
 
+    # Files this run did not write are from a previous, narrower run --
+    # a Q1-only build leaves behind names the full-range universe never
+    # contains. Nothing would read them (the universe decides what is
+    # asked for), but a stale bar file on disk is indistinguishable from
+    # a current one to anyone looking, which is how a later change comes
+    # to read data nobody meant to keep.
+    written = {_safe_name(i) for i in bars}
+    orphans = sorted(
+        path for path in args.out.glob("*.csv") if path.stem not in written
+    )
+    if orphans:
+        print()
+        print(
+            f"{len(orphans)} stale file(s) from an earlier run, "
+            "not written by this one:"
+        )
+        for path in orphans[:10]:
+            print(f"  {path.name}")
+        if len(orphans) > 10:
+            print(f"  ... and {len(orphans) - 10} more")
+        print("  delete them, or re-run over the same range that produced them")
+
     ticks = load_kite_tick_sizes(KITE_INSTRUMENTS)
     INSTRUMENTS_OUT.parent.mkdir(parents=True, exist_ok=True)
     last_session = max(identity[i][1] for i in identity)

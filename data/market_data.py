@@ -14,6 +14,7 @@ excluding ones that had not.
 from __future__ import annotations
 
 import datetime as dt
+from collections import OrderedDict
 from collections.abc import Iterable
 from decimal import Decimal
 from pathlib import Path
@@ -56,10 +57,45 @@ class LocalMarketDataProvider(MarketDataProvider):
         store: LocalDataStore,
         corporate_actions: CorporateActionProvider | None = None,
         layer: DataLayer = DataLayer.RAW,
+        frame_cache_size: int = 0,
     ) -> None:
+        """``frame_cache_size`` memoises parsed files, and defaults to OFF.
+
+        The default matters more than the feature. A backtest reads an
+        immutable snapshot, so caching a file is free correctness-wise and
+        removes most of the cost: a walk-forward fold asks for the same
+        instrument's file on every session, for every strategy, hundreds
+        of thousands of times.
+
+        A *live* system reads files that change every day. A cache there
+        would serve yesterday's bars as today's, and the system would act
+        on them with no indication anything was stale -- the exact class of
+        silent wrongness the freshness checks exist to prevent. So this is
+        opt-in, and only the backtest opts in.
+
+        Bounded rather than unlimited: the full 2,205-instrument set is
+        about 3 GB of frames, and a machine that starts swapping is slower
+        than no cache at all. One fold's universe is roughly 900
+        instruments, so a limit near that holds the working set.
+        """
         self._store = store
         self._corporate_actions = corporate_actions
         self._layer = layer
+        self._frame_cache_size = frame_cache_size
+        self._frames: OrderedDict[Path, pd.DataFrame] = OrderedDict()
+
+    def _read_frame(self, path: Path) -> pd.DataFrame:
+        if self._frame_cache_size <= 0:
+            return self._store.read(path)
+        cached = self._frames.get(path)
+        if cached is not None:
+            self._frames.move_to_end(path)
+            return cached
+        frame = self._store.read(path)
+        self._frames[path] = frame
+        if len(self._frames) > self._frame_cache_size:
+            self._frames.popitem(last=False)
+        return frame
 
     def get_equity_bars(
         self,
@@ -71,13 +107,21 @@ class LocalMarketDataProvider(MarketDataProvider):
         if end < start:
             raise ValueError(f"end {end} precedes start {start}")
         path = self._store.equity_bars_path(instrument_id, self._layer)
-        frame = self._store.read(path)
+        frame = self._read_frame(path)
         require_columns(frame, BAR_COLUMNS, str(path))
-        bars = [
-            bar
-            for bar in parse_bar_rows(frame, source=str(path))
-            if start <= bar.session_date <= end
-        ]
+
+        # Narrow the frame to the requested window *before* building
+        # DailyBar objects. Parsing is where the cost is -- 35ms of a 46ms
+        # call on an eleven-year file -- because each row becomes six
+        # Decimals, and a backtest asks for a two-year window out of
+        # eleven years, thousands of times. Parsing rows only to discard
+        # them made a single walk-forward fold take seven hours.
+        #
+        # The comparison is on the raw column so no row is parsed to find
+        # out whether it was wanted.
+        session_dates = pd.to_datetime(frame["session_date"], errors="coerce").dt.date
+        in_window = (session_dates >= start) & (session_dates <= end)
+        bars = parse_bar_rows(frame[in_window], source=str(path))
         bars.sort(key=lambda bar: bar.session_date)
         if price_basis is PriceBasis.RAW:
             return bars

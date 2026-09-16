@@ -64,8 +64,10 @@ from universe.bhavcopy_universe import (  # noqa: E402
     DERIVED_INDEX_SYMBOL,
     EligibilityRules,
     EligibilitySnapshot,
+    drop_unadjustable_spans,
     snapshots_to_membership,
     stream_snapshots,
+    unadjustable_exclusions,
 )
 
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
@@ -355,6 +357,30 @@ def main(argv: list[str]) -> int:
         raise SystemExit("no bhavcopy data available; run without --skip-download first")
 
     memberships = snapshots_to_membership(snapshots)
+
+    # Remove spans this system cannot price through. An instrument with a
+    # rights issue or demerger whose factor nobody supplied will raise at
+    # read time -- correctly -- and that refusal stops a backtest dead
+    # rather than corrupting it. Proposing such a name at all is the bug.
+    if (REFERENCE / "corporate_actions.csv").is_file():
+        from data.corporate_actions import InMemoryCorporateActionProvider
+
+        provider = InMemoryCorporateActionProvider.from_file(
+            REFERENCE / "corporate_actions.csv"
+        )
+        every_action = [
+            action
+            for instrument_id in provider.instruments_with_actions()
+            for action in provider.actions_for(instrument_id, dt.date.min, dt.date.max)
+        ]
+        exclusions = unadjustable_exclusions(every_action)
+        memberships, changed = drop_unadjustable_spans(
+            memberships, exclusions, [s.session_date for s in snapshots]
+        )
+        print(
+            f"  excluded {len(exclusions)} instrument(s) with unpriceable actions "
+            f"({changed} span(s) trimmed or dropped)"
+        )
     instruments = len({m.instrument_id for m in memberships})
     membership_path = REFERENCE / "index_membership.csv"
     write_membership(memberships, membership_path)

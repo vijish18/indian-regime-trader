@@ -43,7 +43,7 @@ import json
 import re
 import urllib.request
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from data.models import CorporateAction, CorporateActionType
 
@@ -78,9 +78,21 @@ _BONUS = re.compile(r"bonus[\s\-]*(?P<new>\d+)\s*:\s*(?P<old>\d+)", re.IGNORECAS
 silent 50% price cliff -- unlike an amount-less dividend, which
 affects cash accounting but never the adjusted price series."""
 _RIGHTS_RATIO = re.compile(r"rights\s*(?P<new>\d+)\s*:\s*(?P<old>\d+)", re.IGNORECASE)
-_DIVIDEND_AMOUNT = re.compile(rf"{_RUPEES}\s*-?\s*(?P<amount>[\d.]+)", re.IGNORECASE)
-"""The optional dash is not cosmetic: the feed writes both
-"Dividend - Rs 11 Per Share" and "Dividend Rs - 11 Per Share"."""
+_DIVIDEND_AMOUNT = re.compile(
+    rf"{_RUPEES}\s*-?\s*(?P<amount>\d+(?:\.\d+)?)(?![\d\.])",
+    re.IGNORECASE,
+)
+r"""One number, optionally with one decimal part.
+
+The optional dash is not cosmetic: the feed writes both "Dividend -
+Rs 11 Per Share" and "Dividend Rs - 11 Per Share".
+
+The amount pattern is deliberately NOT ``[\d.]+``, which was the
+original and which matches "." and "1.2.3" as happily as "11".
+Decimal() then raises InvalidOperation, and over eleven years of
+real NSE text exactly that happened -- aborting an ingest that had
+already parsed 2,885 sessions of universe data.
+"""
 
 _DIVIDEND_WORDS = re.compile(
     r"\bdividends?\b|\bdivdend\b|\bdiv\b",
@@ -205,9 +217,16 @@ def classify_subject(subject: str) -> ParsedSubject | None:
         match = _DIVIDEND_AMOUNT.search(text)
         if not match:
             return None
-        return ParsedSubject(
-            CorporateActionType.DIVIDEND, cash_amount=Decimal(match.group("amount"))
-        )
+        try:
+            amount = Decimal(match.group("amount"))
+        except InvalidOperation:
+            # Defence in depth behind the tightened pattern above. One
+            # malformed record in eleven years must not abort an ingest
+            # that has already parsed thousands of sessions -- it is
+            # reported as unparsed, which is what the caller does with
+            # anything it cannot understand.
+            return None
+        return ParsedSubject(CorporateActionType.DIVIDEND, cash_amount=amount)
 
     if any(word in lowered for word in _NON_PRICE_WORDS):
         return ParsedSubject(action_type=None)

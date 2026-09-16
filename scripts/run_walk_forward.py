@@ -108,7 +108,18 @@ def build_validator(
     corporate_actions = InMemoryCorporateActionProvider.from_file(
         REFERENCE / "corporate_actions.csv"
     )
-    market_data = LocalMarketDataProvider(store, corporate_actions=corporate_actions)
+    # A backtest reads an immutable snapshot, so memoising parsed files is
+    # free correctness-wise and removes most of the cost -- a fold asks for
+    # the same instrument's file on every session, for every strategy.
+    # 1,000 frames is roughly one fold's universe at about 1.4 GB; the
+    # full 2,205-instrument set would be 3 GB and start swapping.
+    #
+    # Live trading must never set this: files change daily there, and a
+    # cache would serve yesterday's bars as today's with nothing to show
+    # anything was stale.
+    market_data = LocalMarketDataProvider(
+        store, corporate_actions=corporate_actions, frame_cache_size=1000
+    )
     instruments = InMemoryInstrumentRepository.from_file(
         REFERENCE / "instruments.csv", snapshot_date=snapshot_date
     )

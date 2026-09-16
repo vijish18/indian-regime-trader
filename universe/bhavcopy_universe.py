@@ -36,7 +36,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from data.models import IndexMembership
+from data.models import CorporateAction, IndexMembership
 from data.nse_bhavcopy import BhavcopyRow
 
 DERIVED_INDEX_SYMBOL = "NSE_LIQUID"
@@ -272,3 +272,113 @@ def snapshots_to_membership(
 
     memberships.sort(key=lambda m: (m.effective_from, m.instrument_id))
     return memberships
+
+
+UNADJUSTABLE_EXCLUSION_DAYS = 560
+"""Calendar days an instrument stays out of the universe after an action
+whose price factor nobody can compute.
+
+Sized to the window a consumer actually *fetches*, not to the nominal
+lookback. ``StockSelector._fetch_bars`` asks for
+``min_history_days * 2`` **calendar** days (504 at the shipped config),
+so an exclusion of 252 sessions was not enough: the instrument re-entered
+the universe and the very next fetch still reached back across the
+ex-date and raised. That is how this number was arrived at -- a real
+failure on NSE:INDHOTEL's 2017 rights issue, after the first attempt.
+
+560 is 504 plus a margin. The lesson generalises: an exclusion window has
+to cover what the consumer reads, and the consumer here reads further
+back than the factor windows alone would suggest.
+"""
+
+
+def unadjustable_exclusions(
+    actions: Iterable[CorporateAction],
+) -> dict[str, list[dt.date]]:
+    """Instrument -> ex-dates this system cannot price through.
+
+    Rights, mergers and demergers carry no computable terms in NSE's feed
+    (see ``data.nse_corporate_actions``), so ``price_adjustment_factor``
+    raises for them unless an operator has supplied one. That refusal is
+    correct -- returning 1.0 would silently assert "no adjustment needed",
+    and for a demerger that is a price cliff the strategy trades into.
+
+    But a refusal at *read* time stops a backtest dead, which is what
+    happened: NSE:HCC's 2018 rights issue aborted an eleven-year run. The
+    fix is not to soften the refusal, it is to stop proposing the
+    instrument -- docs/SPECIFICATION.md section 2.1's "explicit exclusion
+    list for instruments with corporate-action or data-quality anomalies".
+    """
+    excluded: dict[str, list[dt.date]] = defaultdict(list)
+    for action in actions:
+        if action.explicit_price_factor is not None:
+            continue
+        try:
+            action.price_adjustment_factor()
+        except ValueError:
+            excluded[action.instrument_id].append(action.ex_date)
+    return dict(excluded)
+
+
+def drop_unadjustable_spans(
+    memberships: list[IndexMembership],
+    exclusions: Mapping[str, list[dt.date]],
+    sessions: Sequence[dt.date],
+    *,
+    lookback_days: int = UNADJUSTABLE_EXCLUSION_DAYS,
+) -> tuple[list[IndexMembership], int]:
+    """Trim membership so no surviving span spans an unpriceable ex-date.
+
+    Counted in calendar days, because that is the unit
+    ``StockSelector._fetch_bars`` uses when it decides how far back to
+    read. Matching the consumer matters more than matching the nominal
+    factor windows.
+
+    Returns the trimmed spans and how many were removed or shortened.
+    """
+    if not exclusions:
+        return memberships, 0
+
+    ordered = sorted(sessions)
+
+    def blocked(instrument_id: str) -> list[tuple[dt.date, dt.date]]:
+        return [
+            (ex_date, ex_date + dt.timedelta(days=lookback_days))
+            for ex_date in exclusions.get(instrument_id, ())
+        ]
+
+    kept: list[IndexMembership] = []
+    changed = 0
+    for span in memberships:
+        windows = blocked(span.instrument_id)
+        if not windows:
+            kept.append(span)
+            continue
+
+        span_end = span.effective_to or ordered[-1]
+        pieces = [(span.effective_from, span_end)]
+        for block_start, block_end in windows:
+            remaining = []
+            for piece_start, piece_end in pieces:
+                if block_end < piece_start or block_start > piece_end:
+                    remaining.append((piece_start, piece_end))
+                    continue
+                changed += 1
+                if piece_start < block_start:
+                    remaining.append((piece_start, block_start - dt.timedelta(days=1)))
+                if piece_end > block_end:
+                    remaining.append((block_end + dt.timedelta(days=1), piece_end))
+            pieces = remaining
+
+        for piece_start, piece_end in pieces:
+            kept.append(
+                IndexMembership(
+                    index_symbol=span.index_symbol,
+                    instrument_id=span.instrument_id,
+                    effective_from=piece_start,
+                    effective_to=None if piece_end == ordered[-1] else piece_end,
+                )
+            )
+
+    kept.sort(key=lambda m: (m.effective_from, m.instrument_id))
+    return kept, changed

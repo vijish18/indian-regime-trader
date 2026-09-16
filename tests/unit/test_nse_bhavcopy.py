@@ -151,3 +151,26 @@ def test_the_old_url_uses_an_uppercase_three_letter_month() -> None:
     """NSE's archive path is case-sensitive; "Jun" 404s where "JUN" works."""
     _, old_url = bhavcopy_urls(dt.date(2015, 1, 2))
     assert "/2015/JAN/cm02JAN2015bhav.csv.zip" in old_url
+
+
+def test_a_two_digit_year_is_accepted_in_the_old_layout() -> None:
+    """NSE published 2020-07-13 with "13-Jul-20" while every neighbouring
+    session used four digits.
+
+    Accepting only the common spelling dropped that session from an
+    eleven-year backfill -- and a missing session is a hole in the universe
+    that looks exactly like a quiet day, because the trailing liquidity
+    windows simply advance one session short.
+    """
+    csv_text = OLD_CSV.replace("03-JUN-2024", "03-JUN-24")
+    rows = parse_bhavcopy(_zip(csv_text))
+    assert len(rows) == 1
+    assert rows[0].session_date == dt.date(2024, 6, 3)
+
+
+def test_an_unparseable_session_date_is_still_refused() -> None:
+    """Widening the accepted spellings must not turn into accepting
+    anything: a date nobody can read is a bar nobody can place in time."""
+    csv_text = OLD_CSV.replace("03-JUN-2024", "not-a-date")
+    with pytest.raises(BhavcopyError, match="unparseable session date"):
+        parse_bhavcopy(_zip(csv_text))
