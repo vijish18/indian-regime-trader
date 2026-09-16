@@ -37,7 +37,7 @@ next to it** and refuses to guess if they disagree. Two independent statements
 of the same fact, from the same document, is a cheap and surprisingly effective
 parse check.
 
-Current coverage: **2022–2026**.
+Current coverage: **2015–2026**.
 
 ---
 
@@ -61,6 +61,72 @@ circulars missed, but can never remove one or overwrite a historical year.
 **Operationally:** re-run the builder periodically during the year, not just
 each December. A closure announced in April for May will not be in the file
 otherwise.
+
+---
+
+## 2b. Reconciliation against what the market actually did
+
+```bash
+python scripts/build_nse_holidays.py --reconcile-with-kite
+```
+
+A circular is published in December for the year *ahead*, so it is a forecast.
+NIFTY 50's bar history is the record: on any weekday the index printed no bar,
+the cash market was shut. For dates that have already happened, the record wins.
+
+This does two things. It **extends coverage back to 2015**, for years whose
+circulars were not locatable in NSE's archive — those rows are sourced
+`derived/nifty50-no-bar`, a fact from price data rather than a document. And it
+**corrects the circular-derived years**. Run against 2022–2025 it found three
+weekdays the exchange was shut and this calendar said were open:
+
+| Date | What | Why the circular missed it |
+|---|---|---|
+| 2023-06-29 | Bakri Id | moved from the 28th after publication |
+| 2024-01-22 | Ram Mandir consecration | announced ad hoc |
+| 2024-11-20 | Maharashtra assembly elections | announced ad hoc |
+
+All three are the dangerous direction — the system would have waited all day for
+fills from a closed exchange. It also removed 2023-06-28, which the circular
+listed as closed and the index demonstrably traded through.
+
+Muhurat days are the deliberate exception: the index prints a bar because the
+ceremonial session trades, but there is no regular session, so they stay closed
+(§3).
+
+---
+
+## 2c. The bug this found, and why the earlier checks missed it
+
+The 2022 circular renders row 13 as:
+
+```
+13 November 08,2022
+08,2022
+Tuesday Gurunanak Jayanti
+```
+
+— the date fragment repeated on its own line. The original line-anchored regex
+required date and weekday on one line, so it **silently skipped the row**, and
+the shipped calendar said NSE was open on Guru Nanak Jayanti 2022.
+
+Nothing caught it. The day-of-week cross-check only validates rows that *did*
+parse. The plausibility check passed because 12 closures is a perfectly normal
+count. The file loaded, the tests were green, and the data was wrong.
+
+It was found by reconciling against price data — an entirely independent source.
+
+Two fixes, both now permanent:
+
+1. The parser anchors on serial-number/date/weekday over whitespace-collapsed
+   text and takes the description as what lies between anchors, so a row can
+   wrap lines.
+2. **NSE numbers its own rows.** The parser asserts each table's serials are a
+   contiguous `1..N`, so the document states its own row count and a dropped row
+   is detectable with no external source at all.
+
+The general lesson is worth keeping: validating the records you parsed says
+nothing about the records you didn't.
 
 ---
 
@@ -129,23 +195,23 @@ So `tests/unit/test_nse_holidays.py` checks **shape**, not just rows:
 
 ## 5. What is still missing
 
-**2019–2021 are not covered.** Their circular references were not located in
-NSE's archive during this pass. This is recorded as a gap rather than guessed
-at: `NSETradingCalendar` refuses to answer for an uncovered year
-(`CalendarCoverageError`), so a backtest spanning 2019 fails loudly instead of
-silently assuming those years had no holidays.
+**2015–2021 rest on derived data, not documents.** Those years' circulars were
+not locatable in NSE's archive, so their closures come from NIFTY 50's bar
+history (`derived/nifty50-no-bar`). That is a sound inference — the index is
+computed from trades, so no bar means no cash session — but it inherits any gap
+in the vendor's own history. If Kite were missing a day, this would record it as
+a holiday. Cross-checked where both sources exist (2022–2026), the inference
+agreed with the circulars on every date except the three genuine corrections in
+§2b, which is the evidence for trusting it on the earlier years.
 
-Consequence: **backtests can currently run 2022 onward only.** To extend,
-find the December circular for each year, add `year: "CMTR<ref>"` to
-`ANNUAL_CIRCULARS` in `scripts/build_nse_holidays.py`, and re-run it.
+**Before 2015 is not covered**, because Kite's daily history does not reach
+further back. `NSETradingCalendar` refuses to answer for an uncovered year, so a
+backtest spanning 2014 fails loudly rather than assuming no holidays.
 
-**Ad-hoc historical closures may be incomplete.** The 2024 election closure was
-found because a search happened to surface it. There is no systematic way to
-enumerate every partial-modification circular NSE issued in a past year, so
-other one-off closures (elections, state funerals, exchange incidents) may be
-missing from 2022–2025. The current year is the one that matters for live
-trading, and it is cross-checked against the live API on every build — but a
-historical backtest may be trading on a day the exchange was shut.
+**Ad-hoc closures in years with no price coverage would still be invisible.**
+Reconciliation closes this for every year the index covers, which is now all of
+them — but the mechanism is worth understanding rather than assuming the problem
+is permanently solved.
 
 That is a known, bounded inaccuracy in historical results. It is recorded here
 rather than discovered later.

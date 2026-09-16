@@ -1,9 +1,107 @@
 date,description,session_type,source
+2015-01-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-02-17,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-03-06,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-04-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-04-03,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-04-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-05-01,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-09-17,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-09-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-10-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-10-22,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-11-12,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-11-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2015-12-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-01-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-03-07,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-03-24,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-03-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-04-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-04-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-04-19,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-07-06,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-08-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-09-05,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-09-13,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-10-11,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-10-12,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-10-31,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2016-11-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-01-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-02-24,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-03-13,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-04-04,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-04-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-05-01,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-06-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-08-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-08-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-10-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-10-20,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2017-12-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-01-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-02-13,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-03-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-03-29,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-03-30,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-05-01,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-08-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-08-22,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-09-13,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-09-20,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-10-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-10-18,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-11-08,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-11-23,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2018-12-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-03-04,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-03-21,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-04-17,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-04-19,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-04-29,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-05-01,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-06-05,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-08-12,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-08-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-09-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-09-10,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-10-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-10-08,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-10-21,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-10-28,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-11-12,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2019-12-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-02-21,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-03-10,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-04-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-04-06,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-04-10,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-04-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-05-01,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-05-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-10-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-11-16,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-11-30,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2020-12-25,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-01-26,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-03-11,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-03-29,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-04-02,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-04-14,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-04-21,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-05-13,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-07-21,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-08-19,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-09-10,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-10-15,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-11-05,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
+2021-11-19,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
 2022-01-26,Republic Day,closed,NSE/CMTR/50560
 2022-03-01,Mahashivratri,closed,NSE/CMTR/50560
 2022-03-18,Holi,closed,NSE/CMTR/50560
 2022-04-10,Ram Navami,closed,NSE/CMTR/50560
-2022-04-14,Dr. Baba Saheb Ambedkar Jayanti/,closed,NSE/CMTR/50560
+2022-04-14,Dr. Baba Saheb Ambedkar Jayanti/ Mahavir Jayanti,closed,NSE/CMTR/50560
 2022-04-15,Good Friday,closed,NSE/CMTR/50560
 2022-05-01,Maharashtra Day,closed,NSE/CMTR/50560
 2022-05-03,Id-Ul-Fitr (Ramzan ID),closed,NSE/CMTR/50560
@@ -15,6 +113,7 @@ date,description,session_type,source
 2022-10-05,Dussehra,closed,NSE/CMTR/50560
 2022-10-24,Diwali-Laxmi Pujan*,closed,NSE/CMTR/50560
 2022-10-26,Diwali-Balipratipada,closed,NSE/CMTR/50560
+2022-11-08,Gurunanak Jayanti,closed,NSE/CMTR/50560
 2022-12-25,Christmas,closed,NSE/CMTR/50560
 2023-01-26,Republic Day,closed,NSE/CMTR/54757
 2023-02-18,Mahashivratri,closed,NSE/CMTR/54757
@@ -25,7 +124,7 @@ date,description,session_type,source
 2023-04-14,Dr. Baba Saheb Ambedkar Jayanti,closed,NSE/CMTR/54757
 2023-04-22,Id-Ul-Fitr (Ramzan ID),closed,NSE/CMTR/54757
 2023-05-01,Maharashtra Day,closed,NSE/CMTR/54757
-2023-06-28,Bakri Id,closed,NSE/CMTR/54757
+2023-06-29,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
 2023-07-29,Moharram,closed,NSE/CMTR/54757
 2023-08-15,Independence Day,closed,NSE/CMTR/54757
 2023-09-19,Ganesh Chaturthi,closed,NSE/CMTR/54757
@@ -35,6 +134,7 @@ date,description,session_type,source
 2023-11-14,Diwali-Balipratipada,closed,NSE/CMTR/54757
 2023-11-27,Gurunanak Jayanti,closed,NSE/CMTR/54757
 2023-12-25,Christmas,closed,NSE/CMTR/54757
+2024-01-22,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
 2024-01-26,Republic Day,closed,NSE/CMTR/59722
 2024-03-08,Mahashivratri,closed,NSE/CMTR/59722
 2024-03-25,Holi,closed,NSE/CMTR/59722
@@ -54,6 +154,7 @@ date,description,session_type,source
 2024-11-01,Diwali Laxmi Pujan*,closed,NSE/CMTR/59722
 2024-11-02,Diwali-Balipratipada,closed,NSE/CMTR/59722
 2024-11-15,Gurunanak Jayanti,closed,NSE/CMTR/59722
+2024-11-20,closure recorded by the exchange (no NIFTY 50 session),closed,derived/nifty50-no-bar
 2024-12-25,Christmas,closed,NSE/CMTR/59722
 2025-01-26,Republic Day,closed,NSE/CMTR/65587
 2025-02-26,Mahashivratri,closed,NSE/CMTR/65587
@@ -65,7 +166,7 @@ date,description,session_type,source
 2025-04-18,Good Friday,closed,NSE/CMTR/65587
 2025-05-01,Maharashtra Day,closed,NSE/CMTR/65587
 2025-06-07,Bakri Id,closed,NSE/CMTR/65587
-2025-07-06,Muharram,closed,NSE/CMTR/65587
+2025-07-06,Muharram For and on behalf of,closed,NSE/CMTR/65587
 2025-08-15,Independence Day,closed,NSE/CMTR/65587
 2025-08-27,Ganesh Chaturthi,closed,NSE/CMTR/65587
 2025-10-02,Mahatma Gandhi Jayanti/Dussehra,closed,NSE/CMTR/65587

@@ -51,6 +51,9 @@ from broker.errors import (
     BrokerSessionExpiredError,
 )
 from broker.zerodha.kite_transport import HttpResponse, HttpTransport, UrllibHttpTransport
+from monitoring.logger import get_logger
+
+logger = get_logger("broker.zerodha.kite_historical")
 
 BASE_URL = "https://api.kite.trade"
 LOGIN_URL = "https://kite.zerodha.com/connect/login"
@@ -276,7 +279,7 @@ class KiteHistoricalClient:
                 "historical data needs an access token -- run scripts/kite_login.py"
             )
 
-        by_timestamp: dict[dt.datetime, Candle] = {}
+        collected: list[Candle] = []
         for window_start, window_end in self._windows(start, end):
             self._limiter.wait()
             payload = self._request(
@@ -287,10 +290,9 @@ class KiteHistoricalClient:
                     "to": window_end.isoformat(),
                 },
             )
-            for candle in parse_candles(payload):
-                by_timestamp[candle.timestamp] = candle
+            collected.extend(parse_candles(payload))
 
-        return tuple(by_timestamp[key] for key in sorted(by_timestamp))
+        return _one_bar_per_session(collected, instrument_token)
 
     def _windows(self, start: dt.date, end: dt.date) -> Iterator[tuple[dt.date, dt.date]]:
         cursor = start
@@ -362,6 +364,55 @@ class KiteHistoricalClient:
         if envelope.get("status") == "success":
             return envelope.get("data")
         raise BrokerRequestError(message or "unknown error", error_type=error_type)
+
+
+def _one_bar_per_session(candles: list[Candle], instrument_token: int) -> tuple[Candle, ...]:
+    """Collapse to exactly one bar per session date, latest timestamp wins.
+
+    Deduplicating on ``session_date`` rather than on ``timestamp`` is a
+    fix for real vendor data. Kite's daily candles normally carry a
+    midnight timestamp, but INDIA VIX has three dates in 2015 where they
+    carry an intraday one instead:
+
+        2015-06-29T08:59:23+05:30  close 18.17
+        2015-06-29T11:54:10+05:30  close 17.30
+
+    Two bars, one session. Keyed by timestamp both survive, and the
+    feature pipeline then refuses the series outright ("observations
+    contain a duplicate session date") -- which is the right refusal, but
+    it means three bad days in 2015 block a ten-year fit.
+
+    The latest timestamp wins because it is the observation closest to
+    the session's close, which is what a daily bar is supposed to record.
+    Adjacent chunk windows share a boundary date and legitimately return
+    the same bar twice; that case collapses here too, harmlessly.
+
+    Genuine duplicates are logged rather than silently resolved: a vendor
+    anomaly nobody knows about is one nobody can account for later.
+    """
+    by_session: dict[dt.date, Candle] = {}
+    conflicts: dict[dt.date, list[dt.datetime]] = {}
+
+    for candle in sorted(candles, key=lambda c: c.timestamp):
+        existing = by_session.get(candle.session_date)
+        if existing is not None and existing.timestamp != candle.timestamp:
+            conflicts.setdefault(candle.session_date, [existing.timestamp]).append(
+                candle.timestamp
+            )
+        by_session[candle.session_date] = candle
+
+    if conflicts:
+        logger.warning(
+            "instrument %s: %d session(s) returned more than one daily bar; "
+            "kept the latest timestamp for each: %s",
+            instrument_token,
+            len(conflicts),
+            ", ".join(
+                f"{day} ({len(stamps)} bars)" for day, stamps in sorted(conflicts.items())
+            ),
+        )
+
+    return tuple(by_session[key] for key in sorted(by_session))
 
 
 # -- parsing (pure functions, so they can be tested without a transport) ----

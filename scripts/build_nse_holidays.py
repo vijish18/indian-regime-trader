@@ -88,8 +88,39 @@ AMENDMENT_CIRCULARS: tuple[str, ...] = ("CMTR61518",)
 parsed for the single date it notifies."""
 
 ROW = re.compile(
-    r"^\s*(\d{1,2})\s+([A-Z][a-z]+ \d{1,2},\s*\d{4})\s+"
-    r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+(.+?)\s*$"
+    r"(?P<sr>\d{1,2})\s+(?P<date>[A-Z][a-z]+ \d{1,2}\s*,\s*\d{4})[\s\d,]*?"
+    r"(?P<day>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b"
+)
+"""Matches only a row's *anchor* -- serial number, date, weekday.
+
+It deliberately does not try to capture the description, and it runs over
+whitespace-collapsed text rather than line by line. Both choices are
+fixes for a real bug: NSE's 2022 circular renders row 13 as
+
+    13 November 08,2022
+    08,2022
+    Tuesday Gurunanak Jayanti
+
+with the date fragment repeated on its own line. A line-anchored regex
+requiring date and weekday together silently skipped it, so the shipped
+calendar said NSE was open on Guru Nanak Jayanti 2022. Nothing caught it
+-- the day-of-week cross-check only validates rows that *did* parse, and
+12 closures is a plausible count. It was found by reconciling against
+NIFTY 50 price data, which had no bar that day.
+
+``[\\s\\d,]*?`` tolerates the repeated fragment; the description is taken
+as the text between one anchor and the next (see
+:func:`parse_annual_circular`), so a description can wrap lines too.
+"""
+
+TABLE_SPLIT = "The holidays falling on"
+"""The circular prints two tables -- trading holidays, then those falling
+on a weekend -- and each restarts its numbering at 1. Splitting here lets
+the completeness check below assert 1..N per table."""
+
+BOILERPLATE = re.compile(
+    r"National Stock Exchange.*|Page \d+ of \d+.*|\*Muhurat.*|The holidays falling.*",
+    re.S,
 )
 AMENDMENT_DATE = re.compile(
     r"notifies\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s*"
@@ -161,27 +192,57 @@ def parse_annual_circular(ref: str, expected_year: int) -> list[Entry]:
                 f"{ref} says calendar year {stated.group(1)!r}, expected {expected_year}"
             )
 
+    collapsed = " ".join(text.split())
+    source = f"NSE/{ref[:4]}/{ref[4:]}"
     entries: list[Entry] = []
-    for line in text.splitlines():
-        match = ROW.match(line)
-        if not match:
+
+    for table in collapsed.split(TABLE_SPLIT):
+        anchors = list(ROW.finditer(table))
+        if not anchors:
             continue
-        day = dt.datetime.strptime(re.sub(r",\s*", ", ", match.group(2)), "%B %d, %Y").date()
-        printed_weekday = match.group(3)
 
-        # Cross-check the date against the weekday NSE printed beside it.
-        # Two independent statements of the same fact; if they disagree,
-        # the parse is wrong (or the circular is), and guessing which
-        # would be exactly the wrong instinct.
-        if day.strftime("%A") != printed_weekday:
+        # --- completeness, the check that would have caught the 2022 bug ---
+        #
+        # NSE numbers each table's rows 1..N. That is the document stating
+        # its own row count, so a dropped row is detectable without any
+        # external source: the serials simply stop being contiguous.
+        #
+        # This matters more than validating the rows that did parse. A
+        # missing closure does not look wrong -- it looks like an ordinary
+        # trading day, and the system waits all day for fills from a shut
+        # exchange.
+        serials = [int(a.group("sr")) for a in anchors]
+        if serials != list(range(1, len(serials) + 1)):
             raise SystemExit(
-                f"{ref}: {day} is a {day.strftime('%A')} but the circular prints "
-                f"{printed_weekday}; refusing to guess which is right"
+                f"{ref}: row serial numbers are {serials}, expected 1..{len(serials)}. "
+                "A row was dropped or double-counted; refusing to write a calendar "
+                "that may be missing a closure."
             )
-        if day.year != expected_year:
-            raise SystemExit(f"{ref}: parsed {day}, which is not in {expected_year}")
 
-        entries.append(Entry(day, match.group(4).strip(), f"NSE/{ref[:4]}/{ref[4:]}"))
+        for index, anchor in enumerate(anchors):
+            end = anchors[index + 1].start() if index + 1 < len(anchors) else len(table)
+            description = BOILERPLATE.sub("", table[anchor.end() : end]).strip(" .,")
+
+            day = dt.datetime.strptime(
+                re.sub(r"\s*,\s*", ", ", anchor.group("date")), "%B %d, %Y"
+            ).date()
+
+            # Cross-check the date against the weekday NSE printed beside
+            # it. Two independent statements of the same fact; if they
+            # disagree, the parse is wrong (or the circular is), and
+            # guessing which would be exactly the wrong instinct.
+            if day.strftime("%A") != anchor.group("day"):
+                raise SystemExit(
+                    f"{ref}: {day} is a {day.strftime('%A')} but the circular prints "
+                    f"{anchor.group('day')}; refusing to guess which is right"
+                )
+            if day.year != expected_year:
+                raise SystemExit(f"{ref}: parsed {day}, which is not in {expected_year}")
+            if not description:
+                raise SystemExit(f"{ref}: {day} parsed with an empty description")
+
+            entries.append(Entry(day, description, source))
+
     if not entries:
         raise SystemExit(f"{ref}: no holiday rows parsed -- the PDF layout may have changed")
     return entries
@@ -239,6 +300,77 @@ def build(*, use_api: bool = True) -> list[Entry]:
             merged.setdefault(entry.day, entry)
 
     return sorted(merged.values(), key=lambda e: e.day)
+
+
+def index_trading_days(start: dt.date, end: dt.date) -> set[dt.date]:
+    """Dates NIFTY 50 actually printed a bar, straight from Kite.
+
+    This is the exchange's own record of what it did, as opposed to the
+    circulars' record of what it intended to do the following year. Both
+    are authoritative about different things, which is the whole point of
+    comparing them.
+    """
+    from broker.zerodha.kite_historical import NIFTY_50_TOKEN, KiteHistoricalClient
+    from broker.zerodha.kite_session import load_session
+
+    session = load_session()
+    client = KiteHistoricalClient(session.api_key, access_token=session.access_token)
+    return {candle.session_date for candle in client.daily_candles(NIFTY_50_TOKEN, start, end)}
+
+
+def reconcile(entries: list[Entry], traded: set[dt.date]) -> tuple[list[Entry], list[str]]:
+    """Correct the circular-derived calendar against what the market did.
+
+    An annual circular is published each December for the year *ahead*, so
+    it is a forecast. NIFTY 50's bar history is the record. For any date
+    that has already happened, the record wins -- and reconciling the two
+    found three real errors in the shipped calendar over 2022-2025:
+
+        2023-06-29  Bakri Id, moved from the 28th after the circular
+        2024-01-22  Ram Mandir consecration
+        2024-11-20  Maharashtra assembly elections
+
+    Each was a weekday the exchange was shut and this calendar said was
+    open, which is the dangerous direction: the system would have sat
+    waiting for fills all day.
+
+    Muhurat days are the deliberate exception. The index prints a bar
+    because the ceremonial session trades, but there is no regular
+    session, so they stay closed (see docs/MARKET_CALENDAR.md).
+    """
+    if not traded:
+        raise SystemExit("no index trading days supplied; refusing to reconcile against nothing")
+
+    horizon = max(traded)
+    by_day = {entry.day: entry for entry in entries}
+    notes: list[str] = []
+
+    # 1. A past weekday with no index bar was a closure, whatever the
+    #    circular said -- or did not say.
+    day = min(traded)
+    while day <= horizon:
+        if day.weekday() < 5 and day not in traded and day not in by_day:
+            by_day[day] = Entry(
+                day,
+                "closure recorded by the exchange (no NIFTY 50 session)",
+                "derived/nifty50-no-bar",
+            )
+            notes.append(f"  + {day} ({day:%a}) closed: index printed no bar")
+        day += dt.timedelta(days=1)
+
+    # 2. A past closure the index actually traded through was superseded.
+    #    Muhurat rows are exempt: they trade a ceremonial session only.
+    for existing in list(by_day.values()):
+        if existing.day > horizon or existing.day.weekday() >= 5:
+            continue
+        if existing.day in traded and not existing.is_muhurat:
+            del by_day[existing.day]
+            notes.append(
+                f"  - {existing.day} ({existing.day:%a}) reopened: index traded "
+                f"(circular said {existing.description!r})"
+            )
+
+    return sorted(by_day.values(), key=lambda e: e.day), notes
 
 
 def to_rows(entries: list[Entry]) -> list[dict[str, str]]:
@@ -302,9 +434,36 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="skip the live holiday-master cross-check (offline; historical years only)",
     )
+    parser.add_argument(
+        "--reconcile-with-kite",
+        action="store_true",
+        help=(
+            "correct and extend the calendar against NIFTY 50's actual bar history "
+            "(needs a Kite session: python scripts/kite_login.py)"
+        ),
+    )
+    parser.add_argument(
+        "--history-from",
+        type=dt.date.fromisoformat,
+        default=dt.date(2015, 1, 1),
+        help="earliest date to reconcile from, with --reconcile-with-kite",
+    )
     args = parser.parse_args(argv[1:])
 
     entries = build(use_api=not args.no_api)
+
+    if args.reconcile_with_kite:
+        print(f"reconciling against NIFTY 50 bars from {args.history_from}...")
+        traded = index_trading_days(args.history_from, dt.date.today())
+        entries, notes = reconcile(entries, traded)
+        if notes:
+            print(f"{len(notes)} correction(s) from the exchange's own record:")
+            for note in notes:
+                print(note)
+        else:
+            print("  no corrections needed")
+        print()
+
     rendered = render(to_rows(entries))
 
     years = sorted({e.day.year for e in entries})

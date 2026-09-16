@@ -70,14 +70,46 @@ def test_the_shipped_calendar_loads(calendar: NSETradingCalendar) -> None:
 
 def test_every_row_carries_its_provenance(rows: list[dict[str, str]]) -> None:
     """A holiday file nobody can trace is one nobody can re-verify, and
-    re-verification is the only defence against a quietly wrong date. Each
-    row names the NSE circular (or the live holiday-master API) it came
-    from; ``scripts/build_nse_holidays.py`` regenerates them all."""
+    re-verification is the only defence against a quietly wrong date.
+
+    Three provenance kinds, and the distinction matters when auditing a
+    date: ``NSE/CMTR/...`` is transcribed from that circular,
+    ``nse-api/...`` came from the live holiday master, and
+    ``derived/nifty50-no-bar`` means the exchange printed no NIFTY 50 bar
+    that weekday -- a fact from price data rather than a document, used
+    for years with no circular on file and for closures announced after
+    one. ``scripts/build_nse_holidays.py`` regenerates them all.
+    """
     assert rows
+    allowed = ("NSE/CMTR/", "nse-api/", "derived/")
     for row in rows:
         source = row["source"].strip()
         assert source, f"{row['date']} has no source"
-        assert source.startswith(("NSE/CMTR/", "nse-api/")), f"{row['date']}: {source!r}"
+        assert source.startswith(allowed), f"{row['date']}: {source!r}"
+
+
+def test_the_reconciled_closures_that_the_circulars_missed_are_present() -> None:
+    """Regression test for three days the shipped calendar got wrong.
+
+    Reconciling against NIFTY 50's actual bar history found three
+    weekdays the exchange was shut and this calendar said were open --
+    the dangerous direction, where the system waits all day for fills
+    from a closed market:
+
+        2023-06-29  Bakri Id, moved from the 28th after the circular
+        2024-01-22  Ram Mandir consecration
+        2024-11-20  Maharashtra assembly elections
+
+    None appears in its year's December circular.
+    """
+    calendar = NSETradingCalendar.from_file(HOLIDAY_FILE)
+    for day in (dt.date(2023, 6, 29), dt.date(2024, 1, 22), dt.date(2024, 11, 20)):
+        assert day.weekday() < 5
+        assert calendar.is_trading_day(day) is False, f"{day} should be closed"
+
+    # ...and the date the circular wrongly listed is open again, because
+    # the index demonstrably traded that day.
+    assert calendar.is_trading_day(dt.date(2023, 6, 28)) is True
 
 
 # ---------------------------------------------------------------------------

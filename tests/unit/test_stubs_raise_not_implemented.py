@@ -11,15 +11,23 @@ import pytest
 from config.loader import load_settings
 
 
-def test_position_sizer_is_unimplemented() -> None:
-    """Portfolio construction, risk management (approve/veto), and
-    walk-forward backtesting are implemented; converting an approved
-    target weight into a final order quantity is still later work
-    (Phase 7c).
+def test_position_sizer_is_implemented() -> None:
+    """This asserted the Phase 7c stub still raised. It is now implemented,
+    so the inverse is asserted instead: the one module allowed to compute a
+    final order quantity actually computes one.
+
+    The substantive tests live in ``tests/unit/test_position_sizer.py``;
+    this only guards against a regression to the stub, which would leave
+    the system unable to size any order at all.
     """
-    from risk.position_sizer import PositionSizer
+    from risk.position_sizer import PositionSizer, PositionSizingError
 
     settings = load_settings()
     sizer = PositionSizer(settings.risk)
-    with pytest.raises(NotImplementedError, match="Phase 7c"):
-        sizer.weight_based_quantity(proposed=None, equity=100.0, price=10.0)  # type: ignore[arg-type]
+
+    assert sizer.risk_based_quantity(1_000_000.0, 250.0, 10.0) > 0
+
+    # A broken input still refuses rather than guessing -- and refuses with
+    # this module's own error, not NotImplementedError.
+    with pytest.raises(PositionSizingError):
+        sizer.risk_based_quantity(1_000_000.0, 250.0, 0.0)

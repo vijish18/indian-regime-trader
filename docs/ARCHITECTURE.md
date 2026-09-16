@@ -190,7 +190,7 @@ yet.")` body — not working logic.
 | 6b | Stock selection (`universe/stock_selector.py`, `factor_calculator.py`) | **Done** |
 | 7 | Portfolio constructor (`portfolio/portfolio_constructor.py`) | **Done** (position sizer -- converting an approved target weight into a final order quantity -- is still Phase 7c) |
 | 7b | Independent risk management (`risk/risk_manager.py`, `risk/circuit_breaker.py`, `risk/portfolio_risk_state.py`) | **Done** |
-| 7c | Position sizer (`risk/position_sizer.py`) | Stubbed |
+| 7c | Position sizer (`risk/position_sizer.py`) | **Done** |
 | 8 | Indian transaction-cost and execution-cost model (`backtest/costs.py`, `backtest/cost_schedule.py`) | **Done** |
 | 8b | Backtest engine, performance metrics (`backtest/engine.py`, `backtest/performance.py`) | **Done** |
 | 9 | Walk-forward validation (`backtest/walk_forward.py`) | **Done** |
