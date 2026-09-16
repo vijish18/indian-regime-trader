@@ -33,6 +33,7 @@ MODULES = [
     "data.instrument_master",
     "data.interfaces",
     "data.market_data",
+    "data.nse_corporate_actions",
     "data.membership",
     "data.models",
     "data.storage",
