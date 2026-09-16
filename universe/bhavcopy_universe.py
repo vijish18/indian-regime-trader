@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import defaultdict, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -128,10 +128,33 @@ def build_snapshots(
 ) -> list[UniverseSnapshot]:
     """Eligible sets for every session, in date order.
 
-    The trailing windows are advanced session by session in one pass, so
-    a snapshot can only ever see sessions already consumed. That is the
-    structural form of "no look-ahead" -- it is not enforced by a check
-    afterwards, it is arranged so the data is not present to be used.
+    Convenience wrapper over :func:`stream_snapshots` for callers that
+    already hold every session in memory. A full 2015-2026 backfill does
+    not -- roughly 5.4 million rows -- and should stream instead.
+    """
+    return list(
+        stream_snapshots(((day, rows_by_date[day]) for day in sorted(rows_by_date)), rules)
+    )
+
+
+def stream_snapshots(
+    sessions: Iterable[tuple[dt.date, Sequence[BhavcopyRow]]],
+    rules: EligibilityRules,
+) -> Iterator[UniverseSnapshot]:
+    """Eligible sets, yielded one session at a time.
+
+    ``sessions`` must arrive in ascending date order; that ordering is
+    what makes the result correct, so it is checked rather than assumed.
+
+    Streaming is not only about memory. The trailing windows are advanced
+    session by session as each arrives, so a snapshot *cannot* see a
+    session that has not been consumed yet -- there is no structure
+    holding the future for it to reach into. No-look-ahead is arranged
+    here, not asserted afterwards.
+
+    Memory is bounded by the number of instruments times
+    ``lookback_sessions``, not by the length of the history, so a decade
+    costs the same as a month.
     """
     if rules.lookback_sessions < 1:
         raise ValueError("lookback_sessions must be at least 1")
@@ -150,9 +173,15 @@ def build_snapshots(
         lambda: deque(maxlen=rules.lookback_sessions)
     )
 
-    snapshots: list[UniverseSnapshot] = []
-    for session_date in sorted(rows_by_date):
-        rows = rows_by_date[session_date]
+    previous_date: dt.date | None = None
+    for session_date, rows in sessions:
+        if previous_date is not None and session_date <= previous_date:
+            raise ValueError(
+                f"sessions must ascend; {session_date} followed {previous_date}. "
+                "Out-of-order input would let a later session's turnover into an "
+                "earlier session's window, which is look-ahead."
+            )
+        previous_date = session_date
         traded_today = {row.isin: row for row in rows if row.isin}
 
         # Advance every instrument seen so far, not only today's, so that
@@ -178,18 +207,15 @@ def build_snapshots(
                 continue
             eligible.add(row.instrument_id)
 
-        snapshots.append(
-            UniverseSnapshot(
-                session_date=session_date,
-                eligible=frozenset(eligible),
-                traded=len(traded_today),
-            )
+        yield UniverseSnapshot(
+            session_date=session_date,
+            eligible=frozenset(eligible),
+            traded=len(traded_today),
         )
-    return snapshots
 
 
 def snapshots_to_membership(
-    snapshots: list[UniverseSnapshot], *, index_symbol: str = DERIVED_INDEX_SYMBOL
+    snapshots: Iterable[UniverseSnapshot], *, index_symbol: str = DERIVED_INDEX_SYMBOL
 ) -> list[IndexMembership]:
     """Collapse per-session eligibility into ``[effective_from, effective_to]``
     spans, which is what ``IndexMembershipProvider`` consumes.

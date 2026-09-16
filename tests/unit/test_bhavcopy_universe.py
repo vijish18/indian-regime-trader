@@ -265,3 +265,52 @@ def test_incoherent_rules_are_refused() -> None:
     rows = {day: (_row("ACME", day),) for day in days}
     with pytest.raises(ValueError, match="cannot exceed"):
         build_snapshots(rows, _rules(lookback_sessions=5, min_sessions_traded=10))
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_and_materialised_builds_agree() -> None:
+    """``build_snapshots`` is a wrapper over ``stream_snapshots``; a full
+    backfill uses the streaming path because 2015-2026 is roughly 5.4
+    million rows. The two must not drift apart."""
+    from universe.bhavcopy_universe import stream_snapshots
+
+    days = _sessions(30)
+    rows = {day: (_row("ACME", day, turnover=CRORE * 50),) for day in days}
+
+    materialised = build_snapshots(rows, _rules())
+    streamed = list(stream_snapshots(((d, rows[d]) for d in sorted(rows)), _rules()))
+    assert materialised == streamed
+
+
+def test_out_of_order_sessions_are_refused() -> None:
+    """Checked rather than assumed, because the consequence is silent.
+
+    A later session arriving early would put its turnover into an earlier
+    session's trailing window -- look-ahead, produced by nothing more than
+    an unsorted input, and invisible in the output.
+    """
+    from universe.bhavcopy_universe import stream_snapshots
+
+    days = _sessions(3)
+    out_of_order = [(days[2], (_row("ACME", days[2]),)), (days[0], (_row("ACME", days[0]),))]
+    with pytest.raises(ValueError, match="must ascend"):
+        list(stream_snapshots(out_of_order, _rules()))
+
+
+def test_streaming_memory_does_not_grow_with_history_length() -> None:
+    """The trailing windows are bounded by lookback_sessions, so a decade
+    costs the same as a month. Asserted via the window sizes rather than
+    by measuring memory, which would be flaky."""
+    from universe.bhavcopy_universe import stream_snapshots
+
+    rules = _rules(lookback_sessions=20, min_sessions_traded=1)
+    days = _sessions(200)
+    rows = ((day, (_row("ACME", day, turnover=CRORE * 50),)) for day in days)
+    snapshots = list(stream_snapshots(rows, rules))
+    assert len(snapshots) == 200
+    # Still eligible at the end, i.e. the window kept working as it rolled.
+    assert "NSE:ACME" in snapshots[-1].eligible
