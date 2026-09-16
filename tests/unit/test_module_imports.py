@@ -79,6 +79,8 @@ MODULES = [
     "broker.zerodha.kite_broker",
     "broker.zerodha.kite_mappings",
     "broker.zerodha.kite_ticker",
+    "broker.zerodha.kite_historical",
+    "broker.zerodha.kite_session",
     "broker.zerodha.kite_transport",
     "backtest",
     "backtest.engine",

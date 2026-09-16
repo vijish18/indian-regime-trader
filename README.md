@@ -608,3 +608,4 @@ URL) live in `.env`, never in `settings.yaml`.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the specification's layers map to this repo, module boundaries, and the phase build plan.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — local setup, coding standards, test conventions.
 - [docs/MARKET_CALENDAR.md](docs/MARKET_CALENDAR.md) — where the NSE holiday data comes from, the Muhurat and mid-year-drift decisions, and what is still missing.
+- [docs/KITE_DATA.md](docs/KITE_DATA.md) — getting real NSE price history in via Kite Connect, what was verified against the live API, and the survivorship/adjustment limits that decide whether a backtest on it is honest.
