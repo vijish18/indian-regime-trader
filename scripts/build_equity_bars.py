@@ -49,6 +49,31 @@ DATA_CACHE = REPO_ROOT / "data_cache"
 BHAVCOPY_CACHE = DATA_CACHE / "raw" / "bhavcopy"
 MEMBERSHIP = DATA_CACHE / "reference" / "index_membership.csv"
 BARS_OUT = DATA_CACHE / "raw" / "equity_bars"
+INSTRUMENTS_OUT = DATA_CACHE / "reference" / "instruments.csv"
+KITE_INSTRUMENTS = DATA_CACHE / "raw" / "kite" / "instruments.csv"
+
+DEFAULT_TICK_SIZE = "0.05"
+"""Used when Kite's live dump has no entry for an instrument, which is
+the case for every name delisted before today. 0.05 is NSE's common
+tick for the price bands most equities trade in.
+
+This is an approximation and it is worth knowing where it bites: tick
+size only affects order-price rounding in fill simulation, so a wrong
+tick shifts a simulated fill by at most one tick. It does not affect
+which names are eligible, what they are ranked on, or what the bars
+say. Real tick sizes are used for every instrument still listed."""
+
+INSTRUMENT_HEADER = (
+    "instrument_id",
+    "symbol",
+    "exchange",
+    "segment",
+    "tick_size",
+    "price_precision",
+    "effective_from",
+    "effective_to",
+    "isin",
+)
 
 BAR_HEADER = (
     "instrument_id",
@@ -86,6 +111,29 @@ def universe_instruments(path: Path) -> set[str]:
         return {row["instrument_id"] for row in csv.DictReader(handle)}
 
 
+def load_kite_tick_sizes(path: Path) -> dict[str, str]:
+    """Real tick sizes for instruments still listed today.
+
+    Only the tick is taken from this file. Its effective_from is the
+    snapshot date, which would make every instrument invalid for every
+    historical date -- the reason the instrument master is rebuilt from
+    bhavcopy rather than taken from here (docs/KITE_DATA.md).
+    """
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        return {
+            row["instrument_id"]: row["tick_size"]
+            for row in csv.DictReader(handle)
+            if row.get("tick_size")
+        }
+
+
+def _price_precision(tick_size: str) -> int:
+    text = tick_size.rstrip("0").rstrip(".")
+    return len(text.split(".", 1)[1]) if "." in text else 0
+
+
 def _safe_name(instrument_id: str) -> str:
     return instrument_id.replace(":", "_").replace("/", "_").replace(" ", "_")
 
@@ -110,6 +158,11 @@ def main(argv: list[str]) -> int:
         print(f"restricting to {len(wanted):,} instruments that were ever eligible")
 
     bars: dict[str, list[_Row]] = defaultdict(list)
+    # instrument_id -> (first seen, last seen, symbol, isin). Built from
+    # the same pass: an instrument existed on the days it printed a bar,
+    # which is the only point-in-time statement available, and the only
+    # one that is survivorship-free.
+    identity: dict[str, tuple[str, str, str, str]] = {}
     sessions = 0
     skipped = 0
 
@@ -129,6 +182,14 @@ def main(argv: list[str]) -> int:
             instrument_id = row.instrument_id
             if wanted is not None and instrument_id not in wanted:
                 continue
+            day_iso = row.session_date.isoformat()
+            seen = identity.get(instrument_id)
+            identity[instrument_id] = (
+                seen[0] if seen else day_iso,
+                day_iso,
+                row.symbol,
+                row.isin,
+            )
             bars[instrument_id].append(
                 (
                     row.session_date.isoformat(),
@@ -166,7 +227,39 @@ def main(argv: list[str]) -> int:
                 )
         total += len(rows_out)
 
+    ticks = load_kite_tick_sizes(KITE_INSTRUMENTS)
+    INSTRUMENTS_OUT.parent.mkdir(parents=True, exist_ok=True)
+    last_session = max(identity[i][1] for i in identity)
+    with INSTRUMENTS_OUT.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(INSTRUMENT_HEADER)
+        for instrument_id, (first, last, symbol, isin) in sorted(identity.items()):
+            tick = ticks.get(instrument_id, DEFAULT_TICK_SIZE)
+            writer.writerow(
+                [
+                    instrument_id,
+                    symbol,
+                    "NSE",
+                    "equity",
+                    tick,
+                    _price_precision(tick),
+                    first,
+                    # Blank means "still listed". An instrument whose last bar
+                    # is the last session in the data has not been shown to
+                    # have delisted -- it has only been shown not to have
+                    # traded since, which is a different claim.
+                    "" if last == last_session else last,
+                    isin,
+                ]
+            )
+    with_real_tick = sum(1 for i in identity if i in ticks)
+
     print(f"  {total:,} bars across {len(bars):,} instruments")
+    print(f"  instrument master -> {INSTRUMENTS_OUT}")
+    print(
+        f"    {with_real_tick:,} with a real tick size, "
+        f"{len(identity) - with_real_tick:,} defaulted to {DEFAULT_TICK_SIZE}"
+    )
     print(f"  {sessions:,} sessions used, {skipped:,} not in the cache")
     print("\nPrices are RAW. Adjusted prices are produced at read time by")
     print("LocalMarketDataProvider, using the corporate actions -- never baked in.")

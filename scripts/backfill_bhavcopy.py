@@ -63,7 +63,7 @@ from data.nse_corporate_actions import (  # noqa: E402
 from universe.bhavcopy_universe import (  # noqa: E402
     DERIVED_INDEX_SYMBOL,
     EligibilityRules,
-    UniverseSnapshot,
+    EligibilitySnapshot,
     snapshots_to_membership,
     stream_snapshots,
 )
@@ -342,7 +342,7 @@ def main(argv: list[str]) -> int:
 
     print("streaming the cache into the universe builder...")
     parsed = [0]
-    snapshots: list[UniverseSnapshot] = []
+    snapshots: list[EligibilitySnapshot] = []
     for snapshot in stream_snapshots(stream_cached(days, parsed), rules):
         # Only the per-session eligible sets are kept, never the rows
         # that produced them: a decade of snapshots is small, a decade

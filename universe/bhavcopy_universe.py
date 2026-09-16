@@ -92,8 +92,16 @@ class EligibilityRules:
 
 
 @dataclass(frozen=True, slots=True)
-class UniverseSnapshot:
-    """The eligible set on one session, with enough detail to audit it."""
+class EligibilitySnapshot:
+    """The eligible set on one session, with enough detail to audit it.
+
+    Deliberately not named ``UniverseSnapshot``: ``universe.universe``
+    already defines that, and it means something different -- an index's
+    constituents on a date, with the exclusions that were considered.
+    This is the output of the liquidity screen that *feeds* one. Two
+    same-named classes in one package is a trap nobody notices until an
+    import picks the wrong one.
+    """
 
     session_date: dt.date
     eligible: frozenset[str]
@@ -125,7 +133,7 @@ def _median(values: Sequence[Decimal]) -> Decimal:
 def build_snapshots(
     rows_by_date: Mapping[dt.date, Sequence[BhavcopyRow]],
     rules: EligibilityRules,
-) -> list[UniverseSnapshot]:
+) -> list[EligibilitySnapshot]:
     """Eligible sets for every session, in date order.
 
     Convenience wrapper over :func:`stream_snapshots` for callers that
@@ -140,7 +148,7 @@ def build_snapshots(
 def stream_snapshots(
     sessions: Iterable[tuple[dt.date, Sequence[BhavcopyRow]]],
     rules: EligibilityRules,
-) -> Iterator[UniverseSnapshot]:
+) -> Iterator[EligibilitySnapshot]:
     """Eligible sets, yielded one session at a time.
 
     ``sessions`` must arrive in ascending date order; that ordering is
@@ -207,7 +215,7 @@ def stream_snapshots(
                 continue
             eligible.add(row.instrument_id)
 
-        yield UniverseSnapshot(
+        yield EligibilitySnapshot(
             session_date=session_date,
             eligible=frozenset(eligible),
             traded=len(traded_today),
@@ -215,7 +223,7 @@ def stream_snapshots(
 
 
 def snapshots_to_membership(
-    snapshots: Iterable[UniverseSnapshot], *, index_symbol: str = DERIVED_INDEX_SYMBOL
+    snapshots: Iterable[EligibilitySnapshot], *, index_symbol: str = DERIVED_INDEX_SYMBOL
 ) -> list[IndexMembership]:
     """Collapse per-session eligibility into ``[effective_from, effective_to]``
     spans, which is what ``IndexMembershipProvider`` consumes.
