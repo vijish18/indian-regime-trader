@@ -607,3 +607,4 @@ URL) live in `.env`, never in `settings.yaml`.
 - [docs/SPECIFICATION.md](docs/SPECIFICATION.md) — the source engineering specification.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the specification's layers map to this repo, module boundaries, and the phase build plan.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — local setup, coding standards, test conventions.
+- [docs/MARKET_CALENDAR.md](docs/MARKET_CALENDAR.md) — where the NSE holiday data comes from, the Muhurat and mid-year-drift decisions, and what is still missing.

@@ -157,11 +157,19 @@ def test_calendar_file_rejects_invalid_dates(tmp_path: Path) -> None:
         NSETradingCalendar.from_file(path)
 
 
-def test_shipped_calendar_file_is_empty_and_fails_closed() -> None:
-    """The repository ships an unpopulated calendar on purpose: fabricating
-    holiday dates would be worse than refusing to run. This test documents
-    that state, and should be updated when the real list is loaded.
+def test_shipped_calendar_file_is_populated() -> None:
+    """The repository used to ship an unpopulated calendar on purpose --
+    fabricating holiday dates would have been worse than refusing to run --
+    and the test that documented that state said it should be replaced
+    "when the real list is loaded". This is that replacement.
+
+    ``config/nse_holidays.csv`` is now transcribed from NSE's own
+    circulars and live holiday master by ``scripts/build_nse_holidays.py``.
+    The substantive checks on its *contents* live in
+    ``tests/unit/test_nse_holidays.py``; this one only asserts that the
+    file the rest of the system loads is no longer empty, so that a
+    regression to the placeholder state fails here rather than at 09:15.
     """
     path = Path(__file__).resolve().parents[2] / "config" / "nse_holidays.csv"
-    with pytest.raises(ValueError, match="no calendar entries"):
-        NSETradingCalendar.from_file(path)
+    calendar = NSETradingCalendar.from_file(path)
+    assert calendar.covered_years

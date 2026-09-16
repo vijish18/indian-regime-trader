@@ -239,8 +239,22 @@ on T, so a split announced later cannot retroactively rewrite it.
 **The calendar fails closed outside its coverage.** Asking about a year the
 holiday dataset does not cover raises rather than assuming "no holidays" —
 which would turn missing data into wrong data (trading on Republic Day).
-`config/nse_holidays.csv` therefore ships empty and must be populated from
-NSE's published list; fabricating dates would be worse than refusing to run.
+`config/nse_holidays.csv` shipped empty until it could be populated from NSE's
+own published sources; fabricating dates would have been worse than refusing to
+run. It now covers **2022-2026**, transcribed by
+`scripts/build_nse_holidays.py` from the annual NSE circulars plus the live
+holiday-master API, with each row carrying the circular reference it came from.
+
+Two things that source work established, both recorded in
+[MARKET_CALENDAR.md](MARKET_CALENDAR.md): the annual circular is **not** the
+last word (NSE adds closures mid-year by partial modification -- 2024-05-20 and
+2026-01-15 are both weekdays absent from their year's December circular), and
+`SessionType.SPECIAL` is deliberately unused, because `session()` hands out
+regular 09:15-15:30 hours for anything marked special and so cannot represent a
+Muhurat session's actual timings. Muhurat days are recorded closed instead,
+which is both the fail-closed answer and the right one for a daily long-only
+system. A test rejects any `special` row so that state cannot be reached by
+editing the CSV.
 
 **Parsing and validation are separate.** Models represent whatever the vendor
 sent, including impossible bars, so `data_quality` can report them instead of a

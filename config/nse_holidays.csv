@@ -1,1 +1,95 @@
-date,description,session_type
+date,description,session_type,source
+2022-01-26,Republic Day,closed,NSE/CMTR/50560
+2022-03-01,Mahashivratri,closed,NSE/CMTR/50560
+2022-03-18,Holi,closed,NSE/CMTR/50560
+2022-04-10,Ram Navami,closed,NSE/CMTR/50560
+2022-04-14,Dr. Baba Saheb Ambedkar Jayanti/,closed,NSE/CMTR/50560
+2022-04-15,Good Friday,closed,NSE/CMTR/50560
+2022-05-01,Maharashtra Day,closed,NSE/CMTR/50560
+2022-05-03,Id-Ul-Fitr (Ramzan ID),closed,NSE/CMTR/50560
+2022-07-10,Bakri Id,closed,NSE/CMTR/50560
+2022-08-09,Moharram,closed,NSE/CMTR/50560
+2022-08-15,Independence Day,closed,NSE/CMTR/50560
+2022-08-31,Ganesh Chaturthi,closed,NSE/CMTR/50560
+2022-10-02,Mahatma Gandhi Jayanti,closed,NSE/CMTR/50560
+2022-10-05,Dussehra,closed,NSE/CMTR/50560
+2022-10-24,Diwali-Laxmi Pujan*,closed,NSE/CMTR/50560
+2022-10-26,Diwali-Balipratipada,closed,NSE/CMTR/50560
+2022-12-25,Christmas,closed,NSE/CMTR/50560
+2023-01-26,Republic Day,closed,NSE/CMTR/54757
+2023-02-18,Mahashivratri,closed,NSE/CMTR/54757
+2023-03-07,Holi,closed,NSE/CMTR/54757
+2023-03-30,Ram Navami,closed,NSE/CMTR/54757
+2023-04-04,Mahavir Jayanti,closed,NSE/CMTR/54757
+2023-04-07,Good Friday,closed,NSE/CMTR/54757
+2023-04-14,Dr. Baba Saheb Ambedkar Jayanti,closed,NSE/CMTR/54757
+2023-04-22,Id-Ul-Fitr (Ramzan ID),closed,NSE/CMTR/54757
+2023-05-01,Maharashtra Day,closed,NSE/CMTR/54757
+2023-06-28,Bakri Id,closed,NSE/CMTR/54757
+2023-07-29,Moharram,closed,NSE/CMTR/54757
+2023-08-15,Independence Day,closed,NSE/CMTR/54757
+2023-09-19,Ganesh Chaturthi,closed,NSE/CMTR/54757
+2023-10-02,Mahatma Gandhi Jayanti,closed,NSE/CMTR/54757
+2023-10-24,Dussehra,closed,NSE/CMTR/54757
+2023-11-12,Diwali-Laxmi Pujan*,closed,NSE/CMTR/54757
+2023-11-14,Diwali-Balipratipada,closed,NSE/CMTR/54757
+2023-11-27,Gurunanak Jayanti,closed,NSE/CMTR/54757
+2023-12-25,Christmas,closed,NSE/CMTR/54757
+2024-01-26,Republic Day,closed,NSE/CMTR/59722
+2024-03-08,Mahashivratri,closed,NSE/CMTR/59722
+2024-03-25,Holi,closed,NSE/CMTR/59722
+2024-03-29,Good Friday,closed,NSE/CMTR/59722
+2024-04-11,Id-Ul-Fitr (Ramadan Eid),closed,NSE/CMTR/59722
+2024-04-14,Dr. Baba Saheb Ambedkar Jayanti,closed,NSE/CMTR/59722
+2024-04-17,Shri Ram Navmi,closed,NSE/CMTR/59722
+2024-04-21,Shri Mahavir Jayanti,closed,NSE/CMTR/59722
+2024-05-01,Maharashtra Day,closed,NSE/CMTR/59722
+2024-05-20,Parliamentary Elections,closed,NSE/CMTR/61518
+2024-06-17,Bakri Id,closed,NSE/CMTR/59722
+2024-07-17,Moharram,closed,NSE/CMTR/59722
+2024-08-15,Independence Day/Parsi New Year,closed,NSE/CMTR/59722
+2024-09-07,Ganesh Chaturthi,closed,NSE/CMTR/59722
+2024-10-02,Mahatma Gandhi Jayanti,closed,NSE/CMTR/59722
+2024-10-12,Dussehra,closed,NSE/CMTR/59722
+2024-11-01,Diwali Laxmi Pujan*,closed,NSE/CMTR/59722
+2024-11-02,Diwali-Balipratipada,closed,NSE/CMTR/59722
+2024-11-15,Gurunanak Jayanti,closed,NSE/CMTR/59722
+2024-12-25,Christmas,closed,NSE/CMTR/59722
+2025-01-26,Republic Day,closed,NSE/CMTR/65587
+2025-02-26,Mahashivratri,closed,NSE/CMTR/65587
+2025-03-14,Holi,closed,NSE/CMTR/65587
+2025-03-31,Id-Ul-Fitr (Ramadan Eid),closed,NSE/CMTR/65587
+2025-04-06,Shri Ram Navami,closed,NSE/CMTR/65587
+2025-04-10,Shri Mahavir Jayanti,closed,NSE/CMTR/65587
+2025-04-14,Dr. Baba Saheb Ambedkar Jayanti,closed,NSE/CMTR/65587
+2025-04-18,Good Friday,closed,NSE/CMTR/65587
+2025-05-01,Maharashtra Day,closed,NSE/CMTR/65587
+2025-06-07,Bakri Id,closed,NSE/CMTR/65587
+2025-07-06,Muharram,closed,NSE/CMTR/65587
+2025-08-15,Independence Day,closed,NSE/CMTR/65587
+2025-08-27,Ganesh Chaturthi,closed,NSE/CMTR/65587
+2025-10-02,Mahatma Gandhi Jayanti/Dussehra,closed,NSE/CMTR/65587
+2025-10-21,Diwali Laxmi Pujan*,closed,NSE/CMTR/65587
+2025-10-22,Diwali-Balipratipada,closed,NSE/CMTR/65587
+2025-11-05,Prakash Gurpurb Sri Guru Nanak Dev,closed,NSE/CMTR/65587
+2025-12-25,Christmas,closed,NSE/CMTR/65587
+2026-01-15,Municipal Corporation Election - Maharashtra,closed,nse-api/holiday-master
+2026-01-26,Republic Day,closed,NSE/CMTR/71775
+2026-02-15,Mahashivratri,closed,NSE/CMTR/71775
+2026-03-03,Holi,closed,NSE/CMTR/71775
+2026-03-21,Id-Ul-Fitr (Ramadan Eid),closed,NSE/CMTR/71775
+2026-03-26,Shri Ram Navami,closed,NSE/CMTR/71775
+2026-03-31,Shri Mahavir Jayanti,closed,NSE/CMTR/71775
+2026-04-03,Good Friday,closed,NSE/CMTR/71775
+2026-04-14,Dr. Baba Saheb Ambedkar Jayanti,closed,NSE/CMTR/71775
+2026-05-01,Maharashtra Day,closed,NSE/CMTR/71775
+2026-05-28,Bakri Id,closed,NSE/CMTR/71775
+2026-06-26,Muharram,closed,NSE/CMTR/71775
+2026-08-15,Independence Day,closed,NSE/CMTR/71775
+2026-09-14,Ganesh Chaturthi,closed,NSE/CMTR/71775
+2026-10-02,Mahatma Gandhi Jayanti,closed,NSE/CMTR/71775
+2026-10-20,Dussehra,closed,NSE/CMTR/71775
+2026-11-08,Diwali Laxmi Pujan*,closed,NSE/CMTR/71775
+2026-11-10,Diwali-Balipratipada,closed,NSE/CMTR/71775
+2026-11-24,Prakash Gurpurb Sri Guru Nanak Dev,closed,NSE/CMTR/71775
+2026-12-25,Christmas,closed,NSE/CMTR/71775

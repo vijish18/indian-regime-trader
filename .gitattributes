@@ -19,6 +19,8 @@ Dockerfile        text eol=lf
 *.yaml            text eol=lf
 *.sql             text eol=lf
 *.env.example     text eol=lf
+# Reference data the trading system reads at runtime, inside the container.
+*.csv             text eol=lf
 deploy/host/Caddyfile            text eol=lf
 deploy/host/sshd_config.hardened text eol=lf
 
