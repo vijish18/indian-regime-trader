@@ -1,0 +1,79 @@
+# HTTPS for the dashboard (Phase 23) -- NOT CURRENTLY IN USE.
+#
+# Read this first, because the honest answer matters more than the file:
+#
+#   **This deployment exposes no web dashboard.** The Phase 20 dashboard
+#   (monitoring/terminal_dashboard.py) renders to a terminal. It is
+#   reached with
+#
+#       ssh deploy@trading-host
+#       docker compose -f deploy/docker-compose.yml exec app python -m app.cli ...
+#
+#   which is already an encrypted, key-authenticated, audited channel --
+#   a better one than an HTTPS page with a password would be. There is no
+#   HTTP listener in deploy/docker-compose.yml, no published port, and no
+#   firewall rule for 443 in deploy/host/ufw.sh.
+#
+# So this file is a template for the day a web dashboard exists, kept
+# here so that day does not start with someone binding an unencrypted
+# Flask development server to 0.0.0.0. Until then it is not installed and
+# not running.
+#
+# When that day comes:
+#   1. Add the listener to the app service, bound to 127.0.0.1 only.
+#   2. Install Caddy on the host (not in the compose stack -- it needs to
+#      outlive an app redeploy so certificates survive).
+#   3. `sudo ufw allow 443/tcp` and `sudo ufw allow 80/tcp` (80 for the
+#      ACME challenge only).
+#   4. Replace the placeholders below and reload Caddy.
+#
+# Caddy rather than nginx for one reason: it obtains and renews
+# certificates automatically. An expired certificate on a dashboard is a
+# small outage; an expired certificate nobody noticed because renewal was
+# a cron job that silently stopped is how small outages happen during
+# incidents, which is exactly when the dashboard is needed.
+
+dashboard.example.com {
+	# Automatic HTTPS via Let's Encrypt. Replace with your address; it is
+	# used for expiry warnings.
+	tls ops@example.com
+
+	# The dashboard listens on loopback only. Caddy is the sole path in,
+	# so authentication and TLS cannot be bypassed by reaching the app
+	# port directly.
+	reverse_proxy 127.0.0.1:8080
+
+	# Authentication in front of everything. Generate the hash with
+	# `caddy hash-password`; never store a plaintext password here.
+	# This is a second factor of sorts on top of the firewall, not a
+	# replacement for it -- keep the 443 rule restricted to your admin
+	# network if you can.
+	basic_auth {
+		ops $2a$14$REPLACE_WITH_THE_OUTPUT_OF_caddy_hash_password
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# A dashboard needs no third-party anything.
+		Content-Security-Policy "default-src 'self'; frame-ancestors 'none'"
+		-Server
+	}
+
+	# Access log, retained. A dashboard that can trigger the kill switch
+	# is an administrative interface, and administrative interfaces need
+	# an audit trail of their own -- the application's audit log records
+	# what the system did, not who asked it to.
+	log {
+		output file /var/log/caddy/dashboard-access.log {
+			roll_size 20mb
+			roll_keep 10
+		}
+		format json
+	}
+}
+
+# Anything that arrives on port 80 for this name is redirected by Caddy
+# automatically. Nothing is served over plaintext HTTP.

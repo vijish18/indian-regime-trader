@@ -13,7 +13,9 @@ cp .env.example .env
 
 ```bash
 pytest                    # unit tests only (integration-marked tests are excluded by default)
-pytest -m integration      # integration tests only, once any exist
+pytest -m integration      # integration tests only -- needs a Docker daemon
+                           # (tests/integration/test_docker_smoke.py builds the
+                           # production image and runs a real container)
 pytest --cov               # with coverage
 mypy .                      # strict type checking
 ruff check .                 # lint

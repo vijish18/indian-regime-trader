@@ -636,6 +636,25 @@ class LoggingConfig(BaseModel):
     level: str
     format: str
 
+    audit_log_path: str | None = None
+    """Where to additionally write every log record as a durable,
+    rotating file (Phase 23). ``None`` disables it and leaves stdout as
+    the only destination. Set in production to a path inside a mounted
+    volume, so the audit trail survives the container that wrote it --
+    stdout alone lives in the container runtime's own storage, which a
+    ``docker system prune`` discards. Never a secret, so it belongs here
+    rather than in ``.env``."""
+
+    audit_log_max_bytes: int = Field(default=50_000_000, ge=1024)
+    """Rotation threshold for ``audit_log_path``. Rotation is this
+    process's own job as well as the container runtime's: the stdout
+    stream is rotated by Docker's ``json-file`` driver, but a file this
+    process opens itself is not."""
+
+    audit_log_backup_count: int = Field(default=10, ge=1)
+    """How many rotated audit files to keep. With the defaults above, an
+    upper bound of roughly 550 MB of audit history on disk."""
+
 
 class MonitoringConfig(BaseModel):
     model_config = {"frozen": True}

@@ -37,6 +37,7 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+    "app*",
     "config*",
     "core*",
     "data*",
@@ -46,6 +47,9 @@ include = [
     "execution*",
     "broker*",
     "backtest*",
+    "orchestration*",
+    "live*",
+    "validation*",
     "monitoring*",
     "storage*",
 ]
@@ -54,9 +58,16 @@ exclude = ["tests*", "scripts*", "docs*"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config"
+# `-m "not integration"` makes the exclusion the marker has always claimed
+# actually true. Before Phase 23 nothing carried the marker, so a plain
+# `pytest` run was equivalent either way; now that tests/integration/
+# builds a Docker image, the default run must stay hermetic -- it has to
+# work on a machine with no Docker daemon, and a five-minute image build
+# does not belong in the loop people run on every edit.
+# Run them deliberately:  pytest -m integration
+addopts = "-ra --strict-markers --strict-config -m \"not integration\""
 markers = [
-    "integration: tests that touch the network, a broker API, or a real database (excluded by default).",
+    "integration: tests that touch the network, a broker API, a real database, or a container runtime (excluded by default; run with `pytest -m integration`).",
 ]
 filterwarnings = ["error"]
 

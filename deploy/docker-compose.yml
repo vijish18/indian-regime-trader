@@ -1,0 +1,203 @@
+# Production deployment (Phase 23).
+#
+#   cd deploy
+#   cp app.env.example app.env && cp db.env.example db.env   # then fill them in
+#   docker compose up -d --build
+#   docker compose ps                          # app should reach (healthy)
+#   docker compose logs -f app
+#
+# This file does NOT enable live trading and cannot: `app/service.py`
+# refuses to start when execution.mode is live, `deploy/entrypoint.sh`
+# refuses before Python starts, and `broker/factory.py`'s four gates
+# refuse to construct a live-capable broker regardless. See
+# docs/PRE_LIVE_CHECKLIST.md.
+
+name: indian-regime-trader
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: indian-regime-trader:${IMAGE_TAG:-local}
+    container_name: irt-app
+
+    # Secrets arrive as environment variables from a file that is
+    # gitignored and .dockerignored, never from this file and never from
+    # an image layer. For a multi-host deployment, replace this with your
+    # secret manager's injection mechanism (docs/DEPLOYMENT.md has the
+    # comparison); the application reads os.environ either way, so
+    # nothing in the code changes.
+    env_file:
+      - app.env
+
+    # Non-secret, deployment-shaped values. Anything here is visible to
+    # `docker inspect`, so nothing secret may be added to this block.
+    environment:
+      STATE_FILE: /app/state/system_state.json
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # --- Persistence -------------------------------------------------------
+    # Three separate volumes rather than one, because they have three
+    # different recovery stories: state must be restored exactly or not
+    # at all, logs must never be restored over newer logs, and the data
+    # cache is reconstructible from the vendor and needs no backup.
+    volumes:
+      - app-state:/app/state
+      - app-logs:/app/logs
+      - app-data-cache:/app/data_cache
+
+    # --- Automatic restart -------------------------------------------------
+    # `unless-stopped`, not `always`: an operator who deliberately stops a
+    # trading process during an incident must not have it come back on
+    # the next daemon restart. The backoff is Docker's own, and the
+    # fail-closed design is what makes an automatic restart safe -- see
+    # docs/INCIDENT_RESPONSE.md.
+    restart: unless-stopped
+
+    # --- Health ------------------------------------------------------------
+    # Inherited from the image's HEALTHCHECK. Repeated here only to state
+    # the interval alongside the restart policy, since together they
+    # decide how long a wedged process goes unnoticed (worst case:
+    # start-period + interval * retries).
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.cli", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+    # --- Resource limits ---------------------------------------------------
+    # A bound, not a target. The point is that a runaway backtest or a
+    # memory leak degrades this container instead of the host -- on a
+    # single-host deployment, the database and the SSH daemon you need to
+    # fix the problem live on that same host.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          memory: 512M
+
+    # --- Log rotation ------------------------------------------------------
+    # This rotates the *stdout* stream, which the process does not own.
+    # The audit file at /app/logs/audit.log is rotated by the process
+    # itself (logging.audit_log_max_bytes / audit_log_backup_count in
+    # config/settings.yaml). Both are needed; neither covers the other.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # --- Hardening ---------------------------------------------------------
+    read_only: true              # only the three volumes above are writable
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s       # room for the shutdown path to finish a write
+
+    # No `ports:`. This service exposes no network listener at all. The
+    # Phase 20 dashboard is a terminal UI, reached with
+    # `docker compose exec app ...` over SSH -- already an encrypted,
+    # key-authenticated channel. See docs/DEPLOYMENT.md on HTTPS.
+
+    networks:
+      - internal
+
+  db:
+    image: postgres:16-alpine
+    container_name: irt-db
+
+    # Every credential arrives through this file and NOTHING through
+    # `environment:` below. Two reasons, one of them learned the hard way:
+    #
+    # 1. Compose interpolates `${VAR}` from the shell and from a `.env`
+    #    in the project directory -- NOT from `env_file:`. Writing
+    #    `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}` here and putting the
+    #    value in an env_file silently yields an empty password, or an
+    #    error at `docker compose config` time if you were lucky enough
+    #    to have written `:?`.
+    # 2. Anything in `environment:` is visible to `docker inspect` and to
+    #    anyone who can read this file. An env_file is at least one
+    #    permission boundary away.
+    #
+    # This is a separate file from the app's on purpose: a compromised
+    # application container must not be able to read the credential that
+    # owns the schema.
+    env_file:
+      - db.env
+
+    environment:
+      # Non-secret. scram-sha-256 for host connections rather than the
+      # trust/md5 that some images still default to.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+
+    # Runs once, on an empty data directory only. It creates the
+    # least-privilege role the application actually connects as -- the
+    # superuser above is used for migrations and nothing else.
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+
+    # No `ports:`. The database is reachable only from the `internal`
+    # network, by service name. Publishing 5432 to the host -- even bound
+    # to 127.0.0.1 -- is the single most common way a deployment like
+    # this ends up with a database on the public internet, because
+    # Docker's own iptables rules bypass ufw.
+    restart: unless-stopped
+
+    healthcheck:
+      # `$$` escapes to a literal `$` for the container's own shell, so
+      # these expand inside the container from db.env -- they are NOT
+      # interpolated by compose on the host, which could not see them.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - internal
+
+networks:
+  internal:
+    # `internal: true` would also cut the app off from the market-data
+    # vendor and the broker, so this is a normal bridge network. What
+    # keeps the database unreachable is the absence of a `ports:` key on
+    # it, not the network driver.
+    driver: bridge
+
+volumes:
+  app-state:
+    # The one volume whose loss is unrecoverable: it holds what this
+    # system believes it already did. deploy/backup.sh backs it up.
+  app-logs:
+    # The audit trail. Append-only in practice; backed up for the record,
+    # never restored over a newer one.
+  app-data-cache:
+    # Reconstructible from the vendor. Not backed up on purpose.
+  db-data:

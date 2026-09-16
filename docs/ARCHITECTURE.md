@@ -208,6 +208,7 @@ yet.")` body — not working logic.
 | 12b | Operational analytics dashboard, production go-live gate (`monitoring/dashboard.py`) | Stubbed |
 | 13 | End-to-end paper-trading validation (`validation/`) | **Done** |
 | 14 | Live-trading safety gate (`live/`, `app/cli.py`, `docs/PRE_LIVE_CHECKLIST.md`) | **Done** (live order submission still disabled -- see below) |
+| 15 | Production deployment and fail-closed hardening (`Dockerfile`, `deploy/`, `orchestration/fail_closed.py`, `app/service.py`, `app/health.py`, `docs/DEPLOYMENT.md`) | **Done** (deployed service does not yet run a trading day -- see below) |
 
 ## The data layer (phases 2-3)
 
@@ -2072,6 +2073,114 @@ the primary interface, not its printed text -- `0` only when every
 condition passed, `1` otherwise -- so it can gate a deploy step
 mechanically, the same way `scripts/validate_config.py` and
 `scripts/run_e2e_validation.py` already do for their own narrower checks.
+
+## Production deployment and fail-closed hardening (Phase 15)
+
+Phase 15 adds the things that turn a repository into a deployment, and --
+more importantly -- revises one contract that only shows itself to be
+wrong once a supervisor is involved.
+
+### Fail-closed is an enumerable set, not a log message
+
+`orchestration/fail_closed.py` names the six conditions under which this
+system refuses to trade:
+
+| `FailClosedReason` | Consequence |
+|---|---|
+| `UNKNOWN_BROKER_STATE` | do not place more orders |
+| `STALE_MARKET_DATA` | do not trade |
+| `RISK_ENGINE_FAILURE` | do not trade |
+| `DATABASE_FAILURE` | do not trade |
+| `CONFIGURATION_FAILURE` | do not trade |
+| `MARKET_CALENDAR_UNCERTAINTY` | do not trade |
+
+**Why this revises Phase 11d.** Three of these six previously raised out
+of `Orchestrator.run_daily_cycle` uncaught. In a development shell that
+reads as fail-closed: the process dies, so it certainly places no orders.
+Under a production supervisor with `restart: unless-stopped` it reads
+very differently — the process crash-loops, nothing is persisted about
+*why*, the health check cannot answer because there is no process left to
+answer it, and the operator sees a restart counter instead of a reason.
+
+So `run_daily_cycle` now catches all six, records which one tripped on the
+returned `DailyCycleReport`, persists `HALTED`, logs CRITICAL, and stays
+alive to be asked about it. `OrchestratorError` is now reserved for
+wiring/programming errors: **no operational failure raises out of
+`run_daily_cycle`.** `run_forever`'s monitoring loop is wrapped the same
+way, since the loop is what keeps a halted system observable.
+
+Making the set an enum rather than prose buys three things: it is
+testable as a whole (`tests/unit/test_fail_closed.py` asserts every
+member is reachable, and a set-equality guard fails if a seventh is added
+without a test), it is reportable on a dashboard, and `None` on a report
+means "no fail-closed condition applied" rather than "it traded".
+
+### What is actually deployed, and what is not
+
+`app/service.py` is the long-running process the container supervises. It
+discharges every startup obligation this repository currently can —
+configuration loads and validates, logging is configured including the
+durable audit trail, live mode is refused, the state store is proven
+writable and parseable — and then heartbeats so an external check can
+tell a wedged process from a working one.
+
+**It does not run a trading day**, because that needs a composition root
+(data provider, populated calendar, approved model artifact, constructed
+broker) that does not exist until this deployment is provisioned. The
+service logs that at WARNING on every start rather than presenting an
+idle process as a trading one, and `docs/DEPLOYMENT.md` §1 says so first.
+When the wiring lands, the loop becomes `Orchestrator.run_forever` and
+nothing about the deployment changes.
+
+### The health check's one counter-intuitive decision
+
+`app/health.py` reports a **HALTED system as healthy**. Docker restarts
+an unhealthy container, so this decision is precisely what gets
+restarted. A halt means the fail-closed machinery worked; restarting
+would discard the process that knows why, re-run startup into the same
+condition, and halt again — reintroducing exactly the crash loop the
+enum above exists to prevent. Unhealthy is reserved for a process that
+has stopped making progress: no state file, an unparseable one, or a
+heartbeat older than five minutes.
+
+The check runs as a separate short-lived process reading the one file on
+disk. A health check that asked the service's own in-memory objects
+whether it was healthy would answer "yes" right up until the service
+stopped being able to answer at all.
+
+### Deployment layering
+
+`deploy/` holds no Python and imports nothing. The refusals it encodes
+are duplicated deliberately rather than shared: `deploy/entrypoint.sh`
+refuses live mode in shell before any trading code is imported, and
+`app/service.py` refuses it again in Python where the refusal has tests.
+The shell check is the cruder one and exists because a container is the
+thing most likely to be handed a stray `EXECUTION_MODE=live` by a
+copy-pasted deploy command.
+
+Neither is a *gate* in the Phase 14 sense. Deployment is not one of the
+four gates in `broker/factory.py`, and that is the point: a container
+image is copied between hosts, promoted between environments, and
+restarted by a supervisor, and none of those events is a human deciding
+to risk real money.
+
+### Persistence, rotation and the audit trail
+
+`monitoring/logger.py` now writes to two destinations, because they are
+rotated by two different parties: stdout, rotated by Docker's `json-file`
+driver (the process does not own that file), and an optional
+`RotatingFileHandler` on a mounted volume, rotated by this process (Docker
+does not know about that file). Both carry identical records; a separate
+"audit" severity was rejected because the records an incident turns on
+are ordinary INFO ones, and a filter deciding in advance which of those
+matter will be wrong during the one incident that matters. An audit log
+that cannot be opened is a startup failure, not a warning.
+
+One real bug surfaced while testing this: `SystemStateStore.verify_accessible`
+could raise a raw `OSError` from its own `mkdir`, past the typed boundary
+that callers correctly catch `SystemStateStoreError` on. Fixed at the
+source — a store whose failures do not all arrive as the store's own error
+type has a hole in its fail-closed contract.
 
 ## Why the module boundaries matter for correctness, not just style
 

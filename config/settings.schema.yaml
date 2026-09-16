@@ -409,6 +409,12 @@ properties:
     properties:
       level: { type: string, enum: [DEBUG, INFO, WARNING, ERROR] }
       format: { type: string, enum: [json, text] }
+      # Phase 23. Absent (or null) means stdout only, which is the right
+      # default for a development shell. Production sets it to a path on a
+      # mounted volume so the audit trail outlives the container.
+      audit_log_path: { type: [string, "null"] }
+      audit_log_max_bytes: { type: integer, minimum: 1024 }
+      audit_log_backup_count: { type: integer, minimum: 1 }
 
   monitoring:
     type: object

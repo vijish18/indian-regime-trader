@@ -246,6 +246,15 @@ database:
 logging:
   level: INFO
   format: json
+  # Durable audit trail (Phase 23). Relative to the working directory, in
+  # the same style as the data_cache paths above. The container's WORKDIR
+  # is /app and deploy/docker-compose.yml mounts the logs volume at
+  # /app/logs, so this same path is a persistent volume in production and
+  # a gitignored scratch directory in a development checkout. Set to null
+  # to log to stdout only.
+  audit_log_path: logs/audit.log
+  audit_log_max_bytes: 50000000   # 50 MB per file
+  audit_log_backup_count: 10      # ~550 MB of retained history
 
 monitoring:
   heartbeat_interval_seconds: 60

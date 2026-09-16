@@ -16,6 +16,18 @@ env/
 .env
 .env.*
 !.env.example
+# Phase 23: the filled-in production environment file. The *.example
+# template is tracked; the file with real values in it never is.
+deploy/*.env
+!deploy/*.env.example
+*.pem
+*.key
+id_rsa*
+
+# Phase 23: persisted runtime state and backups. Both contain positions,
+# order history and the audit trail.
+state/
+backups/
 
 # Testing / tooling caches
 .pytest_cache/

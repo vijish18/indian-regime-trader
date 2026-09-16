@@ -1,0 +1,27 @@
+# Line endings (Phase 23).
+#
+# Git on Windows checks files out with CRLF by default (core.autocrlf).
+# For most files that is harmless. For the deployment artifacts it is not:
+# a shell script whose shebang line ends `#!/bin/sh\r` fails inside a
+# Linux container with `bad interpreter: /bin/sh^M`, which is a confusing
+# way to discover that the image built on a Windows checkout cannot start.
+#
+# So every file that is read by a Linux tool is pinned to LF, regardless of
+# the platform it was checked out on.
+
+* text=auto
+
+# Executed or parsed inside the container / on the trading host.
+*.sh              text eol=lf
+Dockerfile        text eol=lf
+.dockerignore     text eol=lf
+*.yml             text eol=lf
+*.yaml            text eol=lf
+*.sql             text eol=lf
+*.env.example     text eol=lf
+deploy/host/Caddyfile            text eol=lf
+deploy/host/sshd_config.hardened text eol=lf
+
+# Python is CRLF-tolerant, but keeping it LF means a diff never shows a
+# whole file as changed because someone edited it on a different platform.
+*.py              text eol=lf

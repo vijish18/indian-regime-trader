@@ -55,8 +55,9 @@ from monitoring.alerts import Alert, AlertManager, AlertType
 from monitoring.health import HealthChecker
 from monitoring.snapshot import SnapshotCollector
 from monitoring.terminal_dashboard import render_dashboard
+from orchestration.fail_closed import FailClosedReason
 from orchestration.heartbeat import Heartbeat
-from orchestration.orchestrator import DailyCycleReport, Orchestrator, OrchestratorError
+from orchestration.orchestrator import DailyCycleReport, Orchestrator
 from orchestration.orchestrator_state import OrchestratorState
 from orchestration.regime_computation import RegimeComputer
 from risk.circuit_breaker import CircuitBreaker, CircuitState
@@ -587,13 +588,19 @@ def test_stale_model_metadata_halts_the_cycle(harness: Harness) -> None:
     assert report.submitted_order_ids == ()
 
 
-def test_configuration_failure_raises_rather_than_trading_blind(harness: Harness) -> None:
+def test_configuration_failure_halts_rather_than_trading_blind(harness: Harness) -> None:
+    """Phase 23 changed this from raising to failing closed: the cycle
+    returns a report naming the condition and stays alive to be asked
+    about it, rather than crash-looping under a supervisor that restarts
+    it (see orchestration/fail_closed.py)."""
     def failing_loader() -> Settings:
         raise ConfigError("settings.yaml is unreadable")
 
     harness.orchestrator._settings_loader = failing_loader
-    with pytest.raises(OrchestratorError, match="configuration failed"):
-        harness.run()
+    report = harness.run()
+    assert report.fail_closed_reason is FailClosedReason.CONFIGURATION_FAILURE
+    assert report.permit_trading is False
+    assert report.submitted_order_ids == ()
     assert harness.orchestrator.state is OrchestratorState.HALTED
 
 

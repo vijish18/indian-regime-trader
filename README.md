@@ -14,7 +14,7 @@ before any live capital.
 
 ## Project status
 
-**Phases 1-22 complete: configuration, the broker-independent data layer,
+**Phases 1-23 complete: configuration, the broker-independent data layer,
 point-in-time universe construction, causal feature engineering, the HMM
 regime engine, regime-aware portfolio allocation, stock selection, portfolio
 construction, independent risk management, the Indian transaction-cost
@@ -27,9 +27,10 @@ end to end, a terminal dashboard with rate-limited alerting, an
 end-to-end paper-trading validation harness proving the whole system
 against a synthetic market with full failure injection, and a live-trading
 safety gate that keeps live order submission disabled until a formal
-18-condition pre-live checklist genuinely passes — live trading is still
-disabled by default throughout, and nothing in this codebase has ever
-placed a real order.**
+18-condition pre-live checklist genuinely passes, and a Docker production
+deployment whose trading process fails closed on all six named unsafe
+conditions — live trading is still disabled by default throughout, and
+nothing in this codebase has ever placed a real order.**
 
 - **Phase 1** — repository structure, type-safe/validated configuration,
   structured logging, environment handling, unit-test framework.
@@ -497,6 +498,39 @@ placed a real order.**
   still placeholders, and `storage/database.py` is still an unimplemented
   stub with no backup procedure to have tested — which is the checklist
   working exactly as intended, not a defect to route around.
+- **Production deployment and fail-closed hardening** (`Dockerfile`,
+  `deploy/`, `orchestration/fail_closed.py`, `app/service.py`,
+  `app/health.py`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`,
+  `docs/INCIDENT_RESPONSE.md`) — a Docker stack (non-root container on a
+  read-only root filesystem with all capabilities dropped, Postgres on an
+  internal network with a least-privilege role, separate volumes for
+  state/logs/data, `restart: unless-stopped`, resource limits, health
+  checks, two-layer log rotation, a verified backup script) plus host
+  templates for a default-deny firewall, key-only SSH and an HTTPS
+  reverse proxy. **The trading process fails closed on six named
+  conditions** (`FailClosedReason`): unknown broker state, stale market
+  data, risk-engine failure, database failure, configuration failure and
+  market-calendar uncertainty. This deliberately revises Phase 19's
+  contract — three of those used to raise out of `run_daily_cycle`, which
+  reads as fail-closed in a shell but becomes a crash loop under a
+  supervisor, burying the reason and leaving no process to answer a
+  health check. They now halt, name themselves on the report, and stay
+  alive to be asked. For the same reason `app/health.py` reports a
+  **HALTED system as healthy**: restarting a correctly-halted process is
+  exactly the crash loop being avoided. **Nothing here can turn live
+  trading on** — deployment is not one of `broker/factory.py`'s four
+  gates, and both the shell entrypoint and the Python service refuse to
+  start in live mode (a distinct exit code, so a pipeline can page on it).
+  The deployed service does not yet run a trading day, because no
+  composition root is wired; it says so at WARNING on every start rather
+  than presenting an idle process as a trading one. Smoke tests run at
+  both levels: `tests/unit/test_deployment.py` for the logic and
+  `tests/integration/test_docker_smoke.py`, which builds the real image
+  and runs the real container — and which caught a real bug no unit test
+  could have, since PEP 475 makes `time.sleep` resume after a signal, the
+  60-second heartbeat wait outlived Docker's 30-second grace period, and
+  the trading process was being SIGKILLed without ever running its
+  shutdown path.
 
 **Position sizing is not implemented yet** — `risk/position_sizer.py`
 (reconciling the weight-based and stop-distance sizing formulas into one
@@ -534,11 +568,14 @@ orchestration/ Application lifecycle + the daily workflow that sequences every l
 monitoring/   Structured logging, alerts, health checks, dashboard
 validation/   End-to-end paper-trading validation harness (no live credentials)
 live/         Live-trading safety gate: pre-live checklist, kill switch (live still disabled)
-app/          Operational CLI entry point (python -m app.cli)
+app/          Operational CLI, the long-running service, the health check
 storage/      Persistence layer (table schemas, DB session management)
+deploy/       Production deployment: compose stack, entrypoint, backup, host
+              templates (firewall, SSH, HTTPS proxy), least-privilege DB init
+Dockerfile    Production image (non-root, read-only root filesystem)
 scripts/      Operational / one-off scripts
 tests/        Unit and integration tests
-docs/         Specification, architecture, development guide
+docs/         Specification, architecture, deployment, operations, incident response
 ```
 
 ## Getting started

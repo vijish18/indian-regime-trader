@@ -48,6 +48,20 @@ future stop-loss module would plug into; today it re-marks positions to
 the broker's latest reported prices and re-evaluates the circuit breaker,
 so the risk rule that *does* exist (drawdown-based halting) reflects the
 fills just observed rather than this morning's picture.
+
+**Fail-closed (Phase 23).** ``run_daily_cycle`` does not raise for an
+operational failure. Each of the six conditions in
+``orchestration.fail_closed.FailClosedReason`` -- unknown broker state,
+stale market data, risk-engine failure, database failure, configuration
+failure, market-calendar uncertainty -- returns a report with
+``permit_trading=False`` and ``fail_closed_reason`` set, having logged at
+``CRITICAL`` and persisted ``HALTED``. This is a deliberate revision of
+Phase 19's original contract, where three of those six propagated
+uncaught: under a production supervisor that restarts automatically
+(``docker-compose.yml``'s ``restart: unless-stopped``), a crash loop
+buries the reason under restart noise and leaves no process alive to
+answer a health check. Refusing to trade and staying up to say why is
+strictly the safer of the two.
 """
 
 from __future__ import annotations
@@ -65,17 +79,18 @@ from core.features.feature_engineering import feature_set_version
 from core.regime.allocation import AllocationRegime, AllocationTarget
 from core.regime.hmm_engine import RegimeState
 from core.regime.model_registry import ModelRegistry, NoApprovedModelError
-from data.errors import DataNotAvailableError
+from data.errors import CalendarCoverageError, DataNotAvailableError
 from data.interfaces import MarketDataProvider, TradingCalendar
 from execution.order_manager import DuplicateSignalError, OrderManager, OrderState
 from execution.order_reconciler import OrderReconciler
 from execution.position_tracker import Position, PositionTracker
 from execution.reconciliation import ReconciliationEngine, ReconciliationStatus
-from execution.startup import StartupReport, StartupSequence
+from execution.startup import StartupError, StartupReport, StartupSequence
 from execution.system_state import SystemState, SystemStateStore
 from monitoring.alerts import AlertManager
 from monitoring.health import ComponentHealth, HealthChecker
 from monitoring.snapshot import MonitoringSnapshot, SnapshotCollector
+from orchestration.fail_closed import FailClosedReason
 from orchestration.fill_tracker import FillTracker
 from orchestration.heartbeat import Heartbeat
 from orchestration.model_validation import validate_model_metadata
@@ -101,12 +116,14 @@ logger = logging.getLogger(__name__)
 
 
 class OrchestratorError(RuntimeError):
-    """A daily-cycle step failed in a way that makes it impossible to even
-    attempt the workflow -- configuration, calendar coverage. Everything
-    else (no data, no approved model, insufficient regime history, risk
-    rejection, broker/reconciliation trouble) is reported through
-    ``DailyCycleReport`` instead, with ``permit_trading=False``, never
-    raised.
+    """The orchestrator was asked to do something it cannot -- a wiring or
+    programming error, not an operational one.
+
+    Since Phase 23, no operational failure raises out of
+    ``run_daily_cycle``: every condition that means "do not trade"
+    (including configuration and calendar-coverage failures, which used to
+    raise this) returns a ``DailyCycleReport`` carrying a
+    ``FailClosedReason`` instead. See this module's docstring.
     """
 
 
@@ -131,6 +148,7 @@ class DailyCycleReport:
         submitted_order_ids: tuple[str, ...] = (),
         skipped_trades: tuple[str, ...] = (),
         messages: tuple[str, ...] = (),
+        fail_closed_reason: FailClosedReason | None = None,
     ) -> None:
         self.as_of = as_of
         self.state = state
@@ -144,6 +162,12 @@ class DailyCycleReport:
         self.submitted_order_ids = submitted_order_ids
         self.skipped_trades = skipped_trades
         self.messages = messages
+        self.fail_closed_reason = fail_closed_reason
+        """Which of ``orchestration.fail_closed.FailClosedReason``'s six
+        conditions stopped this cycle, if one did. ``None`` means the
+        cycle ran to completion -- which is not the same as "it traded"
+        (a non-trading day, or a clean day with nothing to rebalance,
+        also completes)."""
 
 
 class Orchestrator:
@@ -282,7 +306,20 @@ class Orchestrator:
             while not self._shutdown_requested:
                 if max_iterations is not None and iterations >= max_iterations:
                     break
-                self._monitor_and_reconcile_once()
+                try:
+                    self._monitor_and_reconcile_once()
+                except Exception:  # noqa: BLE001 - see below
+                    # A monitoring iteration that raises must not take the
+                    # process down with it: the loop is what keeps a
+                    # halted system observable, and the surest way to stop
+                    # trading is to keep running while refusing to trade.
+                    # Halt, log, and stay up for the next iteration.
+                    self.state = OrchestratorState.HALTED
+                    logger.critical(
+                        "monitoring iteration failed; halting and continuing to monitor",
+                        exc_info=True,
+                        extra={"extra_fields": {"event": "orchestrator_monitor_iteration_failed"}},
+                    )
                 iterations += 1
                 if self._shutdown_requested:
                     break
@@ -320,9 +357,67 @@ class Orchestrator:
         if restore_handlers:
             self.restore_signal_handlers()
 
+    # -- fail-closed ----------------------------------------------------
+
+    def _fail_closed(
+        self,
+        as_of: dt.date,
+        reason: FailClosedReason,
+        detail: str,
+        messages: list[str],
+        *,
+        state: OrchestratorState = OrchestratorState.HALTED,
+        **report_fields: object,
+    ) -> DailyCycleReport:
+        """Stop this cycle without trading, record which of the six
+        fail-closed conditions tripped, and stay alive to be asked about
+        it. Deliberately returns rather than raises: a production
+        supervisor restarting a crashed process cannot tell an operator
+        *why* it crashed, and a crash loop buries the reason under restart
+        noise (see ``orchestration/fail_closed.py``).
+
+        Persistence is best-effort here, and failing to persist never
+        turns a refusal to trade into a crash -- the refusal itself has
+        already happened by the time this is called.
+        """
+        self.state = state
+        messages.append(f"FAIL CLOSED [{reason.value}]: {detail}")
+        logger.critical(
+            "failing closed: %s -- %s",
+            reason.value,
+            detail,
+            extra={
+                "extra_fields": {
+                    "event": "orchestrator_fail_closed",
+                    "reason": reason.value,
+                    "detail": detail,
+                    "as_of": as_of.isoformat(),
+                    "state": state.value,
+                }
+            },
+        )
+        try:
+            self.startup_sequence.persist_heartbeat(SystemState.HALTED)
+        except Exception:
+            logger.exception("could not persist the halted state while failing closed")
+        return DailyCycleReport(
+            as_of,
+            state,
+            permit_trading=False,
+            messages=tuple(messages),
+            fail_closed_reason=reason,
+            **report_fields,  # type: ignore[arg-type]
+        )
+
     # -- the daily cycle: steps 1-14, plus one immediate fill sweep -----
 
     def run_daily_cycle(self, as_of: dt.date | None = None) -> DailyCycleReport:
+        """Run one trading day. **Never raises for an operational
+        failure**: each of the six conditions in
+        ``orchestration.fail_closed.FailClosedReason`` returns a report
+        with ``permit_trading=False`` and ``fail_closed_reason`` set,
+        rather than propagating (Phase 23 -- see ``_fail_closed``).
+        """
         self.state = OrchestratorState.STARTING
         messages: list[str] = []
 
@@ -332,15 +427,27 @@ class Orchestrator:
         try:
             settings = self._settings_loader()
         except ConfigError as exc:
-            self.state = OrchestratorState.HALTED
-            raise OrchestratorError(f"configuration failed to load/validate: {exc}") from exc
+            return self._fail_closed(
+                as_of or self._clock().date(),
+                FailClosedReason.CONFIGURATION_FAILURE,
+                f"configuration failed to load/validate: {exc}",
+                messages,
+            )
         messages.append("configuration loaded and validated")
 
         as_of = as_of or self._clock().date()
         self.state = OrchestratorState.HEALTH_CHECK
 
         # Step 3: verify market calendar.
-        is_trading_day = self.calendar.is_trading_day(as_of)
+        try:
+            is_trading_day = self.calendar.is_trading_day(as_of)
+        except (CalendarCoverageError, ValueError) as exc:
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.MARKET_CALENDAR_UNCERTAINTY,
+                f"cannot determine whether {as_of} is a trading day: {exc}",
+                messages,
+            )
         if not is_trading_day:
             messages.append(f"{as_of} is not a trading day; nothing to do")
             self.state = OrchestratorState.READY
@@ -350,23 +457,54 @@ class Orchestrator:
             )
 
         # Step 4: verify data availability.
-        freshness = self.health_checker.check_market_data_freshness(as_of)
+        try:
+            freshness = self.health_checker.check_market_data_freshness(as_of)
+        except Exception as exc:  # noqa: BLE001 - an unverifiable feed is a stale feed
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.STALE_MARKET_DATA,
+                f"market-data freshness could not be established: {exc}",
+                messages,
+            )
         messages.append(f"market data freshness: {freshness.status.value} ({freshness.detail})")
         if freshness.status is ComponentHealth.UNHEALTHY:
-            self.state = OrchestratorState.DEGRADED
-            return DailyCycleReport(as_of, self.state, messages=tuple(messages))
+            # DEGRADED rather than HALTED: data catching up resolves this
+            # on its own, unlike the conditions that need an operator.
+            # Either way nothing trades -- permit_trading stays False.
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.STALE_MARKET_DATA,
+                f"market data is not fresh enough to decide on: {freshness.detail}",
+                messages,
+                state=OrchestratorState.DEGRADED,
+            )
 
         # Steps 5-6: verify broker connectivity + reconcile portfolio,
         # delegated entirely to StartupSequence (Phase 18), which also
         # rebuilds portfolio state and verifies risk/circuit-breaker state
         # once reconciliation is clean.
         self.state = OrchestratorState.RECONCILING
-        startup_report = self.startup_sequence.run()
+        try:
+            startup_report = self.startup_sequence.run()
+        except StartupError as exc:
+            # StartupError is raised for exactly the conditions that make
+            # persisted state unusable: an unreadable or schema-mismatched
+            # state store, or configuration that will not load.
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.DATABASE_FAILURE,
+                f"persisted state could not be verified: {exc}",
+                messages,
+            )
         messages.extend(startup_report.messages)
         if not startup_report.permit_strategy_execution:
-            self.state = OrchestratorState.HALTED
-            return DailyCycleReport(
-                as_of, self.state, startup_report=startup_report, messages=tuple(messages)
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.UNKNOWN_BROKER_STATE,
+                "startup did not permit strategy execution "
+                f"(system_state={startup_report.system_state.value})",
+                messages,
+                startup_report=startup_report,
             )
         self.state = OrchestratorState.READY
 
@@ -457,24 +595,62 @@ class Orchestrator:
                 messages=tuple(messages),
             )
 
-        # Step 12: run risk engine.
-        risk_state = build_risk_state(
-            target_portfolio,
-            equity,
-            self._clock(),
-            self.market_data,
-            self.equity_history,
-            assumed_spread_bps=self.execution_config.order_price_guard_bps,
-        )
-        decisions = self.risk_manager.evaluate(
-            target_portfolio, risk_state, current=current_portfolio
-        )
+        # Step 12: run risk engine. Its veto is non-negotiable, so an
+        # exception here must read as "rejected", never as "nothing
+        # objected" -- the one interpretation that would let an
+        # unreviewed portfolio reach the broker.
+        try:
+            risk_state = build_risk_state(
+                target_portfolio,
+                equity,
+                self._clock(),
+                self.market_data,
+                self.equity_history,
+                assumed_spread_bps=self.execution_config.order_price_guard_bps,
+            )
+            decisions = self.risk_manager.evaluate(
+                target_portfolio, risk_state, current=current_portfolio
+            )
+            circuit_status = self.circuit_breaker.current_status()
+        except Exception as exc:  # noqa: BLE001 - see the comment above
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.RISK_ENGINE_FAILURE,
+                f"risk engine could not produce a decision: {exc}",
+                messages,
+                startup_report=startup_report,
+                candidates=tuple(candidates),
+                target_portfolio=target_portfolio,
+            )
         decisions_by_instrument = {decision.instrument_id: decision for decision in decisions}
-        circuit_status = self.circuit_breaker.current_status()
         circuit_halted = circuit_status.state is CircuitState.HALTED
         if circuit_halted:
             messages.append(f"circuit breaker HALTED: {circuit_status.reason}")
             self.state = OrchestratorState.HALTED
+
+        # An order whose true state at the broker is still unknown means
+        # this system does not know what it already owns. Submitting
+        # another order on top of that risks doubling a position that may
+        # already exist, so nothing further is sent until reconciliation
+        # resolves it (Phase 17's OrderReconciler does that; the daily
+        # cycle's own startup step above runs it).
+        unknown_orders = [
+            record
+            for record in self.order_manager.all_orders()
+            if record.state is OrderState.UNKNOWN
+        ]
+        if unknown_orders:
+            return self._fail_closed(
+                as_of,
+                FailClosedReason.UNKNOWN_BROKER_STATE,
+                f"{len(unknown_orders)} order(s) in an unknown state "
+                f"({[r.client_order_id for r in unknown_orders]}); refusing to submit more",
+                messages,
+                startup_report=startup_report,
+                candidates=tuple(candidates),
+                target_portfolio=target_portfolio,
+                risk_decisions=tuple(decisions),
+            )
 
         # Step 13: calculate required trades.
         weight_trades = required_trades(target_portfolio, current_portfolio)

@@ -1,0 +1,67 @@
+# Keep the build context small and, more importantly, keep secrets and
+# local state out of the image entirely (Phase 23).
+#
+# A file excluded here cannot be baked into a layer by accident, which
+# matters because image layers are not erasable: a secret COPYed in one
+# layer and deleted in the next is still in the image, and still readable
+# by anyone who can pull it.
+
+# --- Secrets: never, under any circumstances -------------------------------
+.env
+.env.*
+!.env.example
+deploy/*.env
+!deploy/*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*_rsa
+credentials.json
+secrets/
+
+# --- Local state that must come from a volume, not a layer -----------------
+# Baking these in would ship one host's positions, orders and audit trail
+# to every other host that pulls the image.
+state/
+logs/
+*.log
+data_cache/
+model_registry/
+*.sqlite
+*.sqlite3
+*.db
+backups/
+
+# --- Version control and tooling -------------------------------------------
+.git/
+.gitignore
+.github/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Not needed at runtime -------------------------------------------------
+tests/
+scripts/
+docs/
+!docs/PRE_LIVE_CHECKLIST.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Dockerfile
+docker-compose*.yml

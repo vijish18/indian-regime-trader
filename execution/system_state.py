@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.metadata
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -45,11 +46,33 @@ differently-shaped file as if it matched this version could
 misinterpret it rather than refuse to."""
 
 
+APP_VERSION_ENV_VAR = "APP_VERSION"
+
+
 def _application_version() -> str:
-    """The installed package version (``pyproject.toml``'s single source
-    of truth), or an explicit ``"unknown"`` sentinel if this code is
-    running without package metadata (e.g. an unusual dev setup) --
-    never a guess."""
+    """The application version, or an explicit ``"unknown"`` sentinel --
+    never a guess.
+
+    Two sources, in order. Normally it is the installed package version
+    from ``pyproject.toml``, the single source of truth. But the
+    production image deliberately does **not** install this project (see
+    the ``Dockerfile``: it installs the dependency set and then removes
+    the project, so the only copy of the source in the image is the one
+    at ``/app`` that actually runs). That leaves no package metadata to
+    read, and Phase 23's first real container run duly recorded
+    ``app_version: "unknown"`` into the state file and the audit log.
+
+    That matters more than it looks. ``app_version`` is how an incident
+    review answers "which build wrote this state?" -- and a restart
+    reading a state file written by a different build is exactly the
+    situation ``StartupSequence`` exists to be careful about. So the
+    image sets ``APP_VERSION`` explicitly and it wins here, with
+    ``tests/unit/test_deployment.py`` asserting the Dockerfile's value
+    matches ``pyproject.toml`` so the two cannot drift.
+    """
+    from_environment = os.environ.get(APP_VERSION_ENV_VAR, "").strip()
+    if from_environment:
+        return from_environment
     try:
         return importlib.metadata.version("indian-regime-trader")
     except importlib.metadata.PackageNotFoundError:
@@ -214,7 +237,19 @@ class SystemStateStore:
         (:class:`SystemStateStoreError`) rather than silently treating an
         inaccessible or corrupted store as empty.
         """
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Creating the directory can fail on its own -- a file already
+            # occupies the path, a volume is mounted read-only, a parent
+            # is missing on a filesystem that will not create it. Phase 23
+            # found this escaping as a raw OSError, which callers that
+            # correctly catch SystemStateStoreError would not have seen:
+            # the store's failures must all arrive as the store's own
+            # error type, or "fail closed" quietly has a hole in it.
+            raise SystemStateStoreError(
+                f"state store directory could not be created: {self.state_path.parent}: {exc}"
+            ) from exc
         probe = self.state_path.parent / f".probe-{uuid.uuid4().hex}"
         try:
             probe.write_text("ok", encoding="utf-8")

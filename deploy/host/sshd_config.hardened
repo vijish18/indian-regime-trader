@@ -1,0 +1,72 @@
+# SSH hardening for the trading host (Phase 23).
+#
+# Install as a drop-in rather than by editing the distribution's file, so
+# a package upgrade does not silently revert it:
+#
+#   sudo cp deploy/host/sshd_config.hardened /etc/ssh/sshd_config.d/10-irt.conf
+#   sudo sshd -t                  # MUST pass before the next line
+#   sudo systemctl reload sshd
+#
+# Before reloading, confirm your key already works. Keep the existing
+# session open and test with a second one; a syntax error or a missing
+# authorized_keys entry becomes unrecoverable the moment you close the
+# last working session on a remote host.
+#
+# SSH matters more here than on an ordinary server. It is the only
+# administrative channel this deployment has: the dashboard is a terminal
+# UI, the kill switch is a command, and incident response in
+# docs/INCIDENT_RESPONSE.md assumes you can get a shell. An SSH daemon
+# that can be brute-forced is a trading system that can be operated by
+# someone else.
+
+# --- Authentication --------------------------------------------------------
+# Keys only. A password that can be guessed, phished, or reused from
+# another breach is not an acceptable control on a host that can place
+# orders.
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+
+# No direct root login, even with a key: administrative actions should be
+# attributable to a person, and sudo leaves that trail where a shared
+# root key does not.
+PermitRootLogin no
+
+# Limit who may log in at all. Replace with your actual account.
+AllowUsers deploy
+
+MaxAuthTries 3
+LoginGraceTime 30
+
+# --- Reduce the exposed surface -------------------------------------------
+# None of these are used by this deployment, and each is a way in or a
+# way out.
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+PermitTunnel no
+PermitUserEnvironment no
+
+# --- Session hygiene -------------------------------------------------------
+# Drop sessions that stop responding, so an abandoned terminal on a
+# stolen or unattended laptop does not stay attached to the trading host.
+ClientAliveInterval 300
+ClientAliveCountMax 2
+TCPKeepAlive no
+
+# --- Cryptography ----------------------------------------------------------
+# Modern algorithms only. Conservative and widely supported; if an older
+# client cannot connect, upgrade the client rather than widening this.
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+
+# --- Logging ---------------------------------------------------------------
+# VERBOSE records the key fingerprint used for each login, which is what
+# lets an incident review answer "which key, belonging to whom" rather
+# than only "someone logged in".
+LogLevel VERBOSE
