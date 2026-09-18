@@ -27,10 +27,15 @@
 #     repo, not with a personal access token.
 set -euo pipefail
 
+# Priority is configurable because Spot is not always available. A Free Trial
+# subscription caps Total Regional vCPUs at 4 and Low-priority at 3, and does
+# not offer Spot at all -- so there the answer is a 4-vCPU regular VM, which
+# is slower than five processes deserve but frees the operator's machine.
 LOCATION="${AZ_LOCATION:-centralindia}"
 GROUP="${AZ_GROUP:-irt-backtest}"
 VM="${AZ_VM:-irt-bt-01}"
 SIZE="${AZ_SIZE:-Standard_F8s_v2}"
+PRIORITY="${AZ_PRIORITY:-Spot}"
 IMAGE="${AZ_IMAGE:-Ubuntu2404}"
 ADMIN="${AZ_ADMIN:-irt}"
 KEY="${AZ_KEY:-$HOME/.ssh/irt_azure}"
@@ -55,7 +60,11 @@ say "locking SSH to $MY_IP/32"
 say "resource group $GROUP in $LOCATION"
 az group create --name "$GROUP" --location "$LOCATION" --output none
 
-say "creating $SIZE Spot VM $VM (this takes a couple of minutes)"
+say "creating $SIZE $PRIORITY VM $VM (this takes a couple of minutes)"
+PRIORITY_ARGS=()
+if [ "$PRIORITY" = "Spot" ]; then
+    PRIORITY_ARGS=(--priority Spot --max-price -1 --eviction-policy Delete)
+fi
 az vm create \
     --resource-group "$GROUP" \
     --name "$VM" \
@@ -64,9 +73,7 @@ az vm create \
     --admin-username "$ADMIN" \
     --ssh-key-values "${KEY}.pub" \
     --authentication-type ssh \
-    --priority Spot \
-    --max-price -1 \
-    --eviction-policy Delete \
+    "${PRIORITY_ARGS[@]}" \
     --os-disk-size-gb "$DISK_GB" \
     --storage-sku StandardSSD_LRS \
     --nsg-rule NONE \
