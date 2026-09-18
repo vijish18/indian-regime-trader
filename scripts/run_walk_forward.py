@@ -53,6 +53,7 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - script bootstrap
 
 from backtest.cost_schedule import CostScheduleRepository  # noqa: E402
 from backtest.costs import CostModel  # noqa: E402
+from backtest.engine import BacktestResult  # noqa: E402
 from backtest.performance import PerformanceReport  # noqa: E402
 from backtest.walk_forward import STRATEGY_NAMES, WalkForwardValidator  # noqa: E402
 from config.loader import load_settings  # noqa: E402
@@ -302,13 +303,64 @@ def main(argv: list[str]) -> int:
         trades.to_csv(args.series_dir / f"{name}.trades.csv", index=False)
         print(f"  series -> {args.series_dir / f'{name}.equity.csv'} ({len(curve):,} rows)")
 
+    vetoes: list[dict[str, object]] = []
+    holdings: list[dict[str, object]] = []
+
+    def on_fold(name: str, fold_index: int, result: BacktestResult) -> None:
+        """Keep the two things only the fold result knows.
+
+        A veto is a position the strategy wanted and risk refused -- the
+        only honest basis for asking what refusing it cost. And the
+        holdings after the final session are what the strategy would be
+        holding now, which no summary statistic can reconstruct.
+        """
+        if args.series_dir is None:
+            return
+        for day in result.risk_decisions:
+            for decision in day.decisions:
+                if decision.approved:
+                    continue
+                vetoes.append(
+                    {
+                        "strategy": name,
+                        "fold": fold_index + 1,
+                        "as_of": day.as_of.isoformat(),
+                        "instrument_id": decision.instrument_id,
+                        "wanted_weight": decision.target_weight,
+                        "circuit_state": str(decision.circuit_state),
+                        "violations": "|".join(
+                            str(v.check) for v in decision.violations
+                        ),
+                    }
+                )
+        if result.positions_history:
+            final_day = max(result.positions_history)
+            for instrument_id, quantity in result.positions_history[final_day].items():
+                holdings.append(
+                    {
+                        "strategy": name,
+                        "fold": fold_index + 1,
+                        "as_of": final_day.isoformat(),
+                        "instrument_id": instrument_id,
+                        "quantity": quantity,
+                    }
+                )
+
     reports = validator.run_all_strategies(
         args.start,
         args.end,
         progress=progress,
         strategies=args.strategy,
         on_series=on_series,
+        on_fold=on_fold,
     )
+
+    if args.series_dir is not None:
+        args.series_dir.mkdir(parents=True, exist_ok=True)
+        tag = args.strategy[0] if args.strategy else "all"
+        pd.DataFrame(vetoes).to_csv(args.series_dir / f"{tag}.vetoes.csv", index=False)
+        pd.DataFrame(holdings).to_csv(args.series_dir / f"{tag}.holdings.csv", index=False)
+        print(f"  vetoes -> {len(vetoes):,} rows   holdings -> {len(holdings):,} rows")
 
     print()
     header = (

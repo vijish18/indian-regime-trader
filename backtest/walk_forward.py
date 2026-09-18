@@ -449,6 +449,7 @@ class WalkForwardValidator:
         progress: Callable[[str], None] | None = None,
         strategies: Iterable[str] | None = None,
         on_series: Callable[[str, pd.Series, pd.DataFrame], None] | None = None,
+        on_fold: Callable[[str, int, BacktestResult], None] | None = None,
     ) -> dict[str, PerformanceReport]:
         """Buy-and-hold, the rolling-volatility baseline, the moving-average
         trend baseline, the HMM, and the shuffled-regime control, all over
@@ -527,6 +528,14 @@ class WalkForwardValidator:
                 result = self._run_strategy_on_fold(
                     name, targets, dates, running_equity[name]
                 )
+                # The whole fold result, before this method reduces it to a
+                # curve and a trade log. Everything else the engine produced
+                # -- the risk decisions that vetoed a position and why, the
+                # holdings after each session, the regime in force -- exists
+                # only here; recovering it afterwards means re-running the
+                # fold. Observation only: nothing reads what this returns.
+                if on_fold is not None:
+                    on_fold(name, fold_index, result)
                 running_equity[name] = float(result.equity_curve.iloc[-1])
                 equity_curves[name].append(result.equity_curve)
                 trade_logs[name].append(result.trade_log)
