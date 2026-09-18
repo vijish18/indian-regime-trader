@@ -30,7 +30,15 @@ FROM="${IRT_FROM:-2015-01-01}"
 TO="${IRT_TO:-2026-09-15}"
 CACHE="${IRT_FRAME_CACHE:-2205}"
 
-STRATEGIES="buy_and_hold rolling_volatility moving_average_trend hmm shuffled_regime_control"
+# Overridable because the right split depends on the box. One strategy
+# occupies one core for the whole run -- measured at 43.5 minutes per fold,
+# so about 23 hours for 32 folds -- and that is a floor no amount of extra
+# hardware moves, because folds chain equity within a strategy and cannot be
+# divided. So the only question is how many strategies share how many cores.
+# On a 4-vCPU VM, running all five oversubscribes and stretches every one of
+# them; running four, one per core, finishes in the same 23 hours as a single
+# strategy would, and the fifth belongs somewhere else.
+STRATEGIES="${IRT_STRATEGIES:-buy_and_hold rolling_volatility moving_average_trend hmm shuffled_regime_control}"
 
 ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "${ADMIN}@${IP}" bash -s <<REMOTE
 set -euo pipefail
