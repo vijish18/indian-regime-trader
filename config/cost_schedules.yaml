@@ -12,58 +12,252 @@
 # every past backtest that used it, the same reproducibility guarantee
 # core/regime/model_registry.py gives fitted models.
 #
-# The rates below are illustrative approximations of typical NSE
-# cash-equity delivery (CNC) costs -- STT/GST/SEBI-fee structure as
-# commonly published, paired with a representative zero-brokerage
-# discount-broker plan. They are NOT a substitute for the current
-# NSE/SEBI/CDSL circulars or your actual broker's rate card; verify before
-# using this for anything beyond research backtests.
-schedules:
-  - effective_from: "2019-01-01"
-    label: "Illustrative NSE delivery (CNC) cash-equity rates"
-    source: >-
-      Illustrative approximation, not a specific circular. STT/GST/SEBI-fee
-      shape follows publicly documented delivery-equity rules; brokerage
-      reflects a zero-brokerage discount-broker delivery plan. Verify
-      against current NSE/SEBI/CDSL circulars before live/paper use.
+# ---------------------------------------------------------------------------
+# History of this file
+# ---------------------------------------------------------------------------
+# This replaced a single undated-in-practice entry effective 2019-01-01 that
+# carried post-2020 stamp duty (0.015%, unified only from 2020-07-01) and the
+# post-2021 NSE transaction charge (0.00345%, in force only from 2021-01-01).
+# Applied to 2019 and 2020 trades those rates were anachronistic, and the
+# entry did not reach back to 2018 at all, so the walk-forward run over
+# 2018-2026 failed closed on its first fold rather than misprice anything.
+#
+# Replacing rather than appending is a deliberate exception to the rule above:
+# the old entry was wrong for its own date range, and no published result
+# depended on it. Every later change must still append.
+#
+# ---------------------------------------------------------------------------
+# What is well-sourced here, and what is not
+# ---------------------------------------------------------------------------
+# Well-sourced, and these dominate the total:
+#   STT           0.1% on BOTH legs for delivery equity, unchanged across this
+#                 whole period (the 2024-10-01 STT revision raised F&O rates,
+#                 not delivery equity). ~20 bps round trip -- the largest
+#                 single cost by an order of magnitude.
+#   Stamp duty    State-wise until 2020-06-30, then uniform 0.015% buy-side
+#                 from 2020-07-01 under the Finance Act 2019 regime.
+#   Service tax   12.36% -> 14% (2015-06-01) -> 14.5% (2015-11-15, Swachh
+#     -> GST      Bharat Cess) -> 15% (2016-06-01, Krishi Kalyan Cess) ->
+#                 18% GST (2017-07-01).
+#   NSE txn       0.00325%, +6% from 2021-01-01, rolled back 2023-04-01,
+#                 -1% from 2024-04-01, then 0.00297% from 2024-10-01 under
+#                 SEBI's "true to label" circular.
+#
+# Approximations, all stated rather than hidden:
+#   stamp duty pre-2020-07-01 was set per state and depended on the client's
+#     registered state, so no single correct number exists for a backtest.
+#     0.01% is used: the Maharashtra delivery rate, where most broker clients
+#     are registered. The error versus the post-2020 unified rate is ~0.5 bps.
+#   sebi_turnover_pct is confirmed at 0.0001% (Rs 10/crore) from 2019-04-03
+#     and held at that value earlier, because the pre-2019 cash-segment rate
+#     could not be verified from a primary source. The component is worth
+#     ~0.02 bps per leg, so it cannot change any conclusion.
+#   brokerage is zero throughout, reflecting the zero-brokerage delivery plans
+#     Indian discount brokers now offer. That was NOT the market norm in
+#     2015-2017, when percentage brokerage was common, so costs in the early
+#     folds are understated by whatever a real 2015 broker would have charged.
+#     Override per broker.
+#   dp_charges_inr is broker-set, not statutory, and is held constant. It is a
+#     flat per-scrip sell-side charge, so it bites hardest on small positions
+#     (Rs 15.93 on a Rs 10,000 position is ~16 bps).
+#
+# These remain research-grade figures, not a substitute for the NSE/SEBI/CDSL
+# circulars or your broker's actual rate card. Verify before any live use.
 
-    # Brokerage: broker-dependent. Zero here reflects the now-common
-    # zero-brokerage delivery plan several Indian discount brokers offer;
-    # override per broker.
+schedules:
+  # -------------------------------------------------------------------------
+  # Service-tax era. Stamp duty still state-wise; NSE charge at 0.00325%.
+  # -------------------------------------------------------------------------
+  - effective_from: "2015-01-01"
+    label: "NSE delivery (CNC) -- service tax 12.36%, state-wise stamp duty"
+    source: >-
+      Service tax 12.36% (Finance Act 2007 rate, in force until 2015-05-31).
+      Stamp duty 0.01% approximates the pre-unification Maharashtra delivery
+      rate; the true rate varied by the client's state. Research-grade.
     brokerage_flat_inr: 0.0
     brokerage_pct: 0.0
-
-    # STT (Securities Transaction Tax): deterministic, set by the Finance
-    # Ministry. Delivery equity is charged on BOTH legs (unlike intraday,
-    # which is sell-side only) -- this system is delivery-only, so both
-    # apply.
     stt_buy_pct: 0.001
     stt_sell_pct: 0.001
-
-    # NSE transaction charges: exchange-dependent (BSE's differ).
-    exchange_txn_pct: 0.0000345
-
-    # SEBI turnover fee: deterministic, regulator-set, same both legs.
+    exchange_txn_pct: 0.0000325
     sebi_turnover_pct: 0.0000010
+    gst_pct: 0.1236
+    stamp_duty_buy_pct: 0.0001
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
 
-    # GST: deterministic 18% central rate, applied only to brokerage +
-    # exchange transaction charges + SEBI turnover fee -- NOT to STT or
-    # stamp duty, which are themselves taxes/duties rather than a taxable
-    # service charge.
+  - effective_from: "2015-06-01"
+    label: "Service tax raised to 14%"
+    source: >-
+      Union Budget 2015 raised service tax from 12.36% to 14%, effective
+      2015-06-01. All other rates unchanged.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.14
+    stamp_duty_buy_pct: 0.0001
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  - effective_from: "2015-11-15"
+    label: "Swachh Bharat Cess -- service tax 14.5%"
+    source: >-
+      Swachh Bharat Cess of 0.5% added from 2015-11-15, taking the effective
+      service tax rate to 14.5%.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.145
+    stamp_duty_buy_pct: 0.0001
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  - effective_from: "2016-06-01"
+    label: "Krishi Kalyan Cess -- service tax 15%"
+    source: >-
+      Krishi Kalyan Cess of 0.5% added from 2016-06-01 (Union Budget 2016),
+      taking the effective service tax rate to 15%.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.15
+    stamp_duty_buy_pct: 0.0001
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  # -------------------------------------------------------------------------
+  # GST replaces service tax.
+  # -------------------------------------------------------------------------
+  - effective_from: "2017-07-01"
+    label: "GST 18% replaces service tax"
+    source: >-
+      GST came into force 2017-07-01 at 18% on brokerage and exchange/SEBI
+      charges, replacing service tax. Not applied to STT or stamp duty, which
+      are themselves taxes rather than a taxable service charge.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
     gst_pct: 0.18
+    stamp_duty_buy_pct: 0.0001
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
 
-    # Stamp duty: deterministic since the Finance Act 2019 unified,
-    # exchange-collected regime (in force since 2020-07-01) -- charged on
-    # the BUY leg only, uniformly, regardless of the buyer's state.
+  # -------------------------------------------------------------------------
+  # Uniform, exchange-collected stamp duty.
+  # -------------------------------------------------------------------------
+  - effective_from: "2020-07-01"
+    label: "Uniform stamp duty 0.015% buy-side"
+    source: >-
+      From 2020-07-01 stock exchanges collect stamp duty at a uniform
+      0.015% (Rs 1,500 per crore) on the BUY leg of delivery equity,
+      regardless of the buyer's state, under the Finance Act 2019 regime.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.18
     stamp_duty_buy_pct: 0.00015
     stamp_duty_sell_pct: 0.0
-
-    # DP (Depository Participant) charges: broker-dependent (levied by the
-    # broker's own DP arm; rates vary materially between brokers). A flat
-    # per-scrip, per-sell-day charge -- applies only when securities leave
-    # the demat account, i.e. on the SELL leg, regardless of quantity.
     dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
 
-    # Placeholder for any future statutory charge not itemized above.
+  # -------------------------------------------------------------------------
+  # NSE transaction-charge revisions.
+  # -------------------------------------------------------------------------
+  - effective_from: "2021-01-01"
+    label: "NSE transaction charge +6%"
+    source: >-
+      NSE raised cash-segment transaction charges by 6% effective January
+      2021, taking 0.00325% to approximately 0.00345%.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000345
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.18
+    stamp_duty_buy_pct: 0.00015
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  - effective_from: "2023-04-01"
+    label: "NSE rolls back the 6% increase"
+    source: >-
+      NSE rolled back the 2021 increase for the cash-equity segment effective
+      2023-04-01, returning the charge to 0.00325%.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000325
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.18
+    stamp_duty_buy_pct: 0.00015
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  - effective_from: "2024-04-01"
+    label: "NSE transaction charge -1%"
+    source: >-
+      NSE cut cash and derivatives transaction charges by 1% from 2024-04-01,
+      taking 0.00325% to approximately 0.00322%.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000322
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.18
+    stamp_duty_buy_pct: 0.00015
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
+    other_charges_flat_inr: 0.0
+    other_charges_pct: 0.0
+
+  - effective_from: "2024-10-01"
+    label: "SEBI true-to-label -- NSE cash charge 0.00297%"
+    source: >-
+      SEBI's "true to label" circular required market infrastructure
+      institutions to drop slab-based pricing; NSE's cash-segment charge
+      became a flat 0.00297% from 2024-10-01. The same circular's STT
+      revision applied to F&O, not delivery equity.
+    brokerage_flat_inr: 0.0
+    brokerage_pct: 0.0
+    stt_buy_pct: 0.001
+    stt_sell_pct: 0.001
+    exchange_txn_pct: 0.0000297
+    sebi_turnover_pct: 0.0000010
+    gst_pct: 0.18
+    stamp_duty_buy_pct: 0.00015
+    stamp_duty_sell_pct: 0.0
+    dp_charges_inr: 15.93
     other_charges_flat_inr: 0.0
     other_charges_pct: 0.0

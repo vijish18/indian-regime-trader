@@ -227,3 +227,54 @@ def test_shipped_cost_schedule_file_loads_successfully() -> None:
     assert len(repo.all_schedules()) >= 1
     schedule_at = repo.schedule_as_of(dt.date.today())
     assert schedule_at.gst_pct == pytest.approx(0.18)
+
+
+def test_the_shipped_schedule_covers_the_whole_backfill_period() -> None:
+    """Regression: the walk-forward run over 2018-2026 died on its first
+    fold because the only shipped entry began 2019-01-01.
+
+    Failing closed was correct -- pricing a 2018 trade with 2019 rates is
+    exactly what this module exists to prevent -- but the gap should be
+    caught here, in a second, rather than by a multi-hour backtest.
+
+    The bhavcopy backfill starts 2015-01-01, so that is the earliest date
+    any backtest can reach.
+    """
+    repo = CostScheduleRepository.from_file(PROJECT_ROOT / "config" / "cost_schedules.yaml")
+
+    repo.schedule_as_of(dt.date(2015, 1, 1))  # raises if uncovered
+
+
+def test_the_shipped_schedule_prices_each_era_with_its_own_rates() -> None:
+    """The point of a dated file is that history is not repriced with
+    today's card. These three are the changes large enough to matter.
+
+    Stamp duty was state-wise until the exchanges began collecting it
+    uniformly on 2020-07-01; service tax became GST on 2017-07-01; and the
+    NSE cash charge moved four times between 2021 and 2024.
+    """
+    repo = CostScheduleRepository.from_file(PROJECT_ROOT / "config" / "cost_schedules.yaml")
+
+    assert repo.schedule_as_of(dt.date(2016, 1, 4)).gst_pct == pytest.approx(0.145)
+    assert repo.schedule_as_of(dt.date(2018, 1, 23)).gst_pct == pytest.approx(0.18)
+
+    assert repo.schedule_as_of(dt.date(2020, 6, 30)).stamp_duty_buy_pct == pytest.approx(0.0001)
+    assert repo.schedule_as_of(dt.date(2020, 7, 1)).stamp_duty_buy_pct == pytest.approx(0.00015)
+
+    assert repo.schedule_as_of(dt.date(2020, 12, 31)).exchange_txn_pct == pytest.approx(0.0000325)
+    assert repo.schedule_as_of(dt.date(2021, 1, 4)).exchange_txn_pct == pytest.approx(0.0000345)
+    assert repo.schedule_as_of(dt.date(2024, 10, 1)).exchange_txn_pct == pytest.approx(0.0000297)
+
+
+def test_delivery_stt_is_unchanged_across_every_shipped_era() -> None:
+    """STT is ~20 bps of a round trip -- an order of magnitude more than
+    every other statutory component combined -- and delivery equity has
+    been charged 0.1% on both legs throughout this period. If a future
+    edit makes it drift by era, that is either a real change worth a
+    citation or a typo worth catching here.
+    """
+    repo = CostScheduleRepository.from_file(PROJECT_ROOT / "config" / "cost_schedules.yaml")
+
+    for schedule in repo.all_schedules():
+        assert schedule.stt_buy_pct == pytest.approx(0.001), schedule.effective_from
+        assert schedule.stt_sell_pct == pytest.approx(0.001), schedule.effective_from
