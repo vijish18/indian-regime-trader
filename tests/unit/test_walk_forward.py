@@ -7,6 +7,7 @@ properties specifically are covered in
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from backtest.walk_forward import (
     WalkForwardFold,
     WalkForwardValidator,
 )
-from core.regime.hmm_engine import RegimeLabel, RegimeState
+from core.regime.allocation import AllocationRegime, AllocationTarget
 from tests.unit._wf_support import Environment
 
 # --------------------------------------------------------------------------
@@ -222,85 +223,104 @@ def test_run_shuffled_regime_control_returns_one_overall_report(tmp_path: Path) 
     assert isinstance(report, PerformanceReport)
 
 
-def test_shuffled_targets_preserve_the_same_multiset_of_states_reassigned_to_dates(
-    tmp_path: Path,
-) -> None:
-    """The shuffled control must not fabricate new regime readings -- every
-    date's target comes from *some* state the HMM actually produced this
-    fold, just possibly not the one it produced for that date."""
-    env = Environment(n_days=150)
-    validator = env.validator(tmp_path)
-
-    states = [
-        RegimeState(
-            as_of=env.dates[100 + i],
-            state_id=i % 2,
-            label=RegimeLabel.CALM if i % 2 == 0 else RegimeLabel.ELEVATED,
-            probabilities=(0.8, 0.2) if i % 2 == 0 else (0.2, 0.8),
+def _targets(
+    dates: list[dt.date], exposures: list[float]
+) -> dict[dt.date, AllocationTarget]:
+    """Finished exposure decisions, as ``_hmm_exposure_targets`` returns them."""
+    return {
+        day: AllocationTarget(
+            as_of=day,
+            regime=AllocationRegime.LOW_RISK if e > 0.5 else AllocationRegime.HIGH_RISK,
+            target_gross_exposure=e,
+            min_gross_exposure=0.0,
+            max_gross_exposure=1.0,
+            allow_new_positions=True,
             confidence=0.8,
-            expected_volatility=0.10 if i % 2 == 0 else 0.35,
-            expected_return=0.0,
-            persistence=0.9,
+            expected_volatility=0.10 if e > 0.5 else 0.35,
+            reason="test",
         )
-        for i in range(10)
-    ]
-
-    shuffled_targets = validator._shuffled_exposure_targets(states, seed=3)
-
-    assert set(shuffled_targets) == {state.as_of for state in states}
-    original_volatilities = sorted(state.expected_volatility for state in states)
-    shuffled_volatilities = sorted(
-        target.expected_volatility for target in shuffled_targets.values()
-    )
-    assert shuffled_volatilities == original_volatilities
+        for day, e in zip(dates, exposures, strict=True)
+    }
 
 
-def test_shuffled_targets_are_a_different_assignment_than_the_original_with_high_probability(
+def test_the_shuffled_control_preserves_the_exposure_distribution_exactly(
     tmp_path: Path,
 ) -> None:
+    """The control must not fabricate exposures the HMM never chose: every
+    date's target is one the HMM actually produced this fold, just
+    probably not on that date.
+
+    Preserving the multiset is what makes it a *control* -- the same time
+    spent at each exposure level, only the timing destroyed. Any
+    difference in outcome is then attributable to timing alone.
+    """
     env = Environment(n_days=150)
     validator = env.validator(tmp_path)
-    states = [
-        RegimeState(
-            as_of=env.dates[100 + i],
-            state_id=i % 3,
-            label=RegimeLabel.NORMAL,
-            probabilities=(0.34, 0.33, 0.33),
-            confidence=0.7,
-            expected_volatility=0.05 * (i + 1),
-            expected_return=0.0,
-            persistence=0.8,
-        )
-        for i in range(20)
-    ]
-    shuffled_targets = validator._shuffled_exposure_targets(states, seed=42)
-    original_by_date = {state.as_of: state.expected_volatility for state in states}
-    differing = sum(
-        1
-        for date, target in shuffled_targets.items()
-        if target.expected_volatility != original_by_date[date]
+    dates = env.dates[100:110]
+    original = _targets(dates, [0.2, 0.9, 0.9, 0.2, 0.6, 0.8, 0.3, 0.9, 0.4, 0.7])
+
+    shuffled = validator._shuffled_exposure_targets(original, seed=3)
+
+    assert set(shuffled) == set(original)
+    assert sorted(x.target_gross_exposure for x in shuffled.values()) == sorted(
+        x.target_gross_exposure for x in original.values()
     )
-    assert differing > 0
 
 
-def test_shuffled_control_is_deterministic_given_the_same_seed(tmp_path: Path) -> None:
+def test_the_shuffled_control_can_actually_trade(tmp_path: Path) -> None:
+    """The defect this replaced.
+
+    The control used to shuffle ``RegimeState``s and re-run them through
+    ``RegimeAllocationEngine``, whose confirmation bars and flicker guard
+    exist to smooth a *real* sequence. A random one defeats them by
+    construction: the confirmed tier changes almost every session,
+    ``max_flicker_transitions`` trips, and the engine returns UNCERTAIN,
+    which sets ``allow_new_positions=False``.
+
+    Measured on a realistic 120-session path, the ordered sequence allowed
+    new positions on 120 of 120 sessions and the shuffled one on 5. Every
+    backtest duly reported the control as 0.00% on zero trades, and the
+    question it exists to ask -- whether the HMM's *timing* matters -- went
+    unanswered.
+    """
     env = Environment(n_days=150)
     validator = env.validator(tmp_path)
-    states = [
-        RegimeState(
-            as_of=env.dates[100 + i],
-            state_id=i % 2,
-            label=RegimeLabel.CALM,
-            probabilities=(0.6, 0.4),
-            confidence=0.75,
-            expected_volatility=0.1 + 0.01 * i,
-            expected_return=0.0,
-            persistence=0.85,
-        )
-        for i in range(10)
-    ]
-    first = validator._shuffled_exposure_targets(states, seed=99)
-    second = validator._shuffled_exposure_targets(states, seed=99)
-    for date in first:
-        assert first[date].expected_volatility == second[date].expected_volatility
-        assert first[date].regime == second[date].regime
+    dates = env.dates[100:120]
+    original = _targets(dates, [0.9] * 15 + [0.2] * 5)
+
+    shuffled = validator._shuffled_exposure_targets(original, seed=7)
+
+    assert all(x.allow_new_positions for x in shuffled.values())
+    assert sum(x.target_gross_exposure for x in shuffled.values()) > 0
+
+
+def test_the_shuffled_control_actually_reorders(tmp_path: Path) -> None:
+    env = Environment(n_days=150)
+    validator = env.validator(tmp_path)
+    dates = env.dates[100:120]
+    original = _targets(dates, [0.05 * (i + 1) for i in range(20)])
+
+    shuffled = validator._shuffled_exposure_targets(original, seed=42)
+
+    moved = sum(
+        1
+        for day in dates
+        if shuffled[day].target_gross_exposure != original[day].target_gross_exposure
+    )
+    assert moved > 0
+
+
+def test_the_shuffled_control_is_deterministic_given_the_same_seed(tmp_path: Path) -> None:
+    """A control whose result changes between runs cannot be compared
+    against anything."""
+    env = Environment(n_days=150)
+    validator = env.validator(tmp_path)
+    dates = env.dates[100:110]
+    original = _targets(dates, [0.1 * (i + 1) for i in range(10)])
+
+    first = validator._shuffled_exposure_targets(original, seed=99)
+    second = validator._shuffled_exposure_targets(original, seed=99)
+
+    for day in first:
+        assert first[day].target_gross_exposure == second[day].target_gross_exposure
+        assert first[day].regime == second[day].regime

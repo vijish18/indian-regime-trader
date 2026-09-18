@@ -275,34 +275,50 @@ class WalkForwardValidator:
         return targets, test_states
 
     def _shuffled_exposure_targets(
-        self, test_states: list[RegimeState], seed: int
+        self, hmm_targets: dict[dt.date, AllocationTarget], seed: int
     ) -> dict[dt.date, AllocationTarget]:
-        """Re-derive exposure targets from the *same* states the HMM
-        actually produced for this fold, with their date assignment
-        randomly permuted (docs/SPECIFICATION.md section 10.1's
-        shuffled-regime control) -- the same total time spent in each
-        regime, just reordered, to test whether *when* the HMM called a
-        regime mattered, not merely that it called some regime some of the
-        time.
-        """
-        dates = [state.as_of for state in test_states]
-        rng = np.random.default_rng(seed)
-        permutation = rng.permutation(len(test_states))
-        shuffled_states = [
-            replace(test_states[index], as_of=date)
-            for index, date in zip(permutation, dates, strict=True)
-        ]
-        shuffled_states.sort(key=lambda state: state.as_of)
+        """The HMM's own exposure decisions, reassigned to random dates.
 
-        allocation_engine = RegimeAllocationEngine(
-            self.hmm_config, self.allocation_config, self.regime_policy
-        )
-        history: list[RegimeState] = []
-        targets: dict[dt.date, AllocationTarget] = {}
-        for state in shuffled_states:
-            history.append(state)
-            targets[state.as_of] = allocation_engine.evaluate(history)
-        return targets
+        docs/SPECIFICATION.md section 10.1 asks whether *when* the HMM
+        calls a regime matters, or merely that it spends some of its time
+        at lower exposure. The null hypothesis is therefore "the same
+        exposures, in a different order" -- an identical multiset of daily
+        decisions, with the timing destroyed.
+
+        **Why this permutes targets and not states.** It used to shuffle
+        the `RegimeState` sequence and re-run it through
+        `RegimeAllocationEngine`, which applies confirmation bars and a
+        flicker guard. Those exist to smooth a *real* sequence, and a
+        random one defeats them by construction: the confirmed tier
+        changes on almost every session, `max_flicker_transitions` trips,
+        and the engine returns UNCERTAIN -- which sets
+        `allow_new_positions=False`.
+
+        Measured on a realistic 120-session path, the ordered sequence
+        allowed new positions on 120 of 120 sessions and the shuffled one
+        on 5. The control never traded, so every backtest reported it as
+        0.00% on zero trades and the question it exists to ask went
+        unanswered. It was not measuring random timing; it was measuring
+        what the flicker guard does to noise, which is a different and
+        already-tested question.
+
+        Permuting the finished targets keeps the distribution exactly --
+        the same number of days at each exposure level, the same regimes,
+        the same `allow_new_positions` flags -- and changes only which day
+        each lands on. That is the comparison the specification wants.
+        """
+        dates = sorted(hmm_targets)
+        targets = [hmm_targets[day] for day in dates]
+        rng = np.random.default_rng(seed)
+        permutation = rng.permutation(len(targets))
+        return {
+            day: replace(
+                targets[index],
+                as_of=day,
+                reason=f"shuffled control (from {targets[index].as_of}): {targets[index].reason}",
+            )
+            for day, index in zip(dates, permutation, strict=True)
+        }
 
     # -- non-HMM baselines ----------------------------------------------------
 
@@ -407,11 +423,11 @@ class WalkForwardValidator:
         equity = self.initial_equity
         for fold_index, (train_start, train_end, test_start, test_end) in enumerate(folds):
             model, params, engine, _model_id = self._fit_fold(train_start, train_end)
-            _targets, test_states = self._hmm_exposure_targets(
+            hmm_targets, _test_states = self._hmm_exposure_targets(
                 model, params, engine, test_start, test_end
             )
             shuffled = self._shuffled_exposure_targets(
-                test_states, seed=self.random_seed + fold_index
+                hmm_targets, seed=self.random_seed + fold_index
             )
             dates = sorted(shuffled)
             result = self._run_strategy_on_fold(
@@ -444,12 +460,12 @@ class WalkForwardValidator:
 
         for fold_index, (train_start, train_end, test_start, test_end) in enumerate(folds):
             model, params, engine, _model_id = self._fit_fold(train_start, train_end)
-            hmm_targets, test_states = self._hmm_exposure_targets(
+            hmm_targets, _test_states = self._hmm_exposure_targets(
                 model, params, engine, test_start, test_end
             )
             dates = sorted(hmm_targets)
             shuffled_targets = self._shuffled_exposure_targets(
-                test_states, seed=self.random_seed + fold_index
+                hmm_targets, seed=self.random_seed + fold_index
             )
 
             per_strategy_targets = {

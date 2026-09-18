@@ -874,12 +874,27 @@ sequence and the *same* stock selector, portfolio constructor, risk
 manager, and cost model -- the only thing that ever differs is which
 `AllocationTarget` series each one produces. This is what makes "the HMM
 beats the simple baseline after costs" (section 10.3) a checkable claim
-rather than an assumed one. The shuffled-regime control re-derives targets
-from the *same* states the HMM actually produced for a fold, with their
-date assignment randomly permuted (`WalkForwardValidator._shuffled_exposure_targets`)
--- the same total time spent in each regime, just reordered, to test
-whether *when* the HMM called a regime mattered, not merely that it called
-some regime some of the time.
+rather than an assumed one. The shuffled-regime control permutes the
+*finished* `AllocationTarget`s the HMM produced for a fold across that
+fold's dates (`WalkForwardValidator._shuffled_exposure_targets`) -- the
+same multiset of exposures, the same total time spent at each level, only
+the timing destroyed. That makes any difference in outcome attributable to
+timing alone, which is the question the control exists to ask: did *when*
+the HMM called a regime matter, or merely that it was sometimes out of the
+market?
+
+It permutes targets rather than states for a reason found by running it.
+Shuffling `RegimeState`s and re-deriving targets through
+`RegimeAllocationEngine` defeats that engine by construction: its
+confirmation bars and flicker guard exist to smooth a *real* sequence, and
+a random one trips `max_flicker_transitions` almost every session, so the
+engine returns UNCERTAIN and sets `allow_new_positions=False`. Measured on
+a realistic 120-session path, the ordered sequence allowed new positions on
+120 of 120 sessions and the shuffled one on 5. The control duly reported
+0.00% on zero trades in every backtest -- a degenerate result that reads
+like a finding ("the HMM beats a coin flip") and is actually a control that
+never traded. `tests/unit/test_walk_forward.py` pins both properties: the
+exposure multiset is preserved exactly, and the shuffled series can trade.
 
 **Folds chain into one continuous ledger.** Each fold's
 `BacktestEngine.run()` starts from the *previous* fold's ending equity,
