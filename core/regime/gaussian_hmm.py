@@ -350,23 +350,59 @@ def filter_step(
 
 
 def forward_filter(
-    observations: NDArray[np.float64], parameters: GaussianHMMParameters
+    observations: NDArray[np.float64],
+    parameters: GaussianHMMParameters,
+    *,
+    start: NDArray[np.float64] | None = None,
 ) -> FilterResult:
     """Run filtered inference over a sequence: ``P(state_t | obs_1..t)`` for
     every ``t``.
 
     Row ``t`` of the result is a function of rows ``0..t`` only, so truncating
     the input after ``t`` leaves that row unchanged, bit for bit.
+
+    ``start`` is the belief before the first observation. It defaults to the
+    model's fitted ``start_probabilities``, which makes ``log_likelihood``
+    exactly ``log P(observations | model)`` and agree with
+    :func:`forward_backward` -- a property tested directly.
+
+    **That default is only right when the sequence begins where training
+    began.** ``start_probabilities`` is estimated from a single training
+    sequence, so Baum-Welch drives it to a one-hot vector: it records which
+    state the *training window's first day* was in and nothing more. Filtering
+    an arbitrary later window under it asserts the market reopened in that
+    same state. When it did not, and the first observation is far in that
+    state's tails, the posterior collapses to zero mass and
+    :func:`update_step` raises -- measured at 2,019 nats of disagreement on
+    real data, which underflows ``exp`` (anything below about -745 does).
+
+    Callers filtering a window unrelated to the training start should pass an
+    explicit ``start`` -- see :meth:`core.regime.hmm_engine.HMMRegimeEngine.filter`,
+    which passes a uniform prior for exactly this reason.
     """
     matrix = np.atleast_2d(np.asarray(observations, dtype=np.float64))
     if matrix.size == 0 or matrix.shape[0] == 0:
         raise ValueError("cannot filter an empty observation sequence")
 
+    if start is None:
+        initial = parameters.start_probabilities
+    else:
+        initial = np.asarray(start, dtype=np.float64)
+        if initial.shape != (parameters.n_states,):
+            raise ValueError(
+                f"start has shape {initial.shape}, expected ({parameters.n_states},)"
+            )
+        if not np.all(np.isfinite(initial)) or np.any(initial < 0.0):
+            raise ValueError("start must be finite and non-negative")
+        total = float(initial.sum())
+        if not math.isclose(total, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError(f"start must sum to 1, got {total}")
+
     log_emissions = log_emission_probabilities(matrix, parameters)
     n_observations = matrix.shape[0]
     filtered = np.empty((n_observations, parameters.n_states), dtype=np.float64)
 
-    belief, log_likelihood = update_step(parameters.start_probabilities, log_emissions[0])
+    belief, log_likelihood = update_step(initial, log_emissions[0])
     filtered[0] = belief
     for index in range(1, n_observations):
         prior = predict_step(belief, parameters.transition_matrix)

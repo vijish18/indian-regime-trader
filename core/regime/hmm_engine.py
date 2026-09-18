@@ -478,7 +478,35 @@ class HMMRegimeEngine:
                 f"{expected}; a model may only be applied to the features it was trained on"
             )
 
-        result = forward_filter(features.to_numpy(dtype=np.float64), model.parameters)
+        # A uniform prior, not the model's fitted ``start_probabilities``.
+        #
+        # This window begins wherever the caller asked -- a backtest fold's
+        # warmup buffer, or the last N sessions in live trading -- which has
+        # no relationship to the day the training sequence began. Fitted on a
+        # single sequence, ``start_probabilities`` is always one-hot (verified
+        # across all 32 walk-forward folds); using it asserts the market
+        # reopened in the state that training happened to start in.
+        #
+        # When that is wrong it does not merely bias the first row, it can
+        # crash: the prior puts exact zero mass on the state that explains the
+        # observation, every other state underflows ``exp``, and the posterior
+        # has no mass left. Fold 11 of the walk-forward hit exactly this on
+        # 2020-04-22 -- 2,019 nats between the assumed state and the true one.
+        #
+        # Uniform is both the honest prior (starting mid-history, the regime
+        # is unknown) and structurally safe: every state keeps positive mass,
+        # so the best-explaining state always survives the update and collapse
+        # becomes impossible rather than merely unlikely. It costs nothing --
+        # over all 32 folds the filtered labels differ only within the first
+        # 11 rows of the warmup buffer and by zero labels across all 4,030
+        # test-window sessions, because the belief converges long before the
+        # window that is actually traded.
+        n_states = model.parameters.n_states
+        result = forward_filter(
+            features.to_numpy(dtype=np.float64),
+            model.parameters,
+            start=np.full(n_states, 1.0 / n_states, dtype=np.float64),
+        )
         return self._to_regime_states(model, features.index, result)
 
     def filter_latest(self, model: FittedRegimeModel, features: pd.DataFrame) -> RegimeState:

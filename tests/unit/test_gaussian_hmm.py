@@ -211,6 +211,61 @@ def test_extreme_observation_does_not_underflow_the_belief() -> None:
     np.testing.assert_allclose(result.filtered_probabilities.sum(axis=1), 1.0, atol=1e-12)
 
 
+def _one_hot_start_model() -> GaussianHMMParameters:
+    """A model whose fitted start distribution is one-hot, which is what
+    Baum-Welch always produces from a single training sequence -- verified
+    across all 32 walk-forward folds on real data."""
+    return GaussianHMMParameters(
+        start_probabilities=np.array([1.0, 0.0]),
+        transition_matrix=np.array([[0.7, 0.3], [0.4, 0.6]]),
+        means=np.array([[0.0], [60.0]]),
+        covariances=np.array([[[1.0]], [[1.0]]]),
+        covariance_type="full",
+    )
+
+
+def test_a_one_hot_start_collapses_on_an_observation_that_state_cannot_explain() -> None:
+    """The trap the default start carries, stated as a test.
+
+    State 1 explains the observation; state 0 holds all the prior mass and
+    explains it about 1,800 nats worse, which underflows ``exp`` (anything
+    below about -745 does). Nothing is left to normalise.
+
+    This is not hypothetical: fold 11 of the walk-forward hit it on
+    2020-04-22 with 2,019 nats of disagreement, and it killed the run.
+    """
+    with pytest.raises(HMMNumericalError, match="belief collapsed"):
+        forward_filter(np.array([[60.0]]), _one_hot_start_model())
+
+
+def test_an_explicit_uniform_start_survives_the_same_observation() -> None:
+    """Uniform keeps positive mass on every state, so the state that does
+    explain the observation always survives the update. The collapse becomes
+    impossible by construction rather than merely unlikely."""
+    result = forward_filter(
+        np.array([[60.0]]), _one_hot_start_model(), start=np.array([0.5, 0.5])
+    )
+
+    assert np.all(np.isfinite(result.filtered_probabilities))
+    assert result.filtered_probabilities[0].argmax() == 1
+
+
+@pytest.mark.parametrize(
+    ("start", "message"),
+    [
+        (np.array([0.5, 0.5, 0.0]), "expected"),
+        (np.array([0.5, -0.5]), "non-negative"),
+        (np.array([0.5, 0.2]), "sum to 1"),
+        (np.array([np.nan, 0.5]), "finite"),
+    ],
+)
+def test_a_malformed_start_is_refused(start: np.ndarray, message: str) -> None:
+    """A start that is not a distribution produces filtered "probabilities"
+    that are not probabilities, and nothing downstream would notice."""
+    with pytest.raises(ValueError, match=message):
+        forward_filter(np.array([[0.0]]), two_state_model(), start=start)
+
+
 def test_predict_step_preserves_total_probability() -> None:
     model = two_state_model()
     prior = predict_step(np.array([0.3, 0.7]), model.transition_matrix)

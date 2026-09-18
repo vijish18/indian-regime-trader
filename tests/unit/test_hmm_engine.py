@@ -258,6 +258,35 @@ def test_filter_rejects_an_empty_window(fitted: FittedFixture) -> None:
         engine.filter(model, features.iloc[:0])
 
 
+def test_engine_filtering_ignores_the_models_fitted_start_distribution(
+    fitted: FittedFixture,
+) -> None:
+    """``filter`` is handed a window beginning wherever the caller asked --
+    a backtest fold's warmup buffer, or the last N live sessions -- which has
+    no relationship to the day the training sequence began.
+
+    ``start_probabilities`` answers a question about that training day only.
+    Fitted on a single sequence, Baum-Welch drives it to a one-hot vector
+    (true in all 32 walk-forward folds on real data), so filtering under it
+    asserts the market reopened in whichever state training started in. When
+    that is wrong and the first observation sits far in that state's tails,
+    the posterior loses all its mass and inference *raises* -- walk-forward
+    fold 11 died exactly this way on 2020-04-22.
+
+    So the engine must not consult it at all, which is what this asserts:
+    replacing it with a maximally misleading one-hot changes nothing.
+    """
+    engine, model, features, _ = fitted
+    one_hot = np.zeros(model.parameters.n_states, dtype=float)
+    one_hot[-1] = 1.0
+    misleading = dataclasses.replace(
+        model,
+        parameters=dataclasses.replace(model.parameters, start_probabilities=one_hot),
+    )
+
+    assert engine.filter(misleading, features) == engine.filter(model, features)
+
+
 # --------------------------------------------------------------------------
 # Measured state statistics
 # --------------------------------------------------------------------------

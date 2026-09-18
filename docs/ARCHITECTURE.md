@@ -397,6 +397,41 @@ bit-identical, and separately assert that filtered and smoothed posteriors
 actually *differ* — so the filter silently becoming a smoother would fail
 loudly.
 
+**The filter starts from a uniform prior, not the model's fitted
+`start_probabilities`.** That parameter answers "which state was the market in
+on the training window's *first day*". Fitted on a single sequence it is not
+really identifiable, and Baum-Welch drives it to a one-hot vector — true in all
+32 walk-forward folds on real data, with *exact* zeros in 8 of them.
+`HMMRegimeEngine.filter`, though, is handed a window beginning wherever the
+caller asked: a fold's warmup buffer, or the last N sessions in live trading.
+Filtering that under the fitted start asserts the market reopened in the state
+training happened to begin in.
+
+When that assertion is wrong it does not merely bias the first row, it can
+crash. The prior puts exact zero mass on the state that explains today's
+observation; every other state is so many nats worse that `exp` underflows
+(anything below about -745 does); nothing survives to normalize, and
+`update_step` raises `HMMNumericalError`. Walk-forward fold 11 hit precisely
+this on 2020-04-22 — 2,019 nats between the assumed state and the one that fit
+— and it killed the run about a third of the way in.
+
+Uniform is both the honest prior (starting mid-history, the regime is unknown)
+and structurally safe: every state keeps positive mass, so the best-explaining
+state always survives and the collapse becomes impossible rather than merely
+unlikely. It was measured before being adopted: across all 32 folds the
+filtered labels differ only within the first 11 rows of the warmup buffer, and
+by **zero** labels across all 4,030 test-window sessions, because the belief
+converges long before the window that is actually traded.
+
+The stationary distribution, which is the textbook answer here, was rejected on
+the evidence: several folds' transition matrices are effectively reducible, so
+it comes back degenerate (`[1, 0, 0, 0, 0]`) — the same trap — and numerical
+eigendecomposition yields small *negative* entries on three of them. `forward_filter`
+itself keeps the fitted start as its default, because its `log_likelihood` is
+`log P(observations | model)` and must keep agreeing with `forward_backward`;
+the uniform prior is passed explicitly by the one caller for whom the
+arbitrary-window claim is actually true.
+
 **Names are reporting; measurements drive behavior.** A fitted HMM's state IDs
 are arbitrary (refit with another seed and "state 0" moves), and a label like
 "crisis" is a name someone chose, not a measurement. So `StateStatistics`
