@@ -115,11 +115,14 @@ def build_validator(
     # a file that cannot change during a run, so no value of --frame-cache
     # can change the result, only how long it takes to get it.
     #
-    # Tunable because the full 32-fold run is unattended and long: measured
-    # 0.9 GB private at 1,000 frames over a 4-year window, and the 11-year
-    # window reads several times that history per instrument. Lower it if
-    # the machine starts swapping -- a slower run beats a run that dies at
-    # hour twelve.
+    # Tunable because the full 32-fold run is unattended and long. Measured
+    # on the 2015-2026 store (2,205 instruments, 2,886 sessions): the
+    # largest single frame is 0.79 MB in memory, so 1,000 frames is 0.79 GB
+    # and the entire set would be 1.74 GB. A frame holds an instrument's
+    # whole history regardless of the fold window, so this does not grow
+    # with the period -- only with how much of the universe is touched.
+    # Lower it if the machine starts swapping: a slower run beats a run
+    # that dies at hour twelve.
     #
     # Live trading must never set this: files change daily there, and a
     # cache would serve yesterday's bars as today's with nothing to show
