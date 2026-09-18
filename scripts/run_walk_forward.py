@@ -83,7 +83,7 @@ def _require(path: Path, how: str) -> Path:
 
 
 def build_validator(
-    snapshot_date: dt.date, circuit_breaker_dir: Path
+    snapshot_date: dt.date, circuit_breaker_dir: Path, frame_cache: int = 1000
 ) -> WalkForwardValidator:
     settings = load_settings()
 
@@ -110,15 +110,22 @@ def build_validator(
     )
     # A backtest reads an immutable snapshot, so memoising parsed files is
     # free correctness-wise and removes most of the cost -- a fold asks for
-    # the same instrument's file on every session, for every strategy.
-    # 1,000 frames is roughly one fold's universe at about 1.4 GB; the
-    # full 2,205-instrument set would be 3 GB and start swapping.
+    # the same instrument's file on every session, for every strategy. It
+    # is purely a speed/memory trade: the cached object is a parsed copy of
+    # a file that cannot change during a run, so no value of --frame-cache
+    # can change the result, only how long it takes to get it.
+    #
+    # Tunable because the full 32-fold run is unattended and long: measured
+    # 0.9 GB private at 1,000 frames over a 4-year window, and the 11-year
+    # window reads several times that history per instrument. Lower it if
+    # the machine starts swapping -- a slower run beats a run that dies at
+    # hour twelve.
     #
     # Live trading must never set this: files change daily there, and a
     # cache would serve yesterday's bars as today's with nothing to show
     # anything was stale.
     market_data = LocalMarketDataProvider(
-        store, corporate_actions=corporate_actions, frame_cache_size=1000
+        store, corporate_actions=corporate_actions, frame_cache_size=frame_cache
     )
     instruments = InMemoryInstrumentRepository.from_file(
         REFERENCE / "instruments.csv", snapshot_date=snapshot_date
@@ -203,10 +210,20 @@ def main(argv: list[str]) -> int:
                         default=dt.date(2024, 12, 31))
     parser.add_argument("--state-dir", type=Path, default=REPO_ROOT / "state" / "walk_forward")
     parser.add_argument("--report", type=Path, default=REPORT_PATH)
+    parser.add_argument(
+        "--frame-cache",
+        type=int,
+        default=1000,
+        help="parsed bar frames to memoise; speed/memory only, never the result",
+    )
     args = parser.parse_args(argv[1:])
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
-    validator = build_validator(snapshot_date=args.end, circuit_breaker_dir=args.state_dir)
+    validator = build_validator(
+        snapshot_date=args.end,
+        circuit_breaker_dir=args.state_dir,
+        frame_cache=args.frame_cache,
+    )
 
     folds = validator.generate_folds(args.start, args.end)
     print(f"{len(folds)} walk-forward folds from {args.start} to {args.end}")
@@ -221,7 +238,26 @@ def main(argv: list[str]) -> int:
         print(f"  ... and {len(folds) - 3} more")
 
     print("\nrunning all strategies (this refits the HMM per fold)...")
-    reports = validator.run_all_strategies(args.start, args.end)
+    started = dt.datetime.now(dt.UTC)
+    completed = 0
+
+    def progress(line: str) -> None:
+        """Per-fold heartbeat with an ETA extrapolated from folds so far.
+
+        The full run takes most of a day. Without this, a hang is
+        indistinguishable from slow progress until the whole thing is over.
+        """
+        nonlocal completed
+        completed += 1
+        elapsed = (dt.datetime.now(dt.UTC) - started).total_seconds()
+        remaining = elapsed / completed * (len(folds) - completed)
+        eta = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=remaining)).astimezone()
+        print(
+            f"[{elapsed / 60:6.1f}m] {line}"
+            + (f"  eta {eta:%H:%M %Z}" if completed < len(folds) else "  done")
+        )
+
+    reports = validator.run_all_strategies(args.start, args.end, progress=progress)
 
     print()
     header = (

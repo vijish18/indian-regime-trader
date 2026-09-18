@@ -64,6 +64,7 @@ zero-cost liquidation.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -440,13 +441,26 @@ class WalkForwardValidator:
             pd.concat(equity_curves).sort_index(), pd.concat(trade_logs, ignore_index=True)
         )
 
-    def run_all_strategies(self, start: dt.date, end: dt.date) -> dict[str, PerformanceReport]:
+    def run_all_strategies(
+        self,
+        start: dt.date,
+        end: dt.date,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> dict[str, PerformanceReport]:
         """Buy-and-hold, the rolling-volatility baseline, the moving-average
         trend baseline, the HMM, and the shuffled-regime control, all over
         the identical fold sequence and the identical downstream
         selection/construction/risk/cost pipeline -- the comparison
         docs/SPECIFICATION.md section 10.1 asks for, to determine whether
         the HMM provides incremental value.
+
+        ``progress`` is called once per completed fold. The full 32-fold run
+        over real data takes most of a day and otherwise prints nothing
+        between "started" and the final table, which makes a hang at fold 7
+        indistinguishable from slow progress until the whole run is over. It
+        is observation only -- nothing here reads what it returns, and a run
+        that passes nothing behaves exactly as before.
         """
         folds = self.generate_folds(start, end)
         if not folds:
@@ -483,6 +497,15 @@ class WalkForwardValidator:
                 running_equity[name] = float(result.equity_curve.iloc[-1])
                 equity_curves[name].append(result.equity_curve)
                 trade_logs[name].append(result.trade_log)
+
+            if progress is not None:
+                equity = "  ".join(
+                    f"{name}={running_equity[name]:,.0f}" for name in STRATEGY_NAMES
+                )
+                progress(
+                    f"fold {fold_index + 1}/{len(folds)} "
+                    f"test {test_start}..{test_end}  {equity}"
+                )
 
         return {
             name: self.performance_calculator.compute(

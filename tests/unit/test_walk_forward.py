@@ -172,6 +172,20 @@ def test_run_all_strategies_returns_every_named_strategy(tmp_path: Path) -> None
         assert isinstance(results[name], PerformanceReport)
 
 
+def test_progress_is_reported_once_per_fold_and_is_optional(tmp_path: Path) -> None:
+    """The full run over real data takes most of a day. A heartbeat is the
+    only thing separating "slow" from "hung" while it does."""
+    env = Environment(n_days=90, n_stocks=4)
+    validator = _single_fold_validator(env, tmp_path)
+    folds = validator.generate_folds(env.dates[0], env.dates[-1])
+
+    seen: list[str] = []
+    validator.run_all_strategies(env.dates[0], env.dates[-1], progress=seen.append)
+
+    assert len(seen) == len(folds)
+    assert f"fold 1/{len(folds)}" in seen[0]
+
+
 def test_run_all_strategies_all_have_trades_over_the_same_window(tmp_path: Path) -> None:
     """Not a claim that every strategy trades identically -- but every one
     of them should have SOME trade activity given a full test window with
