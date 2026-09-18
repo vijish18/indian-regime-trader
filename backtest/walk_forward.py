@@ -448,6 +448,7 @@ class WalkForwardValidator:
         *,
         progress: Callable[[str], None] | None = None,
         strategies: Iterable[str] | None = None,
+        on_series: Callable[[str, pd.Series, pd.DataFrame], None] | None = None,
     ) -> dict[str, PerformanceReport]:
         """Buy-and-hold, the rolling-volatility baseline, the moving-average
         trend baseline, the HMM, and the shuffled-regime control, all over
@@ -537,10 +538,15 @@ class WalkForwardValidator:
                     f"test {test_start}..{test_end}  {equity}"
                 )
 
-        return {
-            name: self.performance_calculator.compute(
-                pd.concat(equity_curves[name]).sort_index(),
-                pd.concat(trade_logs[name], ignore_index=True),
-            )
-            for name in selected
-        }
+        reports: dict[str, PerformanceReport] = {}
+        for name in selected:
+            curve = pd.concat(equity_curves[name]).sort_index()
+            trades = pd.concat(trade_logs[name], ignore_index=True)
+            # Handed out before being reduced to summary statistics: a
+            # dashboard cannot draw an equity curve or a drawdown from a
+            # CAGR, and recomputing the whole run to get one back would
+            # cost the hours it just took.
+            if on_series is not None:
+                on_series(name, curve, trades)
+            reports[name] = self.performance_calculator.compute(curve, trades)
+        return reports

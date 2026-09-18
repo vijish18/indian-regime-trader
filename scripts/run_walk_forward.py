@@ -45,6 +45,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+import pandas as pd
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT))
@@ -238,6 +240,12 @@ def main(argv: list[str]) -> int:
         default=None,
         help="write the reports as JSON here, for merge_walk_forward.py to combine",
     )
+    parser.add_argument(
+        "--series-dir",
+        type=Path,
+        default=None,
+        help="write each strategy's equity curve and trade log as CSV here",
+    )
     args = parser.parse_args(argv[1:])
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -279,8 +287,27 @@ def main(argv: list[str]) -> int:
             + (f"  eta {eta:%H:%M %Z}" if completed < len(folds) else "  done")
         )
 
+    def on_series(name: str, curve: pd.Series[float], trades: pd.DataFrame) -> None:
+        """Persist the raw series a dashboard needs, next to the JSON.
+
+        Summary statistics cannot be un-summarised: without these, drawing
+        an equity curve later means re-running the whole backtest.
+        """
+        if args.series_dir is None:
+            return
+        args.series_dir.mkdir(parents=True, exist_ok=True)
+        curve.rename("equity").to_csv(
+            args.series_dir / f"{name}.equity.csv", index_label="session_date"
+        )
+        trades.to_csv(args.series_dir / f"{name}.trades.csv", index=False)
+        print(f"  series -> {args.series_dir / f'{name}.equity.csv'} ({len(curve):,} rows)")
+
     reports = validator.run_all_strategies(
-        args.start, args.end, progress=progress, strategies=args.strategy
+        args.start,
+        args.end,
+        progress=progress,
+        strategies=args.strategy,
+        on_series=on_series,
     )
 
     print()
