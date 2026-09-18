@@ -350,7 +350,10 @@ def test_correlation_within_limit_is_not_flagged(tmp_path: Path) -> None:
     assert all(decision.approved for decision in decisions)
 
 
-def test_daily_turnover_breach_rejects_whole_portfolio(tmp_path: Path) -> None:
+def test_a_single_position_over_the_turnover_budget_is_rejected(tmp_path: Path) -> None:
+    """One position that alone exceeds the budget leaves nothing to
+    admit, so the outcome is the same as rejecting everything. With
+    several positions it is not -- see the subset tests below."""
     cfg = risk_config(max_daily_turnover_pct=0.10, max_gross_exposure=1.0)
     manager = risk_manager(tmp_path, cfg)
     positions = [target_position("NSE:A", 0.30, rank=1)]
@@ -674,3 +677,114 @@ def test_invariant_gross_exposure_breach_is_never_partially_approved(tmp_path: P
         )
         decisions = manager.evaluate(proposed, state)
         assert all(not decision.approved for decision in decisions)
+
+
+# --------------------------------------------------------------------------
+# Daily turnover admits a fitting subset rather than rejecting everything
+# --------------------------------------------------------------------------
+
+
+def test_turnover_admits_the_highest_ranked_positions_that_fit(tmp_path: Path) -> None:
+    """The fix for a defect a walk-forward backtest exposed.
+
+    Rejecting every position when the total exceeded the cap meant a
+    portfolio could never form: flat -> fully invested is 100% turnover in
+    one session, so with a 50% cap nothing was ever approved. Not on day
+    one, not ever. Buy-and-hold made zero trades across a year, and every
+    other strategy was silently capped at 50% exposure.
+
+    Rank order decides who gets in, because rank is the selector's own
+    conviction ordering -- so the surviving subset is the best available
+    one, and it is the same subset every time for the same inputs.
+    """
+    cfg = risk_config(
+        max_daily_turnover_pct=0.50,
+        max_gross_exposure=1.0,
+        max_single_name_pct=1.0,
+        max_sector_pct=1.0,
+    )
+    manager = risk_manager(tmp_path, cfg)
+    positions = [target_position(f"NSE:{c}", 0.20, rank=i + 1) for i, c in enumerate("ABCDE")]
+    proposed = target_portfolio(positions)
+    state = risk_state(default_position_risks([p.instrument_id for p in positions]))
+
+    decisions = {d.instrument_id: d for d in manager.evaluate(proposed, state, current=None)}
+
+    # 0.20 each, budget 0.50 -> the top two fit, the rest do not.
+    assert decisions["NSE:A"].approved is True
+    assert decisions["NSE:B"].approved is True
+    assert decisions["NSE:C"].approved is False
+    assert decisions["NSE:D"].approved is False
+    assert decisions["NSE:E"].approved is False
+
+
+def test_the_turnover_cap_is_still_enforced(tmp_path: Path) -> None:
+    """Admitting a subset must not become admitting everything. The guard
+    exists to stop a bug causing repeated full rebalances, and it still
+    does."""
+    cfg = risk_config(
+        max_daily_turnover_pct=0.50,
+        max_gross_exposure=1.0,
+        max_single_name_pct=1.0,
+        max_sector_pct=1.0,
+    )
+    manager = risk_manager(tmp_path, cfg)
+    positions = [target_position(f"NSE:{c}", 0.20, rank=i + 1) for i, c in enumerate("ABCDE")]
+    proposed = target_portfolio(positions)
+    state = risk_state(default_position_risks([p.instrument_id for p in positions]))
+
+    decisions = manager.evaluate(proposed, state, current=None)
+    admitted = sum(d.target_weight for d in decisions if d.approved)
+    assert admitted <= cfg.max_daily_turnover_pct + 1e-9
+
+
+def test_a_risk_reducing_trade_is_never_blocked_by_turnover(tmp_path: Path) -> None:
+    """The safety property, and the more important half of the rule.
+
+    A cap that can trap this system in a position it has decided to leave
+    is worse than any amount of churn. Exits and reductions consume the
+    budget but are never vetoed by it.
+    """
+    cfg = risk_config(
+        max_daily_turnover_pct=0.05,
+        max_gross_exposure=1.0,
+        max_single_name_pct=1.0,
+        max_sector_pct=1.0,
+    )
+    manager = risk_manager(tmp_path, cfg)
+    current = target_portfolio(
+        [target_position("NSE:A", 0.40, rank=1), target_position("NSE:B", 0.40, rank=2)]
+    )
+    # Exit A entirely and halve B: 0.40 + 0.20 = 0.60 turnover, far over
+    # the 0.05 cap, and every bit of it reduces exposure.
+    proposed = target_portfolio([target_position("NSE:B", 0.20, rank=2)])
+    state = risk_state(default_position_risks(["NSE:A", "NSE:B"]))
+
+    decisions = manager.evaluate(proposed, state, current=current)
+
+    assert all(decision.approved for decision in decisions), (
+        "a reduction was blocked by the turnover cap"
+    )
+
+
+def test_turnover_already_spent_today_reduces_the_remaining_budget(tmp_path: Path) -> None:
+    cfg = risk_config(
+        max_daily_turnover_pct=0.50,
+        max_gross_exposure=1.0,
+        max_single_name_pct=1.0,
+        max_sector_pct=1.0,
+    )
+    manager = risk_manager(tmp_path, cfg)
+    positions = [target_position(f"NSE:{c}", 0.20, rank=i + 1) for i, c in enumerate("ABC")]
+    proposed = target_portfolio(positions)
+    state = risk_state(
+        default_position_risks([p.instrument_id for p in positions]),
+        daily_turnover_pct_so_far=0.30,
+    )
+
+    decisions = {d.instrument_id: d for d in manager.evaluate(proposed, state, current=None)}
+
+    # Only 0.20 of budget remains, so exactly one position fits.
+    assert decisions["NSE:A"].approved is True
+    assert decisions["NSE:B"].approved is False
+    assert decisions["NSE:C"].approved is False

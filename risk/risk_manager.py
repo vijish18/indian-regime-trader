@@ -67,7 +67,12 @@ from enum import StrEnum
 
 from config.models import RiskConfig
 from monitoring.logger import get_logger
-from portfolio.portfolio_constructor import TargetPortfolio, TargetPosition, required_trades
+from portfolio.portfolio_constructor import (
+    TargetPortfolio,
+    TargetPosition,
+    TradeAction,
+    required_trades,
+)
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.portfolio_risk_state import PortfolioRiskState, PositionRisk
 
@@ -350,20 +355,69 @@ class RiskManager:
         risk_state: PortfolioRiskState,
         violations_by_id: dict[str, list[RiskViolation]],
     ) -> None:
-        additional_turnover = sum(
-            abs(trade.delta_weight) for trade in required_trades(proposed, current)
-        )
-        total_turnover = risk_state.daily_turnover_pct_so_far + additional_turnover
-        if total_turnover > self.config.max_daily_turnover_pct + _TOLERANCE:
-            violation = RiskViolation(
-                RiskCheck.DAILY_TURNOVER,
-                f"projected daily turnover {total_turnover:.6f} exceeds limit "
-                f"{self.config.max_daily_turnover_pct:.6f}",
-                self.config.max_daily_turnover_pct,
-                total_turnover,
+        """Hold the day's turnover under the cap by rejecting the *weakest*
+        increases, not by rejecting everything.
+
+        The previous behaviour appended the violation to every position, so
+        a portfolio whose target turnover exceeded the cap got nothing at
+        all. That is fine as a churn guard and fatal as a starting
+        condition: going flat -> 100% invested is 100% turnover in one
+        session, so with a 50% cap the portfolio could never form. Not on
+        day one, not ever. A walk-forward backtest showed it plainly --
+        buy-and-hold made zero trades across a year, and every other
+        strategy was silently capped at 50% exposure, which inverts the
+        strategy's intent by letting it invest only in the regimes where it
+        wants *least* exposure.
+
+        Two rules, and the first one matters more:
+
+        1. **Risk-reducing trades are never blocked.** An exit or a
+           reduction lowers exposure, and a cap that can trap this system
+           in a position it has decided to leave is worse than any amount
+           of churn. Their turnover is counted, never vetoed.
+
+        2. Increases are admitted in rank order until the budget is spent.
+           Rank is the selector's own conviction ordering, so what survives
+           is the highest-conviction subset that fits -- deterministic, and
+           the same subset every time for the same inputs. The rest are
+           rejected with the turnover violation, and the portfolio reaches
+           its target over the next session or two instead of never.
+
+        The cap still does its job: no session can exceed it, so a bug
+        causing repeated full rebalances is still stopped.
+        """
+        trades = {trade.instrument_id: trade for trade in required_trades(proposed, current)}
+        budget = self.config.max_daily_turnover_pct - risk_state.daily_turnover_pct_so_far
+
+        reducing = [
+            trade
+            for trade in trades.values()
+            if trade.action in (TradeAction.SELL, TradeAction.EXIT)
+        ]
+        spent = sum(abs(trade.delta_weight) for trade in reducing)
+
+        increases = [
+            position
+            for position in sorted(proposed.positions, key=lambda p: p.rank)
+            if trades.get(position.instrument_id) is not None
+            and trades[position.instrument_id].action is TradeAction.BUY
+        ]
+
+        for position in increases:
+            cost = abs(trades[position.instrument_id].delta_weight)
+            if spent + cost <= budget + _TOLERANCE:
+                spent += cost
+                continue
+            violations_by_id[position.instrument_id].append(
+                RiskViolation(
+                    RiskCheck.DAILY_TURNOVER,
+                    f"daily turnover budget exhausted: {spent:.6f} already committed of "
+                    f"{self.config.max_daily_turnover_pct:.6f}, this trade needs "
+                    f"{cost:.6f}",
+                    self.config.max_daily_turnover_pct,
+                    spent + cost,
+                )
             )
-            for violations in violations_by_id.values():
-                violations.append(violation)
 
     def _check_no_new_positions(
         self,
