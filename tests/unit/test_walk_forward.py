@@ -14,6 +14,8 @@ import pytest
 
 from backtest.performance import PerformanceReport
 from backtest.walk_forward import (
+    BUY_AND_HOLD,
+    HMM,
     STRATEGY_NAMES,
     WalkForwardError,
     WalkForwardFold,
@@ -197,6 +199,47 @@ def test_run_all_strategies_all_have_trades_over_the_same_window(tmp_path: Path)
 
     for name in STRATEGY_NAMES:
         assert results[name].trade_count > 0, f"{name} recorded no trades"
+
+
+def test_a_subset_run_is_identical_to_the_same_names_in_a_whole_run(tmp_path: Path) -> None:
+    """The guarantee the parallel split rests on.
+
+    The full five-way comparison measured at roughly 24 CPU hours over real
+    data, so it is split across processes, one per strategy. That is only
+    legitimate if a strategy's numbers do not depend on which other
+    strategies happened to run beside it -- otherwise the split would
+    quietly produce a different answer than the thing it replaces.
+
+    They do not: each strategy chains equity only through its own folds,
+    accumulates its own curves and trade logs, and gets its own
+    circuit-breaker state file keyed by strategy name. This asserts it
+    rather than trusting the reading.
+    """
+    env = Environment(n_days=90, n_stocks=4)
+    whole = _single_fold_validator(env, tmp_path / "whole").run_all_strategies(
+        env.dates[0], env.dates[-1]
+    )
+    part = _single_fold_validator(env, tmp_path / "part").run_all_strategies(
+        env.dates[0], env.dates[-1], strategies=[HMM, BUY_AND_HOLD]
+    )
+
+    assert set(part) == {HMM, BUY_AND_HOLD}
+    for name in (HMM, BUY_AND_HOLD):
+        assert part[name].cagr == whole[name].cagr
+        assert part[name].sharpe == whole[name].sharpe
+        assert part[name].max_drawdown == whole[name].max_drawdown
+        assert part[name].trade_count == whole[name].trade_count
+        assert part[name].total_costs == whole[name].total_costs
+
+
+def test_an_unknown_strategy_name_is_refused(tmp_path: Path) -> None:
+    """A typo in a launcher script would otherwise run four strategies and
+    silently report a four-row comparison as though it were five."""
+    env = Environment(n_days=90, n_stocks=4)
+    validator = _single_fold_validator(env, tmp_path)
+
+    with pytest.raises(WalkForwardError, match="unknown strategy"):
+        validator.run_all_strategies(env.dates[0], env.dates[-1], strategies=["hmmm"])
 
 
 def test_run_all_strategies_raises_when_no_fold_fits(tmp_path: Path) -> None:

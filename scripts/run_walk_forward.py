@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +52,7 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - script bootstrap
 from backtest.cost_schedule import CostScheduleRepository  # noqa: E402
 from backtest.costs import CostModel  # noqa: E402
 from backtest.performance import PerformanceReport  # noqa: E402
-from backtest.walk_forward import WalkForwardValidator  # noqa: E402
+from backtest.walk_forward import STRATEGY_NAMES, WalkForwardValidator  # noqa: E402
 from config.loader import load_settings  # noqa: E402
 from core.features.feature_engineering import (  # noqa: E402
     FeaturePipeline,
@@ -219,6 +221,23 @@ def main(argv: list[str]) -> int:
         default=1000,
         help="parsed bar frames to memoise; speed/memory only, never the result",
     )
+    parser.add_argument(
+        "--strategy",
+        action="append",
+        default=None,
+        help=(
+            "run only this strategy (repeatable). The five are independent -- "
+            "each chains its own equity and owns its circuit-breaker state -- so "
+            "splitting them across processes gives identical numbers in a "
+            f"fifth of the wall clock. One of: {', '.join(STRATEGY_NAMES)}"
+        ),
+    )
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="write the reports as JSON here, for merge_walk_forward.py to combine",
+    )
     args = parser.parse_args(argv[1:])
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +279,9 @@ def main(argv: list[str]) -> int:
             + (f"  eta {eta:%H:%M %Z}" if completed < len(folds) else "  done")
         )
 
-    reports = validator.run_all_strategies(args.start, args.end, progress=progress)
+    reports = validator.run_all_strategies(
+        args.start, args.end, progress=progress, strategies=args.strategy
+    )
 
     print()
     header = (
@@ -275,9 +296,28 @@ def main(argv: list[str]) -> int:
             f"{report.pct_invested:>6.1%} {report.trade_count:>7}"
         )
 
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(render(reports, args.start, args.end), encoding="utf-8")
-    print(f"\nreport -> {args.report}")
+    if args.json_out is not None:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(
+            json.dumps(
+                {
+                    "start": args.start.isoformat(),
+                    "end": args.end.isoformat(),
+                    "reports": {name: asdict(report) for name, report in reports.items()},
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"\njson -> {args.json_out}")
+
+    # A subset run is one process of a split; the combined markdown is
+    # merge_walk_forward.py's job, and writing a partial table to the
+    # report path would leave a four-row comparison looking like the answer.
+    if args.strategy is None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(render(reports, args.start, args.end), encoding="utf-8")
+        print(f"\nreport -> {args.report}")
     return 0
 
 

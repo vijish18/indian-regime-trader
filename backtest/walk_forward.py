@@ -64,7 +64,7 @@ zero-cost liquidation.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -447,6 +447,7 @@ class WalkForwardValidator:
         end: dt.date,
         *,
         progress: Callable[[str], None] | None = None,
+        strategies: Iterable[str] | None = None,
     ) -> dict[str, PerformanceReport]:
         """Buy-and-hold, the rolling-volatility baseline, the moving-average
         trend baseline, the HMM, and the shuffled-regime control, all over
@@ -461,16 +462,41 @@ class WalkForwardValidator:
         indistinguishable from slow progress until the whole run is over. It
         is observation only -- nothing here reads what it returns, and a run
         that passes nothing behaves exactly as before.
+
+        ``strategies`` restricts the run to a subset, so the five can be
+        split across processes -- the full comparison measured at ~24 CPU
+        hours in one process, and they are independent enough to divide.
+        Each strategy chains equity only through its own folds, accumulates
+        its own curves and trade logs, and gets its own circuit-breaker
+        state file (``BacktestEngine.run`` keys it by strategy name and
+        resets it per fold), so a subset run returns exactly what the same
+        names return in a whole run.
+
+        What must *not* vary with the subset is the fold's session list.
+        ``dates`` comes from the HMM's own targets, so the model is fitted
+        on every fold even when only a baseline is selected: skipping it
+        would leave the baselines ranging over a different set of sessions
+        than the HMM they are being compared against. The fit costs about
+        2.5 seconds a fold against a run measured in hours.
         """
+        selected = tuple(STRATEGY_NAMES) if strategies is None else tuple(strategies)
+        unknown = [name for name in selected if name not in STRATEGY_NAMES]
+        if unknown:
+            raise WalkForwardError(
+                f"unknown strategy name(s) {unknown}; known names are {list(STRATEGY_NAMES)}"
+            )
+        if not selected:
+            raise WalkForwardError("at least one strategy must be selected")
+
         folds = self.generate_folds(start, end)
         if not folds:
             raise WalkForwardError(
                 f"no fold fits in [{start}, {end}] given the configured window sizes"
             )
 
-        equity_curves: dict[str, list[pd.Series]] = {name: [] for name in STRATEGY_NAMES}
-        trade_logs: dict[str, list[pd.DataFrame]] = {name: [] for name in STRATEGY_NAMES}
-        running_equity: dict[str, float] = dict.fromkeys(STRATEGY_NAMES, self.initial_equity)
+        equity_curves: dict[str, list[pd.Series]] = {name: [] for name in selected}
+        trade_logs: dict[str, list[pd.DataFrame]] = {name: [] for name in selected}
+        running_equity: dict[str, float] = dict.fromkeys(selected, self.initial_equity)
 
         for fold_index, (train_start, train_end, test_start, test_end) in enumerate(folds):
             model, params, engine, _model_id = self._fit_fold(train_start, train_end)
@@ -482,26 +508,30 @@ class WalkForwardValidator:
                 hmm_targets, seed=self.random_seed + fold_index
             )
 
-            per_strategy_targets = {
-                BUY_AND_HOLD: self._buy_and_hold_targets(dates),
-                ROLLING_VOLATILITY: self._rolling_volatility_targets(dates),
-                MOVING_AVERAGE_TREND: self._moving_average_trend_targets(dates),
-                HMM: hmm_targets,
-                SHUFFLED_REGIME_CONTROL: shuffled_targets,
-            }
+            for name in selected:
+                # Built here rather than all five up front: a subset run must
+                # not pay for baselines it was not asked for, and each of
+                # these recomputes index features over the fold.
+                if name == BUY_AND_HOLD:
+                    targets = self._buy_and_hold_targets(dates)
+                elif name == ROLLING_VOLATILITY:
+                    targets = self._rolling_volatility_targets(dates)
+                elif name == MOVING_AVERAGE_TREND:
+                    targets = self._moving_average_trend_targets(dates)
+                elif name == HMM:
+                    targets = hmm_targets
+                else:
+                    targets = shuffled_targets
 
-            for name in STRATEGY_NAMES:
                 result = self._run_strategy_on_fold(
-                    name, per_strategy_targets[name], dates, running_equity[name]
+                    name, targets, dates, running_equity[name]
                 )
                 running_equity[name] = float(result.equity_curve.iloc[-1])
                 equity_curves[name].append(result.equity_curve)
                 trade_logs[name].append(result.trade_log)
 
             if progress is not None:
-                equity = "  ".join(
-                    f"{name}={running_equity[name]:,.0f}" for name in STRATEGY_NAMES
-                )
+                equity = "  ".join(f"{name}={running_equity[name]:,.0f}" for name in selected)
                 progress(
                     f"fold {fold_index + 1}/{len(folds)} "
                     f"test {test_start}..{test_end}  {equity}"
@@ -512,5 +542,5 @@ class WalkForwardValidator:
                 pd.concat(equity_curves[name]).sort_index(),
                 pd.concat(trade_logs[name], ignore_index=True),
             )
-            for name in STRATEGY_NAMES
+            for name in selected
         }
