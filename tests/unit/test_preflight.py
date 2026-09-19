@@ -29,6 +29,7 @@ from live.preflight import (
     PreflightCheck,
     PreflightReport,
     _check_api_configuration,
+    _check_approved_model,
     _check_compliance_configuration,
     _check_database_backups,
     _check_no_live_credentials_in_dev,
@@ -503,3 +504,78 @@ def test_preflight_report_passed_requires_every_check_present() -> None:
         results=(CheckResult(PreflightCheck.UNIT_TESTS, CheckStatus.PASS, "ok"),),
     )
     assert report.passed is False
+
+
+# --------------------------------------------------------------------------
+# An approved model must exist and load
+# --------------------------------------------------------------------------
+
+
+def test_a_missing_registry_directory_fails_the_check(tmp_path: Path) -> None:
+    """The container case, and the reason this check exists.
+
+    ``model_registry/`` is in both .gitignore and .dockerignore, and
+    docker-compose mounts state, logs and data_cache but not the registry.
+    So an image built from a clean checkout has no artifact at all -- and
+    before this check, every other one passed and the failure surfaced at
+    the first regime call of the first live session.
+    """
+    result = _check_approved_model(tmp_path)
+
+    assert result.status is CheckStatus.FAIL
+    assert "model_registry" in result.detail
+
+
+def test_an_empty_registry_fails_rather_than_finding_nothing_quietly(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "model_registry").mkdir()
+
+    result = _check_approved_model(tmp_path)
+
+    assert result.status is CheckStatus.FAIL
+    assert "no approved model" in result.detail.lower()
+
+
+def test_an_approved_id_with_no_artifact_on_disk_fails(tmp_path: Path) -> None:
+    """Approval is a pointer. A pointer to a file somebody deleted is the
+    failure mode an existence check on the directory would miss."""
+    registry = tmp_path / "model_registry"
+    registry.mkdir()
+    (registry / "approved.json").write_text('{"model_id": "hmm_gone"}', encoding="utf-8")
+
+    result = _check_approved_model(tmp_path)
+
+    assert result.status is CheckStatus.FAIL
+    assert "hmm_gone" in result.detail
+
+
+def test_a_corrupt_artifact_fails_rather_than_passing_on_existence(
+    tmp_path: Path,
+) -> None:
+    """Why this loads the artifact instead of stat-ing the file. A truncated
+    or hand-edited JSON survives an existence check and fails at 09:15."""
+    registry = tmp_path / "model_registry"
+    registry.mkdir()
+    (registry / "approved.json").write_text('{"model_id": "hmm_broken"}', encoding="utf-8")
+    (registry / "hmm_broken.json").write_text('{"model_id": "hmm_broken"', encoding="utf-8")
+
+    result = _check_approved_model(tmp_path)
+
+    assert result.status is CheckStatus.FAIL
+
+
+def test_the_shipped_registry_passes_and_names_the_model() -> None:
+    """A reviewer approving a live deployment has to be able to see *which*
+    model they are approving, not just that a call returned True."""
+    result = _check_approved_model(Path(__file__).resolve().parents[2])
+
+    assert result.status is CheckStatus.PASS
+    assert "model_id=" in result.detail
+    assert "n_states=" in result.detail
+
+
+def test_the_approved_model_check_is_part_of_the_checklist() -> None:
+    """A check that exists but is never assembled into the report protects
+    nothing."""
+    assert PreflightCheck.APPROVED_MODEL in set(PreflightCheck)

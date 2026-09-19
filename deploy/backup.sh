@@ -17,6 +17,14 @@
 #       entire recovery path has nothing to recover from. Backed up every
 #       run.
 #
+#   model-registry (the approved model)      -- backed up every run.
+#       Losing this does not lose money, but it loses the record of which
+#       model was signed off and running -- and that record is what an
+#       audit, or a post-incident reconstruction, actually needs. It is
+#       not reconstructible: refitting produces a *different* model, not
+#       this one, because the fit depends on the data as it stood and on
+#       a seed nobody wrote down afterwards.
+#
 #   db-data    (Postgres)                    -- backed up every run.
 #       See the note at the end about what actually lives here today.
 #
@@ -79,6 +87,7 @@ backup_volume() {
 
 backup_volume "app-state" "app-state.tar.gz"
 backup_volume "app-logs" "app-logs.tar.gz"
+backup_volume "model-registry" "model-registry.tar.gz"
 
 # Postgres gets a logical dump rather than a volume tarball. A tarball of
 # a *running* database's data directory is a torn copy that may or may

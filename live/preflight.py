@@ -43,6 +43,7 @@ from pathlib import Path
 
 from broker.compliance import ComplianceError, ComplianceGate
 from config.loader import ConfigError, load_settings
+from core.regime.model_registry import ModelRegistry, NoApprovedModelError
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PYTEST_TIMEOUT_SECONDS = 900
@@ -80,6 +81,7 @@ class PreflightCheck(StrEnum):
     COMPLIANCE_CONFIGURATION = "compliance configuration verified"
     STATIC_IP_CONFIGURATION = "static-IP configuration verified where applicable"
     ORDER_TYPE_CONFIGURATION = "order-type configuration verified"
+    APPROVED_MODEL = "an approved model is present and loadable"
     RISK_LIMITS = "risk limits configured"
     KILL_SWITCH = "kill switch tested"
     RESTART_RECOVERY = "restart recovery tested"
@@ -146,6 +148,7 @@ def run_preflight(
         _check_compliance_configuration(),
         _check_static_ip_configuration(),
         _check_order_type_configuration(),
+        _check_approved_model(repo_root),
         _check_risk_limits(),
         _check_kill_switch(repo_root, run_test_suites),
         _check_restart_recovery(repo_root, run_test_suites),
@@ -431,7 +434,59 @@ def _check_order_type_configuration() -> CheckResult:
 
 
 # --------------------------------------------------------------------------
-# 12: risk limits
+# 12: an approved model exists and loads
+# --------------------------------------------------------------------------
+
+
+def _check_approved_model(repo_root: Path) -> CheckResult:
+    """The regime layer cannot run without a model, and nothing else in
+    this checklist looks for one.
+
+    That gap is reachable in a way that matters. ``model_registry/`` is in
+    both ``.gitignore`` and ``.dockerignore``, and ``deploy/docker-compose.yml``
+    mounts ``state``, ``logs`` and ``data_cache`` but not the registry -- so a
+    container built and started from a clean checkout has no artifact at all.
+    Every other check would pass, and the failure would surface at the first
+    regime call of the first live session.
+
+    Loading the artifact, rather than stat-ing the file, is the point: a
+    truncated or hand-edited JSON is exactly the kind of thing that survives
+    an existence check and fails at 09:15. ``load_current_approved`` also
+    refuses to fall back to the newest fit when nothing is approved, so this
+    confirms a *reviewed* model, not merely a present one.
+    """
+    registry_root = repo_root / "model_registry"
+    if not registry_root.is_dir():
+        return CheckResult(
+            PreflightCheck.APPROVED_MODEL,
+            CheckStatus.FAIL,
+            f"no {registry_root} directory. In a container this usually means the "
+            "registry was neither baked into the image (.dockerignore excludes it) "
+            "nor mounted as a volume -- see deploy/docker-compose.yml.",
+        )
+    try:
+        artifact = ModelRegistry(registry_root).load_current_approved()
+    except NoApprovedModelError as exc:
+        return CheckResult(PreflightCheck.APPROVED_MODEL, CheckStatus.FAIL, str(exc))
+    except (OSError, ValueError, KeyError) as exc:
+        return CheckResult(
+            PreflightCheck.APPROVED_MODEL,
+            CheckStatus.FAIL,
+            f"approved model is present but did not load: {type(exc).__name__}: {exc}",
+        )
+
+    return CheckResult(
+        PreflightCheck.APPROVED_MODEL,
+        CheckStatus.PASS,
+        f"model_id={artifact.model_id!r}, n_states={artifact.model.n_states}, "
+        f"trained_at={artifact.created_at.date()}, features={artifact.feature_version!r} "
+        "-- this check confirms the approved artifact loads, not that it is still "
+        "appropriate for current market conditions; see the retrain schedule.",
+    )
+
+
+# --------------------------------------------------------------------------
+# 13: risk limits
 # --------------------------------------------------------------------------
 
 

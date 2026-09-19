@@ -42,14 +42,27 @@ services:
         condition: service_healthy
 
     # --- Persistence -------------------------------------------------------
-    # Three separate volumes rather than one, because they have three
+    # Four separate volumes rather than one, because they have four
     # different recovery stories: state must be restored exactly or not
-    # at all, logs must never be restored over newer logs, and the data
-    # cache is reconstructible from the vendor and needs no backup.
+    # at all, logs must never be restored over newer logs, the data
+    # cache is reconstructible from the vendor and needs no backup, and
+    # the model registry is an approval record that must survive a rebuild.
     volumes:
       - app-state:/app/state
       - app-logs:/app/logs
       - app-data-cache:/app/data_cache
+      # Read-only on purpose. The approved model is a reviewed artifact;
+      # a running container has no business rewriting the thing that says
+      # which model was signed off. Promotion happens outside this process,
+      # by an operator writing to the volume deliberately.
+      #
+      # Mounted rather than baked into the image because model_registry/ is
+      # in .dockerignore and .gitignore -- artifacts are not source, and an
+      # image built from a clean checkout would contain none. Without this
+      # mount the container starts with no model at all and fails at its
+      # first regime call; live.preflight's APPROVED_MODEL check now refuses
+      # to let that reach a trading session.
+      - model-registry:/app/model_registry:ro
 
     # --- Automatic restart -------------------------------------------------
     # `unless-stopped`, not `always`: an operator who deliberately stops a
@@ -200,4 +213,10 @@ volumes:
     # never restored over a newer one.
   app-data-cache:
     # Reconstructible from the vendor. Not backed up on purpose.
+  model-registry:
+    # Which model was approved, and the artifact itself. Losing this does
+    # not lose money, but it does lose the record of what was signed off
+    # and running -- so it is backed up with app-state, not treated as
+    # reconstructible. A refit produces a *different* model; it does not
+    # restore this one.
   db-data:
