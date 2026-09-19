@@ -668,20 +668,36 @@ class StressTestSuite:
         )
 
     def _run_missing_bars(self, seed: int | None = None) -> StressTestResult:
-        """No bars at all for an instrument over a window -- mark-to-market
-        must fail closed (raise), not fabricate a price.
+        """No bars at all for an instrument -- mark-to-market must fail
+        closed (raise), not fabricate a price.
+
+        The shock runs from the beginning of time rather than from mid-window,
+        because those are two different failures and only one of them should
+        raise:
+
+            no price has ever been seen     the data is broken; refuse
+            a price was seen, but is old    the stock is suspended; mark it
+                                            at its last trade, the convention
+                                            every fund uses
+
+        ``_last_close`` cannot distinguish them by looking at one window, so
+        the distinction is carried by how far back it is willing to look --
+        400 days, then give up. Shocking from mid-window would leave
+        pre-shock bars inside that reach and exercise the *suspension* path,
+        which is tested at the engine level and is not what this scenario is
+        for.
         """
         instrument_id = self.context.instrument_ids[0]
         shock_date = self.context.signal_dates[len(self.context.signal_dates) // 2]
         shocked = ShockedMarketDataProvider(
             self.context.market_data,
-            [MarketShock(ShockType.UNAVAILABLE, shock_date, None, 0.0, frozenset({instrument_id}))],
+            [
+                MarketShock(
+                    ShockType.UNAVAILABLE, dt.date.min, None, 0.0, frozenset({instrument_id})
+                )
+            ],
         )
         engine = self.context.engine(market_data=shocked)
-        # Query well after the shock started -- _last_close looks back a
-        # bounded 15 days, so querying exactly on shock_date would still
-        # find pre-shock bars within that window and not exercise the
-        # failure path at all.
         query_date = self.context.calendar.sessions_offset(shock_date, 20)
         failed_closed = False
         detail = "mark-to-market did not raise for missing data (unexpected)"
