@@ -8,6 +8,7 @@ properties specifically are covered in
 from __future__ import annotations
 
 import datetime as dt
+import math
 from pathlib import Path
 
 import pytest
@@ -381,3 +382,74 @@ def test_the_shuffled_control_is_deterministic_given_the_same_seed(tmp_path: Pat
     for day in first:
         assert first[day].target_gross_exposure == second[day].target_gross_exposure
         assert first[day].regime == second[day].regime
+
+
+# --------------------------------------------------------------------------
+# Folds must tile, not overlap
+# --------------------------------------------------------------------------
+
+
+def test_overlapping_test_windows_are_refused_at_construction(tmp_path: Path) -> None:
+    """Regression: this silently corrupted every chained result.
+
+    With test_window_sessions=126 and roll_step_sessions=63, consecutive
+    folds overlapped by 63 sessions. Each fold's equity curve is concatenated
+    into one series, so half the out-of-sample period was counted twice and
+    every fold seam appeared as a return no market delivered -- 4,030 rows
+    over 2,078 distinct dates, ~100% annualised volatility, and buy-and-hold
+    showing a 50% loss across a period the market roughly doubled in.
+
+    It is refused rather than de-duplicated because the fold-to-fold chain
+    requires each fold to begin where the previous one ended, and overlapping
+    windows have no such point.
+    """
+    env = Environment(n_days=150)
+
+    with pytest.raises(WalkForwardError, match="would overlap"):
+        env.validator(
+            tmp_path,
+            config=type(env.backtest_cfg).model_validate(
+                {
+                    **env.backtest_cfg.model_dump(),
+                    "training_window_sessions": 50,
+                    "test_window_sessions": 20,
+                    "roll_step_sessions": 10,
+                }
+            ),
+        )
+
+
+def test_equal_window_and_step_tile_the_period_exactly(tmp_path: Path) -> None:
+    """The property the refusal protects: every out-of-sample session belongs
+    to exactly one fold, so concatenating folds yields a curve with no
+    repeated dates."""
+    env = Environment(n_days=150)
+    validator = env.validator(
+        tmp_path,
+        config=type(env.backtest_cfg).model_validate(
+            {
+                **env.backtest_cfg.model_dump(),
+                "training_window_sessions": 50,
+                "test_window_sessions": 10,
+                "roll_step_sessions": 10,
+            }
+        ),
+    )
+
+    folds = validator.generate_folds(env.dates[0], env.dates[-1])
+
+    for earlier, later in zip(folds, folds[1:], strict=False):
+        assert earlier[3] < later[2], "a fold's test window must end before the next begins"
+
+
+def test_percent_invested_is_reported_not_nan(tmp_path: Path) -> None:
+    """cash_history was never threaded through, so pct_invested and pct_cash
+    came back nan on every walk-forward run -- the one figure showing how
+    much of the period was actually spent in the market."""
+    env = Environment(n_days=90, n_stocks=4)
+    validator = _single_fold_validator(env, tmp_path)
+
+    results = validator.run_all_strategies(env.dates[0], env.dates[-1], strategies=[BUY_AND_HOLD])
+
+    assert not math.isnan(results[BUY_AND_HOLD].pct_invested)
+    assert 0.0 <= results[BUY_AND_HOLD].pct_invested <= 1.0

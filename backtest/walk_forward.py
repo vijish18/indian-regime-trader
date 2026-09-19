@@ -142,6 +142,33 @@ class WalkForwardValidator:
         random_seed: int = 7,
         feature_warmup_buffer_days: int = 500,
     ) -> None:
+        if config.roll_step_sessions < config.test_window_sessions:
+            # Overlapping test windows silently corrupt every chained result
+            # this class produces. Each fold's curve is concatenated into one
+            # series, so an overlap means the same sessions appear twice and
+            # each seam registers as a return that no market delivered.
+            #
+            # Measured on the 756/126/63 configuration this replaced: 4,030
+            # equity rows over 2,078 distinct dates, and the largest "moves"
+            # in the whole backtest were same-date to same-date jumps of
+            # +29.5%. That produced 100% annualised volatility and turned a
+            # market that roughly doubled into buy-and-hold losing half its
+            # value -- a result wrong enough to notice, which is the only
+            # reason it was caught.
+            #
+            # Refused here rather than fixed by de-duplicating, because the
+            # honest fold-to-fold chain requires each fold to start where the
+            # previous one ended, and overlapping windows have no such point.
+            raise WalkForwardError(
+                f"roll_step_sessions={config.roll_step_sessions} is smaller than "
+                f"test_window_sessions={config.test_window_sessions}, so consecutive "
+                "folds would overlap by "
+                f"{config.test_window_sessions - config.roll_step_sessions} sessions. "
+                "A chained equity curve cannot be built from overlapping windows: the "
+                "overlapped sessions would be counted twice and every fold boundary "
+                "would appear as a spurious return. Set roll_step_sessions >= "
+                "test_window_sessions (equal tiles the out-of-sample period exactly)."
+            )
         self.config = config
         self.calendar = calendar
         self.market_data = market_data
@@ -498,6 +525,7 @@ class WalkForwardValidator:
 
         equity_curves: dict[str, list[pd.Series]] = {name: [] for name in selected}
         trade_logs: dict[str, list[pd.DataFrame]] = {name: [] for name in selected}
+        cash_curves: dict[str, list[pd.Series]] = {name: [] for name in selected}
         running_equity: dict[str, float] = dict.fromkeys(selected, self.initial_equity)
 
         for fold_index, (train_start, train_end, test_start, test_end) in enumerate(folds):
@@ -539,6 +567,7 @@ class WalkForwardValidator:
                 running_equity[name] = float(result.equity_curve.iloc[-1])
                 equity_curves[name].append(result.equity_curve)
                 trade_logs[name].append(result.trade_log)
+                cash_curves[name].append(result.cash_history)
 
             if progress is not None:
                 equity = "  ".join(f"{name}={running_equity[name]:,.0f}" for name in selected)
@@ -557,5 +586,9 @@ class WalkForwardValidator:
             # cost the hours it just took.
             if on_series is not None:
                 on_series(name, curve, trades)
-            reports[name] = self.performance_calculator.compute(curve, trades)
+            # Cash too, or pct_invested and pct_cash report nan -- honest,
+            # but it means the one figure showing how much of the run was
+            # actually spent in the market is permanently missing.
+            cash = pd.concat(cash_curves[name]).sort_index()
+            reports[name] = self.performance_calculator.compute(curve, trades, cash)
         return reports

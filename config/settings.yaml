@@ -224,7 +224,21 @@ compliance:
 
 backtest:
   training_window_sessions: 756
-  test_window_sessions: 126
+  # Test window EQUALS the roll step, so folds tile the out-of-sample period
+  # exactly once. They used to be 126 and 63, which overlapped by 63 sessions
+  # -- and because each fold's equity curve is concatenated into one series,
+  # that counted half the period twice and turned every fold boundary into a
+  # return no market delivered. Measured: 4,030 equity rows over 2,078
+  # distinct dates, ~100% annualised volatility, and buy-and-hold showing a
+  # 50% loss across a period the market roughly doubled in.
+  #
+  # 63 also matches hmm.retrain_interval_sessions, so each model is judged
+  # over exactly the sessions it is in force for, rather than over a window
+  # that outlives its own replacement. Coverage is unchanged at 2,079
+  # sessions; fold count goes 32 -> 33.
+  #
+  # WalkForwardValidator refuses to construct if these overlap again.
+  test_window_sessions: 63
   roll_step_sessions: 63
   include_indian_costs: true
   include_slippage: true
