@@ -40,20 +40,16 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from monitoring.alert_channels import (
+    SUPPORTED_CHANNELS,
+    AlertChannel,
+    deliver_to_all,
+)
 from monitoring.health import ComponentHealth
 from monitoring.snapshot import MonitoringSnapshot
 from risk.circuit_breaker import CircuitState
 
 logger = logging.getLogger(__name__)
-
-SUPPORTED_CHANNELS: frozenset[str] = frozenset({"log"})
-"""Delivery channels this system can actually deliver to today. Alerts are
-*always* logged (that is the audit trail, not a channel); anything listed
-in ``MonitoringConfig.alert_channels`` is additional delivery on top. An
-unrecognized channel name is refused at construction rather than silently
-dropped -- a channel an operator believes is configured but that quietly
-delivers nothing is worse than no alerting at all."""
-
 
 class AlertSeverity(StrEnum):
     INFO = "info"
@@ -348,6 +344,7 @@ class AlertManager:
         sink: Callable[[Alert], None] | None = None,
         history_limit: int = 500,
         clock: Callable[[], dt.datetime] | None = None,
+        delivery_channels: list[AlertChannel] | None = None,
     ) -> None:
         unsupported = sorted(set(channels) - SUPPORTED_CHANNELS)
         if unsupported:
@@ -357,6 +354,16 @@ class AlertManager:
                 "monitoring.alert_channels or implement the channel before configuring it."
             )
         self.channels = list(channels)
+        self._delivery_channels = delivery_channels
+        """Constructed channels. ``None`` means log-only, which is what the
+        name list alone used to imply; the composition root builds these
+        with ``alert_channels.build_channels`` so a deployment that claims
+        it can page fails at startup rather than during the incident."""
+
+        self.failed_deliveries = 0
+        """Alerts that reached no channel at all. Not the same as an alert
+        that was never raised, and a dashboard showing zero pages should be
+        able to tell those apart."""
         self.drawdown_alert_pct = drawdown_alert_pct
         self.cash_tolerance_pct = cash_tolerance_pct
         self._clock: Callable[[], dt.datetime] = clock or (lambda: dt.datetime.now(dt.UTC))
@@ -421,6 +428,20 @@ class AlertManager:
                 }
             },
         )
+        # Logged first, then paged. If delivery fails the information still
+        # exists on disk; if the order were reversed, a webhook that hung
+        # would delay the only durable record of the alert.
+        if self._delivery_channels:
+            delivered = deliver_to_all(
+                self._delivery_channels,
+                message=message,
+                severity=alert.severity.value,
+                alert_type=alert.alert_type.value,
+                subject=alert.subject,
+            )
+            if delivered == 0:
+                self.failed_deliveries += 1
+
         if self._sink is not None:
             self._sink(alert)
 

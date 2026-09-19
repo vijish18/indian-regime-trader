@@ -424,5 +424,20 @@ properties:
       heartbeat_interval_seconds: { type: integer, minimum: 1 }
       alert_channels:
         type: array
-        items: { type: string }
+        items: { type: string, enum: [log, webhook] }
       alert_cooldown_seconds: { type: integer, minimum: 1 }
+
+      # Name of the environment variable holding the webhook URL, never the
+      # URL. A pattern rather than a free string so a URL pasted here is
+      # rejected outright instead of being committed as a credential.
+      alert_webhook_url_env:
+        type: string
+        pattern: "^[A-Z][A-Z0-9_]*$"
+      alert_webhook_message_field: { type: string, minLength: 1 }
+      alert_webhook_static_fields:
+        type: object
+        additionalProperties: { type: string }
+      alert_webhook_timeout_seconds:
+        type: number
+        exclusiveMinimum: 0
+        maximum: 60

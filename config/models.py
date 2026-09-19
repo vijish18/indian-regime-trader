@@ -661,6 +661,27 @@ class MonitoringConfig(BaseModel):
 
     heartbeat_interval_seconds: int = Field(ge=1)
     alert_channels: list[str]
+
+    alert_webhook_url_env: str = "ALERT_WEBHOOK_URL"
+    """Name of the environment variable holding the webhook URL -- never the
+    URL. A Slack or Telegram webhook URL is a credential: anyone holding it
+    can post as you, and Telegram's embeds the bot token outright. Keeping
+    only the variable *name* here is what lets this file stay in Git."""
+
+    alert_webhook_message_field: str = "text"
+    """Which JSON key carries the message. ``text`` suits Slack, Telegram,
+    Google Chat and ntfy; Discord wants ``content``."""
+
+    alert_webhook_static_fields: dict[str, str] = Field(default_factory=dict)
+    """Extra JSON fields sent with every alert, for services that need
+    routing information -- Telegram's ``chat_id``, for instance. Do not put
+    a secret here; this file is committed."""
+
+    alert_webhook_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    """Bounds how long a hanging pager can delay a trading cycle. Delivery is
+    synchronous on purpose -- for the one process whose job is to stop
+    safely, knowing the page arrived is worth the seconds -- so this is the
+    control that keeps that from becoming unbounded."""
     alert_cooldown_seconds: int = Field(ge=1)
     """Minimum gap between two alerts of the same kind about the same
     subject (``monitoring.alerts.AlertManager``'s rate limit). A condition

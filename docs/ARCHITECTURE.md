@@ -1924,11 +1924,47 @@ through reports how many it stands for. The interval is
 this phase adds.
 
 **An unconfigured channel fails closed.** `SUPPORTED_CHANNELS` is
-`{"log"}` today, and `AlertManager` refuses to construct if
+`{"log", "webhook"}`, and `build_channels` refuses to construct if
 `alert_channels` names anything else. A channel an operator believes is
 configured but that quietly delivers nothing is worse than no alerting at
 all, so the gap is a startup error rather than a silent no-op. Alerts are
 always logged regardless — that is the audit trail, not a channel.
+
+**Getting an alert off the machine.** For a long time `log` was the only
+channel, which meant a system that halted at 09:20 had told nobody: a log is
+a record for afterwards, and reading it requires already knowing to look,
+which is the one thing an alert exists to tell you. `monitoring/alert_channels.py`
+adds a single generic `webhook` rather than a family of vendor integrations —
+Slack, Discord, Telegram, Google Chat, ntfy and PagerDuty all accept an HTTPS
+POST carrying JSON and differ only in which key holds the text and what else
+must ride along, so the message key and any extra fields are configuration and
+one implementation reaches all of them.
+
+Three properties matter more than the transport:
+
+- **The URL never appears in configuration.** Anyone holding a Slack or
+  Telegram webhook URL can post as you, and a Telegram URL embeds the bot
+  token outright. `settings.yaml` names an *environment variable*; the schema
+  enforces `^[A-Z][A-Z0-9_]*$` on that field, so a URL pasted there is
+  rejected rather than committed. Every log line redacts the URL to scheme,
+  host and path depth, because a delivery failure is exactly when something
+  would otherwise print it.
+- **A failing pager cannot take down the trader.** Delivery errors are logged
+  and swallowed per channel; the alert is already on disk, so only its
+  delivery is lost. `AlertManager.failed_deliveries` counts alerts that
+  reached no channel at all, so "nothing was wrong" and "everything is
+  broken" do not both read as zero pages.
+- **Delivery is synchronous, bounded by a timeout.** A background thread
+  would keep the loop moving at the cost of never knowing whether the page
+  arrived; for the one process whose job is to stop safely, knowing is worth
+  the seconds, and `alert_webhook_timeout_seconds` is what keeps that from
+  becoming unbounded.
+
+Channels are built in the composition root, not inside `AlertManager` — the
+manager decides what is worth alerting on and how often, and should not also
+be reading environment variables. That placement is also why a deployment
+that claims it can page discovers a missing variable at startup rather than
+during the first incident that needs it.
 
 **Wiring into the orchestrator is optional.** `Orchestrator` takes a
 `snapshot_collector` and an `alert_manager`, both defaulting to `None`;

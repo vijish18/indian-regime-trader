@@ -49,6 +49,7 @@ from execution.position_tracker import PositionTracker
 from execution.reconciliation import ReconciliationEngine
 from execution.startup import StartupSequence
 from execution.system_state import SystemStateStore
+from monitoring.alert_channels import AlertChannel, build_channels
 from monitoring.alerts import AlertManager
 from monitoring.health import HealthChecker
 from monitoring.snapshot import SnapshotCollector
@@ -70,6 +71,26 @@ from validation.synthetic_market import (
 )
 
 STRATEGY_VERSION = "validation-phase-21"
+
+
+def _alert_channels(settings: Settings) -> list[AlertChannel]:
+    """Build the configured delivery channels, refusing at startup if one is
+    claimed but not usable.
+
+    Constructed here, in the composition root, rather than inside
+    ``AlertManager``: the manager decides *what* is worth alerting on and
+    how often, and should not also be reading environment variables. This
+    is also the reason a misconfigured webhook surfaces now rather than
+    during the first incident that needs it.
+    """
+    monitoring = settings.monitoring
+    return build_channels(
+        list(monitoring.alert_channels),
+        webhook_url_env=monitoring.alert_webhook_url_env,
+        webhook_message_field=monitoring.alert_webhook_message_field,
+        webhook_static_fields=dict(monitoring.alert_webhook_static_fields),
+        webhook_timeout_seconds=monitoring.alert_webhook_timeout_seconds,
+    )
 
 
 class _Clock:
@@ -168,6 +189,7 @@ class ValidationEnvironment:
             cooldown_seconds=self.settings.monitoring.alert_cooldown_seconds,
             drawdown_alert_pct=self.settings.risk.peak_to_trough_drawdown_halt_pct * 0.5,
             clock=self.clock,
+            delivery_channels=_alert_channels(self.settings),
         )
         self.snapshot_collector = SnapshotCollector(
             broker=self.broker,
@@ -347,6 +369,7 @@ def build_validation_environment(
         cooldown_seconds=settings.monitoring.alert_cooldown_seconds,
         drawdown_alert_pct=settings.risk.peak_to_trough_drawdown_halt_pct * 0.5,
         clock=clock,
+        delivery_channels=_alert_channels(settings),
     )
 
     env = ValidationEnvironment(

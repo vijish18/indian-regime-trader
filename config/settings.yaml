@@ -258,5 +258,33 @@ logging:
 
 monitoring:
   heartbeat_interval_seconds: 60
-  alert_channels: []            # additional delivery channels; alerts are always logged
   alert_cooldown_seconds: 300   # same alert, same subject: at most once per 5 minutes
+
+  # Delivery channels beyond the log. Alerts are ALWAYS written to the log --
+  # that is the audit trail, and it is what makes a delivery failure
+  # survivable. But a log is a record for afterwards, not a notification:
+  # reading it requires already knowing to look, which is the one thing an
+  # alert exists to tell you. Empty here means a halt at 09:20 reaches nobody.
+  #
+  # Add "webhook" and set ALERT_WEBHOOK_URL in the environment to page.
+  alert_channels: []
+
+  # The URL itself is never written here. A Slack or Telegram webhook URL is
+  # a credential -- anyone holding it can post as you, and Telegram's embeds
+  # the bot token outright -- so this names the environment variable that
+  # carries it, and the value lives in deploy/app.env, which is gitignored.
+  alert_webhook_url_env: ALERT_WEBHOOK_URL
+
+  # Which JSON key carries the message. Suits Slack, Telegram, Google Chat
+  # and ntfy; Discord wants "content".
+  alert_webhook_message_field: text
+
+  # Extra JSON fields sent with every alert, for services that need routing
+  # information -- Telegram needs {"chat_id": "..."}. Do NOT put a secret
+  # here; this file is committed.
+  alert_webhook_static_fields: {}
+
+  # Bounds how long a hanging pager can delay a trading cycle. Delivery is
+  # synchronous on purpose: for the one process whose job is to stop safely,
+  # knowing the page arrived is worth the seconds.
+  alert_webhook_timeout_seconds: 10.0
