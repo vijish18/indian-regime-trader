@@ -205,6 +205,17 @@ def hmm_model() -> dict[str, Any]:
                 "persistence": stat.self_transition_probability,
             }
         )
+    # Volatility order, which is the order the labels were assigned in:
+    # assign_labels ranks states by measured volatility and spreads them
+    # across calm/normal/elevated/crisis. Presenting them by state_id hides
+    # that and puts crisis in the middle of the row.
+    #
+    # It also makes the collision legible. With five states and four labels
+    # two states share a name -- here s2 (+49.8% expected return) and s4
+    # (-0.06%) are both "elevated" -- and sorted by volatility they sit next
+    # to each other where the difference is obvious, rather than looking like
+    # one thing mentioned twice.
+    states.sort(key=lambda s: s["expected_volatility"])
     training = model.training_result
     return {
         "available": True,
@@ -221,6 +232,68 @@ def hmm_model() -> dict[str, Any]:
         "aic": float(training.aic),
         "converged": bool(training.converged),
         "iterations": int(training.iterations),
+    }
+
+
+def stock_selection(as_of_text: str | None, frame_cache: int = 400) -> dict[str, Any]:
+    """What the model would hold, and why each name earned its place.
+
+    This is the honest answer to "which stocks does the model predict". It
+    predicts none: there is no price forecast anywhere in this system. What
+    it produces is a *ranking* -- a composite of momentum, trend persistence,
+    relative strength and (negated) volatility, each standardised
+    cross-sectionally against the rest of that day's candidates -- and a
+    target weight derived from it. So the factor z-scores travel with every
+    row: a rank without them is an opinion, and with them it is auditable.
+
+    Running the real selector rather than reading a cache, because the
+    selector is the thing under inspection. It takes a couple of minutes.
+    """
+    if as_of_text is None:
+        return {"available": False, "reason": "not requested"}
+    try:
+        as_of = dt.date.fromisoformat(as_of_text)
+        from scripts.run_walk_forward import build_validator
+
+        validator = build_validator(
+            snapshot_date=as_of,
+            circuit_breaker_dir=REPO_ROOT / "state" / "precheck",
+            frame_cache=frame_cache,
+        )
+        scores = validator.engine.stock_selector.select(as_of)
+    except Exception as exc:  # noqa: BLE001 - reported, never faked
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    picks = []
+    for score in scores:
+        raw, std = score.raw_factors, score.standardized_factors
+        picks.append(
+            {
+                "rank": score.rank,
+                "symbol": score.symbol,
+                "instrument_id": score.instrument_id,
+                "score": float(score.score),
+                "z": {
+                    "momentum": float(std.momentum),
+                    "trend": float(std.trend_persistence),
+                    "relative_strength": float(std.relative_strength),
+                    "volatility": float(std.volatility),
+                },
+                "raw": {
+                    "momentum": float(raw.momentum),
+                    "volatility": float(raw.volatility),
+                },
+            }
+        )
+    return {
+        "available": True,
+        "as_of": as_of.isoformat(),
+        "count": len(picks),
+        "picks": picks,
+        "note": (
+            "A ranking, not a price forecast. This system produces target weights; "
+            "nothing in it predicts where a stock will trade."
+        ),
     }
 
 
@@ -281,6 +354,11 @@ def main(argv: list[str]) -> int:
         "--regime-cache", type=Path, default=REPO_ROOT / "state" / "fold_regimes.json"
     )
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "state" / "dashboard_data.json")
+    parser.add_argument(
+        "--selection-as-of",
+        default=None,
+        help="run the real stock selector for this date (YYYY-MM-DD); takes a few minutes",
+    )
     args = parser.parse_args(argv[1:])
 
     data: dict[str, Any] = {
@@ -292,6 +370,7 @@ def main(argv: list[str]) -> int:
         "equity_curves": equity_curves(args.series_dir),
         "regimes": regime_distribution(args.regime_cache),
         "hmm": hmm_model(),
+        "selection": stock_selection(args.selection_as_of),
         "broker": broker_account(),
     }
 
@@ -304,6 +383,8 @@ def main(argv: list[str]) -> int:
           f"{prov['corporate_actions']:,} corporate actions")
     print(f"  universe samples : {len(data['universe_growth'])}")
     print(f"  cost eras        : {len(data['cost_eras'])}")
+    sel = data["selection"]
+    print(f"  stock selection  : {sel['count'] if sel.get('available') else sel.get('reason')}")
     print(f"  equity curves    : {len(data['equity_curves'])}")
     strategies = data["strategies"]
     if strategies["available"]:
