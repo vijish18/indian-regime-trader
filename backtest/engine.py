@@ -248,6 +248,8 @@ class BacktestEngine:
         rolling_drawdown_window_days: int = 5,
         max_fill_search_days: int = 5,
         min_rebalance_weight_delta: float = 0.0,
+        stale_mark_lookback_days: int = 400,
+        stale_mark_warn_days: int = 30,
     ) -> None:
         self.calendar = calendar
         self.market_data = market_data
@@ -262,6 +264,17 @@ class BacktestEngine:
         self.min_correlation_observations = min_correlation_observations
         self.rolling_drawdown_window_days = rolling_drawdown_window_days
         self.max_fill_search_days = max_fill_search_days
+        self.stale_mark_lookback_days = stale_mark_lookback_days
+        """How far back :meth:`_last_close` will look for a traded price when
+        the ordinary window finds none. Covers a suspension, which in Indian
+        cash equity routinely runs to months. Valuation only."""
+
+        self.stale_mark_warn_days = stale_mark_warn_days
+        self.stale_marks: dict[str, int] = {}
+        """instrument -> worst mark age in days, for marks older than
+        ``stale_mark_warn_days``. Empty for a run that never valued a
+        suspended holding, which is the normal case."""
+
         self.min_rebalance_weight_delta = min_rebalance_weight_delta
         """A position whose weight would move by less than this is left
         untouched (reverted to its current weight, or never opened) rather
@@ -416,18 +429,54 @@ class BacktestEngine:
     # -- pricing / market facts --------------------------------------------
 
     def _last_close(self, instrument_id: str, as_of: dt.date, lookback_days: int = 15) -> float:
-        start = as_of - dt.timedelta(days=lookback_days)
-        try:
-            bars = self.market_data.get_equity_bars(
-                instrument_id, start, as_of, price_basis=PriceBasis.ADJUSTED
-            )
-        except DataNotAvailableError as exc:
-            raise BacktestEngineError(
-                f"no price data for {instrument_id} on or before {as_of}"
-            ) from exc
-        if not bars:
-            raise BacktestEngineError(f"no price data for {instrument_id} on or before {as_of}")
-        return float(bars[-1].close)
+        """The most recent traded close, for marking a holding to market.
+
+        Valuation only -- execution prices come from :meth:`_next_open`. That
+        distinction is what makes the fallback below correct rather than
+        convenient: a stale price here misstates reported equity, but it can
+        never be mistaken for a price something traded at.
+
+        **Why this searches twice.** An Indian equity can stop trading for
+        months while still being held: suspension, a surveillance move, or
+        repeated circuit-limit days with no crossing trades. ADANITRANS last
+        traded 2021-06-08 and next traded 2021-09-13, and the 15-day window
+        missed 2021-06-24 by a single day -- which killed four 32-fold runs
+        eleven folds in.
+
+        Refusing to value a held position is the wrong answer to that. The
+        position exists, the portfolio has to be worth something, and the
+        convention every fund and regulator uses for a suspended holding is
+        its last traded price until a fair-value adjustment. So the narrow
+        window stays as the fast path for the overwhelmingly common case, and
+        a wide one catches suspensions. Only a genuine absence of any price
+        ever still raises.
+
+        Marks older than ``stale_mark_warn_days`` are counted in
+        ``stale_marks`` so a run that leaned on this is auditable afterwards
+        rather than silently equivalent to one that did not.
+        """
+        for window in (lookback_days, self.stale_mark_lookback_days):
+            if window < lookback_days:
+                continue
+            try:
+                bars = self.market_data.get_equity_bars(
+                    instrument_id,
+                    as_of - dt.timedelta(days=window),
+                    as_of,
+                    price_basis=PriceBasis.ADJUSTED,
+                )
+            except DataNotAvailableError:
+                continue
+            if not bars:
+                continue
+            age = (as_of - bars[-1].session_date).days
+            if age > self.stale_mark_warn_days:
+                self.stale_marks[instrument_id] = max(
+                    self.stale_marks.get(instrument_id, 0), age
+                )
+            return float(bars[-1].close)
+
+        raise BacktestEngineError(f"no price data for {instrument_id} on or before {as_of}")
 
     def _next_open(self, instrument_id: str, execution_date: dt.date) -> float | None:
         """The execution-date open, or the first available session's open

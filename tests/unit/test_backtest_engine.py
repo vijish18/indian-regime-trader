@@ -481,3 +481,97 @@ def test_engine_with_a_rebalance_threshold_produces_fewer_or_equal_fills(
     result_thresholded = thresholded.run("thresholded", targets, dates, 1_000_000.0)
 
     assert len(result_thresholded.fills) <= len(result_none.fills)
+
+
+# ---------------------------------------------------------------------------
+# Marking a suspended holding
+# ---------------------------------------------------------------------------
+
+
+class _SuspendedMarketData:
+    """Bars that stop dead, the way a suspended Indian equity's do."""
+
+    def __init__(self, last_traded: dt.date, close: float) -> None:
+        self.last_traded = last_traded
+        self.close = close
+        self.windows: list[int] = []
+
+    def get_equity_bars(
+        self, instrument_id: str, start: dt.date, end: dt.date, **_: object
+    ) -> list[object]:
+        self.windows.append((end - start).days)
+        if start > self.last_traded:
+            return []
+
+        class _Bar:
+            session_date = self.last_traded
+            close = self.close
+
+        return [_Bar()]
+
+
+def _engine_with(market_data: object, tmp_path: Path) -> BacktestEngine:
+    env = Environment(n_days=40)
+    engine = env.engine(tmp_path)
+    engine.market_data = market_data  # type: ignore[assignment]
+    return engine
+
+
+def test_a_holding_suspended_past_the_narrow_window_is_still_marked(tmp_path: Path) -> None:
+    """Regression: this killed four 32-fold runs eleven folds in.
+
+    ADANITRANS last traded 2021-06-08 and next traded 2021-09-13. Marking
+    the portfolio on 2021-06-24 missed the 15-day window by one day, and the
+    engine raised rather than valuing a position it was still holding.
+
+    Refusing to value a held position is the wrong answer: the position
+    exists, the portfolio is worth something, and last-traded-price is the
+    convention for a suspended holding. Execution prices are unaffected --
+    they come from _next_open, so a stale mark can never be mistaken for a
+    price something traded at.
+    """
+    data = _SuspendedMarketData(dt.date(2021, 6, 8), 1592.6)
+    engine = _engine_with(data, tmp_path)
+
+    price = engine._last_close("NSE:ADANITRANS", dt.date(2021, 6, 24))
+
+    assert price == pytest.approx(1592.6)
+    assert max(data.windows) >= 400, "the wide fallback window must actually be tried"
+
+
+def test_a_months_old_mark_is_recorded_rather_than_passing_unnoticed(tmp_path: Path) -> None:
+    """A run that leaned on a months-old price is not equivalent to one that
+    did not, so it has to be auditable afterwards.
+
+    ADANITRANS stayed suspended until 2021-09-13, so the marks got steadily
+    older through that window; the worst age is what gets kept.
+    """
+    data = _SuspendedMarketData(dt.date(2021, 6, 8), 1592.6)
+    engine = _engine_with(data, tmp_path)
+
+    engine._last_close("NSE:ADANITRANS", dt.date(2021, 9, 6))
+
+    assert engine.stale_marks == {"NSE:ADANITRANS": 90}
+
+
+def test_a_mark_inside_the_warn_threshold_is_not_flagged(tmp_path: Path) -> None:
+    """The common case must stay clean or the record becomes noise nobody
+    reads. Sixteen days without a trade is a thin stock, not an incident --
+    and it is exactly the gap that broke the run, so this pins that the fix
+    is about valuing the position, not about raising an alarm."""
+    data = _SuspendedMarketData(dt.date(2021, 6, 8), 1592.6)
+    engine = _engine_with(data, tmp_path)
+
+    engine._last_close("NSE:ADANITRANS", dt.date(2021, 6, 24))
+
+    assert engine.stale_marks == {}
+
+
+def test_an_instrument_with_no_price_at_all_still_raises(tmp_path: Path) -> None:
+    """Widening the search must not turn into never failing. An instrument
+    that never traded is a real error, not a stale mark."""
+    data = _SuspendedMarketData(dt.date(1990, 1, 1), 1.0)
+    engine = _engine_with(data, tmp_path)
+
+    with pytest.raises(BacktestEngineError, match="no price data"):
+        engine._last_close("NSE:NEVERTRADED", dt.date(2021, 6, 24))
