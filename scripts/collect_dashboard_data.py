@@ -176,6 +176,91 @@ def equity_curves(series_dir: Path | None, sample_every: int = 5) -> dict[str, A
     return out
 
 
+def hmm_model() -> dict[str, Any]:
+    """The approved model's internals, for the regime panel.
+
+    The transition matrix and the per-state statistics are what the HMM
+    actually *is* -- a regime label is a name someone chose, but the measured
+    volatility, return and persistence behind it are the things the risk
+    policy consumes. Showing the label without them would put the one part a
+    human picked on screen and hide the parts the machine measured.
+    """
+    try:
+        from core.regime.model_registry import ModelRegistry
+
+        artifact = ModelRegistry(REPO_ROOT / "model_registry").load_current_approved()
+    except Exception as exc:  # noqa: BLE001 - absent registry is a normal state here
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    model = artifact.model
+    states = []
+    for state_id in range(model.n_states):
+        stat = model.statistics_for(state_id)
+        states.append(
+            {
+                "state_id": state_id,
+                "label": stat.label.value,
+                "expected_volatility": stat.expected_volatility,
+                "expected_return": stat.expected_return,
+                "persistence": stat.self_transition_probability,
+            }
+        )
+    training = model.training_result
+    return {
+        "available": True,
+        "model_id": artifact.model_id,
+        "created_at": artifact.created_at.isoformat(timespec="seconds"),
+        "feature_version": artifact.feature_version,
+        "n_states": model.n_states,
+        "features": list(training.feature_columns),
+        "states": states,
+        "transition_matrix": [
+            [float(v) for v in row] for row in model.parameters.transition_matrix
+        ],
+        "bic": float(training.bic),
+        "aic": float(training.aic),
+        "converged": bool(training.converged),
+        "iterations": int(training.iterations),
+    }
+
+
+def broker_account() -> dict[str, Any]:
+    """Zerodha session state, reported rather than assumed.
+
+    Two facts have to travel together here or the panel misleads. The access
+    token is valid for one trading day, so a stale file is the normal state
+    rather than an error. And this system has never placed an order: live
+    trading has been disabled throughout, so whatever sits in that account is
+    the operator's own investing and must never be rendered as though the
+    strategy produced it.
+    """
+    path = REPO_ROOT / "state" / "kite_session.json"
+    if not path.is_file():
+        return {"session": "absent", "traded_live": False}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"session": "unreadable", "reason": str(exc), "traded_live": False}
+
+    expires = str(payload.get("expires_at", ""))
+    expired = True
+    try:
+        expired = dt.datetime.fromisoformat(expires) <= dt.datetime.now(dt.UTC)
+    except ValueError:
+        pass
+    return {
+        "session": "expired" if expired else "valid",
+        "obtained_at": str(payload.get("obtained_at", "")),
+        "expires_at": expires,
+        # Deliberately not the token, and not the api_key.
+        "traded_live": False,
+        "note": (
+            "This system has never placed an order. Holdings in this account, if any, "
+            "are manual investments and are not strategy performance."
+        ),
+    }
+
+
 def regime_distribution(cache: Path) -> dict[str, Any]:
     """Per-fold out-of-sample regime mix, if it has been collected.
 
@@ -206,6 +291,8 @@ def main(argv: list[str]) -> int:
         "strategies": strategy_results(args.json_dir),
         "equity_curves": equity_curves(args.series_dir),
         "regimes": regime_distribution(args.regime_cache),
+        "hmm": hmm_model(),
+        "broker": broker_account(),
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

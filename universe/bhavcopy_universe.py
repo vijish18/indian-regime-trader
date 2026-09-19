@@ -50,6 +50,36 @@ is: a benchmark for relative strength, not the universe.
 """
 
 
+COMPANY_EQUITY_ISIN_PREFIX = "INE"
+"""Indian ISINs encode instrument class in the third character, and this
+system trades company shares only.
+
+    INE...  equity shares issued by a company        2,087 in the store
+    INF...  units of a mutual fund scheme             117
+    IN9...  other                                       1
+
+NSE publishes ETFs in the same ``EQ`` series as ordinary shares, so a series
+filter alone lets them through -- and they do not merely add noise, they
+dominate. Ranked on 2026-09-15, eight of the top ten selections were liquid
+money-market ETFs (LIQGRWBEES, LIQUID1, CASHIETF, SBILIQETF and friends),
+because a fund whose NAV rises monotonically at ~6% a year with almost no
+variance posts a risk-adjusted momentum z-score near +9 that no real company
+can approach. The portfolio was being filled with cash funds that a
+stock-selection strategy has no business holding, and churning them at full
+turnover against 20 bps of round-trip cost.
+
+Index ETFs are excluded by the same rule and for the same reason: holding
+NIFTYBEES is not stock selection. If this system ever wants index exposure
+as an instrument, that is a deliberate decision with its own sizing, not
+something the momentum factor should discover by accident.
+"""
+
+
+def is_company_equity(isin: str) -> bool:
+    """Whether an ISIN denotes company shares rather than fund units."""
+    return isin.startswith(COMPANY_EQUITY_ISIN_PREFIX)
+
+
 @dataclass(frozen=True, slots=True)
 class EligibilityRules:
     """What makes an instrument tradable by this system on a given day."""
@@ -190,7 +220,9 @@ def stream_snapshots(
                 "earlier session's window, which is look-ahead."
             )
         previous_date = session_date
-        traded_today = {row.isin: row for row in rows if row.isin}
+        traded_today = {
+            row.isin: row for row in rows if row.isin and is_company_equity(row.isin)
+        }
 
         # Advance every instrument seen so far, not only today's, so that
         # a name which stops trading decays out of the window instead of

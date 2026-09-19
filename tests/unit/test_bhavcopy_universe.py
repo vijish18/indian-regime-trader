@@ -23,6 +23,7 @@ from universe.bhavcopy_universe import (
     DERIVED_INDEX_SYMBOL,
     EligibilityRules,
     build_snapshots,
+    is_company_equity,
     snapshots_to_membership,
 )
 
@@ -314,3 +315,45 @@ def test_streaming_memory_does_not_grow_with_history_length() -> None:
     assert len(snapshots) == 200
     # Still eligible at the end, i.e. the window kept working as it rolled.
     assert "NSE:ACME" in snapshots[-1].eligible
+
+
+# ---------------------------------------------------------------------------
+# Company shares only
+# ---------------------------------------------------------------------------
+
+
+def test_mutual_fund_units_are_excluded_from_the_universe() -> None:
+    """Regression: liquid ETFs were taking over the portfolio.
+
+    NSE publishes ETFs in the same EQ series as ordinary shares, so a series
+    filter alone lets them through. They do not merely add noise, they
+    dominate: ranked on real data for 2026-09-15, eight of the top ten
+    selections were liquid money-market ETFs, because a fund whose NAV rises
+    monotonically at ~6% a year with almost no variance posts a
+    risk-adjusted momentum z-score near +9 that no operating company can
+    approach.
+
+    Indian ISINs carry the distinction: INE is company equity, INF is units
+    of a mutual fund scheme.
+    """
+    days = _sessions(30)
+    rows = {
+        day: (
+            _row("RELIANCE", day, isin="INE002A01018", turnover=CRORE * 100),
+            _row("LIQGRWBEES", day, isin="INF204KC1FU1", turnover=CRORE * 100),
+            _row("CASHIETF", day, isin="INF109K1A021", turnover=CRORE * 100),
+        )
+        for day in days
+    }
+
+    final = {s.session_date: s for s in build_snapshots(rows, _rules())}[days[-1]]
+
+    assert "NSE:RELIANCE" in final.eligible
+    assert "NSE:LIQGRWBEES" not in final.eligible
+    assert "NSE:CASHIETF" not in final.eligible
+
+
+def test_is_company_equity_reads_the_isin_class() -> None:
+    assert is_company_equity("INE002A01018")
+    assert not is_company_equity("INF204KC1FU1")
+    assert not is_company_equity("IN9470A01011")
