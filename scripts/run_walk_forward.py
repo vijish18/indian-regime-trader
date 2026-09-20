@@ -316,6 +316,31 @@ def main(argv: list[str]) -> int:
         """
         if args.series_dir is None:
             return
+
+        # Checkpoint this fold before moving on. Everything else here is
+        # written only after all 33 folds finish, which meant a crash on the
+        # last fold discarded the whole run: four strategies lost ten hours
+        # each to a corporate action in fold 33, having computed folds 1-32
+        # correctly and kept them nowhere.
+        #
+        # Appending per fold makes a failure cost one fold instead of all of
+        # them. The completed run still overwrites these with the clean
+        # concatenated series, so this is a safety net, not the product.
+        checkpoint = args.series_dir / f"{name}.folds.csv"
+        header = not checkpoint.exists()
+        frame = result.equity_curve.rename("equity").to_frame()
+        frame.insert(0, "fold", fold_index + 1)
+        frame.to_csv(checkpoint, mode="a", header=header, index_label="session_date")
+
+        trades_checkpoint = args.series_dir / f"{name}.trades.partial.csv"
+        if not result.trade_log.empty:
+            result.trade_log.to_csv(
+                trades_checkpoint,
+                mode="a",
+                header=not trades_checkpoint.exists(),
+                index=False,
+            )
+
         for day in result.risk_decisions:
             for decision in day.decisions:
                 if decision.approved:
