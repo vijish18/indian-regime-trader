@@ -487,8 +487,22 @@ class BacktestEngine:
         """
         end = execution_date + dt.timedelta(days=self.max_fill_search_days * 2)
         try:
+            # RAW, not ADJUSTED, because this is a transaction price: what one
+            # share actually cost on the day cash changed hands. ADJUSTED
+            # restates a bar into the terms of the window's *end* -- ten days
+            # later here -- which is right for comparing prices across time
+            # (see _last_close) and wrong for a fill, since nobody pays a
+            # split-restated price.
+            #
+            # It also crashed. A TATACHEM exit filling 2020-03-03 was being
+            # adjusted forward across a 2020-03-04 demerger whose factor
+            # cannot be derived from the action terms, killing all five
+            # strategies at fold 9. The universe had already stopped
+            # *selecting* the name on 2020-03-03; what it could not do is stop
+            # the backtest *holding* it, and a held position still has to be
+            # sold through the event.
             bars = self.market_data.get_equity_bars(
-                instrument_id, execution_date, end, price_basis=PriceBasis.ADJUSTED
+                instrument_id, execution_date, end, price_basis=PriceBasis.RAW
             )
         except DataNotAvailableError:
             return None
