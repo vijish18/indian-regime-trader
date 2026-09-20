@@ -193,13 +193,25 @@ def hmm_model() -> dict[str, Any]:
         return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
     model = artifact.model
+    # Labels are re-derived here rather than read off the artifact. A stored
+    # model carries the labels that existed when it was approved, so a model
+    # approved under the old four-rung scale still reports two states as
+    # "elevated" however the scale changes afterwards. Since labels are
+    # reporting-only and defined as a ranking of measured volatility,
+    # recomputing them is what keeps the chart honest about the current
+    # vocabulary without refitting or rewriting an approved artifact.
+    from core.regime.hmm_engine import assign_labels
+
+    relabelled = assign_labels(
+        [model.statistics_for(i).expected_volatility for i in range(model.n_states)]
+    )
     states = []
     for state_id in range(model.n_states):
         stat = model.statistics_for(state_id)
         states.append(
             {
                 "state_id": state_id,
-                "label": stat.label.value,
+                "label": relabelled[state_id].value,
                 "expected_volatility": stat.expected_volatility,
                 "expected_return": stat.expected_return,
                 "persistence": stat.self_transition_probability,

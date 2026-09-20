@@ -85,6 +85,7 @@ class RegimeLabel(StrEnum):
     CALM = "calm"
     NORMAL = "normal"
     ELEVATED = "elevated"
+    STRESSED = "stressed"
     CRISIS = "crisis"
 
 
@@ -92,11 +93,25 @@ ORDERED_LABELS: tuple[RegimeLabel, ...] = (
     RegimeLabel.CALM,
     RegimeLabel.NORMAL,
     RegimeLabel.ELEVATED,
+    RegimeLabel.STRESSED,
     RegimeLabel.CRISIS,
 )
 """Labels in ascending order of market risk. The ordering is the only thing
 that matters: states are ranked by measured volatility and mapped onto this
-scale."""
+scale.
+
+Five rungs, not four, because the configured model fits five states and four
+labels made two of them collide. On the approved model that put s2 and s4
+both under "elevated" while their measured economics are opposite -- 15.75%
+volatility with +49.8% expected return against 21.13% with -0.06% -- so the
+one name covered a rewarding regime and a flat one, and a reader could not
+tell which was on screen.
+
+Behaviour is unaffected: nothing keys off these names. Exposure comes from
+``regime_policy``, which maps the separate ``AllocationRegime``
+(low_risk/normal_risk/high_risk/uncertain), and every risk decision reads
+measured statistics. This changes what a chart says, not what the system
+does."""
 
 
 class ModelSelectionError(RuntimeError):

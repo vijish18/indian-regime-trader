@@ -361,12 +361,34 @@ def test_statistics_use_returns_conditioned_on_each_state() -> None:
 
 
 def test_labels_are_assigned_by_measured_volatility_rank() -> None:
+    """Four states spread across the five-rung scale: the ends anchor and the
+    middle two land proportionally, which skips one rung rather than
+    crowding two states onto the same name."""
     labels = assign_labels([0.40, 0.08, 0.22, 0.14])
 
     assert labels[1] is RegimeLabel.CALM  # lowest measured volatility
     assert labels[0] is RegimeLabel.CRISIS  # highest
     assert labels[3] is RegimeLabel.NORMAL
-    assert labels[2] is RegimeLabel.ELEVATED
+    assert labels[2] is RegimeLabel.STRESSED
+
+
+def test_five_states_get_five_distinct_labels() -> None:
+    """The reason the scale gained a fifth rung.
+
+    The configured model fits five states. Against four labels two of them
+    collided -- on the approved model, s2 and s4 both read "elevated" while
+    their measured economics were opposite: 15.75% volatility with +49.8%
+    expected return against 21.13% with -0.06%. One name covered a rewarding
+    regime and a flat one, and nothing on screen distinguished them.
+    """
+    labels = assign_labels([0.0946, 0.5941, 0.1575, 0.1289, 0.2113])
+
+    assert len(set(labels.values())) == 5, "five states must not share a label"
+    assert labels[0] is RegimeLabel.CALM  # 9.46%, calmest
+    assert labels[3] is RegimeLabel.NORMAL  # 12.89%
+    assert labels[2] is RegimeLabel.ELEVATED  # 15.75%
+    assert labels[4] is RegimeLabel.STRESSED  # 21.13%
+    assert labels[1] is RegimeLabel.CRISIS  # 59.41%, worst
 
 
 def test_labels_follow_statistics_when_state_ids_are_shuffled() -> None:
