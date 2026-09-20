@@ -575,3 +575,74 @@ def test_an_instrument_with_no_price_at_all_still_raises(tmp_path: Path) -> None
 
     with pytest.raises(BacktestEngineError, match="no price data"):
         engine._last_close("NSE:NEVERTRADED", dt.date(2021, 6, 24))
+
+
+class _UnadjustableMarketData:
+    """A provider whose ADJUSTED path raises the way an underivable
+    corporate action makes it raise, and whose RAW path still works."""
+
+    def __init__(self, last_traded: dt.date, close: float) -> None:
+        self.last_traded = last_traded
+        self.close = close
+        self.raw_calls = 0
+
+    def get_equity_bars(
+        self, instrument_id: str, start: dt.date, end: dt.date, price_basis: object = None
+    ) -> list[object]:
+        from data.models import PriceBasis
+
+        if price_basis is PriceBasis.ADJUSTED:
+            raise ValueError(
+                f"{instrument_id} demerger requires an explicit_price_factor; "
+                "it cannot be derived from the action terms alone"
+            )
+        self.raw_calls += 1
+        if start > self.last_traded:
+            return []
+
+        class _Bar:
+            session_date = self.last_traded
+            close = self.close
+
+        return [_Bar()]
+
+
+def test_a_holding_through_an_underivable_action_is_marked_not_refused(
+    tmp_path: Path,
+) -> None:
+    """Regression: NSE:VEDL demerged 2026-04-30 and killed four 33-fold runs
+    on their final fold, after ten hours each.
+
+    The adjustment factor genuinely cannot be computed from the action
+    terms. But the position is held and the portfolio has to be worth
+    something, so it is marked at the last price the market actually
+    printed, unadjusted -- which is the most defensible number available
+    when no adjustment exists.
+    """
+    data = _UnadjustableMarketData(dt.date(2026, 4, 29), 412.5)
+    engine = _engine_with(data, tmp_path)
+
+    price = engine._last_close("NSE:VEDL", dt.date(2026, 5, 4))
+
+    assert price == pytest.approx(412.5)
+    assert data.raw_calls >= 1, "must fall back to the raw traded price"
+
+
+def test_an_unadjustable_mark_is_counted_rather_than_silent(tmp_path: Path) -> None:
+    """A run that valued a holding on unadjusted prices is not equivalent to
+    one that did not, so it has to be visible afterwards."""
+    data = _UnadjustableMarketData(dt.date(2026, 4, 29), 412.5)
+    engine = _engine_with(data, tmp_path)
+
+    engine._last_close("NSE:VEDL", dt.date(2026, 5, 4))
+
+    assert engine.unadjustable_marks == {"NSE:VEDL": 1}
+
+
+def test_a_normal_holding_records_no_unadjustable_mark(tmp_path: Path) -> None:
+    data = _SuspendedMarketData(dt.date(2026, 5, 3), 412.5)
+    engine = _engine_with(data, tmp_path)
+
+    engine._last_close("NSE:OK", dt.date(2026, 5, 4))
+
+    assert engine.unadjustable_marks == {}

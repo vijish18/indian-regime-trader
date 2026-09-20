@@ -270,6 +270,12 @@ class BacktestEngine:
         cash equity routinely runs to months. Valuation only."""
 
         self.stale_mark_warn_days = stale_mark_warn_days
+        self.unadjustable_marks: dict[str, int] = {}
+        """instrument -> how many sessions were marked at an unadjusted last
+        traded price because a corporate action between the bar and the mark
+        date has no derivable factor. Empty for a run that never valued a
+        holding through such an event."""
+
         self.stale_marks: dict[str, int] = {}
         """instrument -> worst mark age in days, for marks older than
         ``stale_mark_warn_days``. Empty for a run that never valued a
@@ -458,15 +464,36 @@ class BacktestEngine:
         for window in (lookback_days, self.stale_mark_lookback_days):
             if window < lookback_days:
                 continue
+            start = as_of - dt.timedelta(days=window)
             try:
                 bars = self.market_data.get_equity_bars(
-                    instrument_id,
-                    as_of - dt.timedelta(days=window),
-                    as_of,
-                    price_basis=PriceBasis.ADJUSTED,
+                    instrument_id, start, as_of, price_basis=PriceBasis.ADJUSTED
                 )
             except DataNotAvailableError:
                 continue
+            except ValueError:
+                # An underivable corporate action sits between a bar in this
+                # window and as_of -- a demerger or similar whose price factor
+                # is not computable from the action terms. NSE:VEDL demerged
+                # on 2026-04-30 and killed four 33-fold runs on the final
+                # fold, after ten hours each.
+                #
+                # The position is held and has to be worth something, so it is
+                # marked at its last TRADED price, unadjusted. That is the
+                # most defensible number available: the adjustment genuinely
+                # cannot be computed, and refusing to value a holding is worse
+                # than valuing it on the terms the market last actually
+                # printed. Counted, never silent -- a run that leaned on this
+                # is not equivalent to one that did not.
+                self.unadjustable_marks[instrument_id] = (
+                    self.unadjustable_marks.get(instrument_id, 0) + 1
+                )
+                try:
+                    bars = self.market_data.get_equity_bars(
+                        instrument_id, start, as_of, price_basis=PriceBasis.RAW
+                    )
+                except DataNotAvailableError:
+                    continue
             if not bars:
                 continue
             age = (as_of - bars[-1].session_date).days
