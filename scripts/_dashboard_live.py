@@ -147,16 +147,18 @@ def stop_status(
         return {"available": False}
 
     def net_sale(price: float) -> float:
-        return costs.estimate_execution_cost(
-            symbol,
-            TradeSide.SELL,
-            shares,
-            price,
-            dt.date.today(),
-            spread_bps=10.0,
-            avg_daily_value=0.0,
-            volatility=0.0,
-        ).net_value
+        return float(
+            costs.estimate_execution_cost(
+                symbol,
+                TradeSide.SELL,
+                shares,
+                price,
+                dt.date.today(),
+                spread_bps=10.0,
+                avg_daily_value=0.0,
+                volatility=0.0,
+            ).net_value
+        )
 
     basis = entry * shares
     hard = hard_stop_level(entry, policy.hard_stop_pct)
@@ -267,4 +269,92 @@ def live_book(
             ),
         },
         "hypothetical": True,
+    }
+
+
+def book_view(book: Any, quotes: dict[str, Any], policy: Any, costs: Any) -> dict[str, Any]:
+    """The persistent paper book marked at live prices.
+
+    Replaces the hypothetical ``live_book`` once an account exists. The
+    difference is not cosmetic: entry is the price the position was really
+    bought at, cash is a balance that moves, and a name that was stopped out
+    is gone from here and present in the realised section instead.
+    """
+    rows, cost_basis, market_value = [], 0.0, 0.0
+    quote_rows = quotes.get("quotes") or {}
+    for position in book.positions.values():
+        quote = quote_rows.get(position.instrument_id)
+        if quote is None:
+            continue
+        value = position.shares * quote["last"]
+        cost_basis += position.entry_cost
+        market_value += value
+        rows.append(
+            {
+                "symbol": position.symbol,
+                "rank": position.rank_at_entry,
+                "shares": position.shares,
+                "entry": position.entry_price,
+                "entry_date": position.entry_date,
+                "last": quote["last"],
+                "value": value,
+                # Against cash paid, not shares x price: the position has to
+                # earn back its own buy charges before it is ahead.
+                "pnl": value - position.entry_cost,
+                "pnl_pct": (value / position.entry_cost - 1.0)
+                if position.entry_cost
+                else 0.0,
+                "day_pct": quote["day_pct"],
+                "day_high": quote.get("day_high"),
+                "day_low": quote.get("day_low"),
+                # The extremes the stop actually used -- since entry, not
+                # since the opening bell. For a position bought mid-session
+                # these differ, and showing the session's own high/low here
+                # would contradict the ledger's own decision.
+                "held_high": position.session_high or None,
+                "held_low": position.session_low or None,
+                "stop": stop_status(
+                    symbol=position.instrument_id,
+                    entry=position.entry_price,
+                    shares=position.shares,
+                    last=quote["last"],
+                    day_high=position.session_high or quote["last"],
+                    day_low=position.session_low or quote["last"],
+                    policy=policy,
+                    costs=costs,
+                ),
+            }
+        )
+    rows.sort(key=lambda r: r["pnl_pct"], reverse=True)
+    equity = market_value + book.cash
+    return {
+        "available": bool(rows) or bool(book.closed),
+        "fetched_at": quotes.get("fetched_at"),
+        "positions": rows,
+        "cost_basis": cost_basis,
+        "market_value": market_value,
+        "cash": book.cash,
+        "budget": book.budget,
+        "equity": equity,
+        "equity_pct": (equity / book.budget - 1.0) if book.budget else 0.0,
+        "pnl": market_value - cost_basis,
+        "pnl_pct": (market_value / cost_basis - 1.0) if cost_basis else 0.0,
+        "winners": sum(1 for r in rows if r["pnl"] > 0),
+        "losers": sum(1 for r in rows if r["pnl"] < 0),
+        "opened_at": book.opened_at,
+        "blocked_today": sorted(book.blocked_today),
+        "stops": {
+            "available": policy is not None,
+            "hard_stop_pct": policy.hard_stop_pct if policy else None,
+            "trail_drop_pct": policy.trail_drop_pct if policy else None,
+            "trail_arm_net_profit_pct": policy.trail_arm_net_profit_pct if policy else None,
+            "hard_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "hard_stop_hit"),
+            "trail_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "trail_hit"),
+            "trail_armed": sum(
+                1 for r in rows if (r["stop"] or {}).get("state") == "trail_armed"
+            ),
+        },
+        # The book is real now: these positions were bought and are held.
+        # What remains simulated is the broker, not the bookkeeping.
+        "hypothetical": False,
     }

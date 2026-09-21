@@ -292,7 +292,9 @@ def hmm_model() -> dict[str, Any]:
     }
 
 
-def stock_selection(as_of_text: str | None, frame_cache: int = 400) -> dict[str, Any]:
+def stock_selection(
+    as_of_text: str | None, frame_cache: int = 400, bench_depth: int = 25
+) -> dict[str, Any]:
     """What the model would hold, and why each name earned its place.
 
     This is the honest answer to "which stocks does the model predict". It
@@ -317,7 +319,17 @@ def stock_selection(as_of_text: str | None, frame_cache: int = 400) -> dict[str,
             circuit_breaker_dir=REPO_ROOT / "state" / "precheck",
             frame_cache=frame_cache,
         )
-        scores = validator.engine.stock_selector.select(as_of)
+        selector = validator.engine.stock_selector
+        # The full ranking, not just the top ten the selector returns. The
+        # extra names are the *bench*: when a stop closes a position
+        # mid-session the freed cash has to go somewhere, and every name in
+        # the book is by definition already held. Without a bench a stop
+        # leaves cash idle until the next full selection run.
+        candidates = selector.build_candidate_universe(as_of)
+        ranked = selector.score_candidates(candidates, as_of)
+        held = selector.config.max_holdings
+        scores = ranked[:held]
+        bench_scores = ranked[held:bench_depth]
     except Exception as exc:  # noqa: BLE001 - reported, never faked
         return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -342,11 +354,25 @@ def stock_selection(as_of_text: str | None, frame_cache: int = 400) -> dict[str,
                 },
             }
         )
+    bench = [
+        {
+            "rank": score.rank,
+            "symbol": score.symbol,
+            "instrument_id": score.instrument_id,
+            "score": float(score.score),
+        }
+        for score in bench_scores
+    ]
     return {
         "available": True,
         "as_of": as_of.isoformat(),
         "count": len(picks),
         "picks": picks,
+        "bench": bench,
+        "bench_note": (
+            "Ranks beyond the book. A stop closing a position mid-session "
+            "redeploys its cash into the best of these that is not already held."
+        ),
         "note": (
             "A ranking, not a price forecast. This system produces target weights; "
             "nothing in it predicts where a stock will trade."
@@ -586,10 +612,30 @@ def main(argv: list[str]) -> int:
         "selection": selection,
         "paper_sizing": sizing,
         "live": quotes,
-        "live_book": live_book(sizing, quotes, selection.get("picks") or []),
         "trade_history": trade_history(args.series_dir),
         "broker": broker_account(),
     }
+
+    # Once a paper book exists it -- not this collector -- owns the live
+    # book and the realised section. Recomputing the hypothetical here would
+    # overwrite a ledger with a snapshot: real entry prices replaced by the
+    # selection close, closed trades vanishing, cash back at full budget.
+    # The previous values are carried forward so the page is not blank
+    # between this run and the next refresh, which rewrites them properly.
+    book_path = REPO_ROOT / "state" / "paper_book.json"
+    if book_path.is_file():
+        previous = {}
+        if args.out.is_file():
+            try:
+                previous = json.loads(args.out.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                previous = {}
+        for key in ("live_book", "realized"):
+            if key in previous:
+                data[key] = previous[key]
+        print(f"  paper book present: {book_path.name} owns live_book/realized")
+    else:
+        data["live_book"] = live_book(sizing, quotes, selection.get("picks") or [])
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(_json_safe(data), indent=2), encoding="utf-8")
