@@ -32,6 +32,7 @@ import yaml  # noqa: E402
 
 from backtest.walk_forward import STRATEGY_NAMES  # noqa: E402
 from data.calendar import NSETradingCalendar  # noqa: E402
+from scripts._current_regime import current_regime  # noqa: E402
 from scripts._dashboard_live import live_book, live_quotes  # noqa: E402
 
 DATA_CACHE = REPO_ROOT / "data_cache"
@@ -564,6 +565,7 @@ def main(argv: list[str]) -> int:
         "equity_curves": equity_curves(args.series_dir),
         "regimes": regime_distribution(args.regime_cache),
         "hmm": hmm_model(),
+        "regime_now": current_regime(dt.date.today()),
         "selection": selection,
         "paper_sizing": sizing,
         "live": quotes,
