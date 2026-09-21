@@ -42,6 +42,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -77,11 +78,12 @@ from data.membership import InMemoryIndexMembershipProvider  # noqa: E402
 from data.storage import LocalDataStore, StorageFormat  # noqa: E402
 from portfolio.portfolio_constructor import PortfolioConstructor  # noqa: E402
 from scripts.build_index_observations import NIFTY_SYMBOL, VIX_SYMBOL  # noqa: E402
+from storage.atomic import atomic_write  # noqa: E402
 from universe.bhavcopy_universe import DERIVED_INDEX_SYMBOL  # noqa: E402
 from universe.stock_selector import StockSelector  # noqa: E402
 from universe.universe import UniverseProvider  # noqa: E402
 
-DATA_CACHE = REPO_ROOT / "data_cache"
+DATA_CACHE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache"))
 REFERENCE = DATA_CACHE / "reference"
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
 COST_SCHEDULE = REPO_ROOT / "config" / "cost_schedules.yaml"
@@ -102,8 +104,10 @@ def build_validator(
     _require(REFERENCE / "corporate_actions.csv", "python scripts/backfill_bhavcopy.py")
     _require(REFERENCE / "index_membership.csv", "python scripts/backfill_bhavcopy.py")
     _require(REFERENCE / "instruments.csv", "python scripts/build_equity_bars.py")
-    _require(DATA_CACHE / "raw" / "index" / f"{NIFTY_SYMBOL}.csv",
-             "python scripts/build_index_observations.py")
+    _require(
+        DATA_CACHE / "raw" / "index" / f"{NIFTY_SYMBOL}.csv",
+        "python scripts/build_index_observations.py",
+    )
 
     calendar = NSETradingCalendar.from_file(HOLIDAY_FILE)
 
@@ -217,7 +221,6 @@ def render(reports: dict[str, PerformanceReport], start: dt.date, end: dt.date) 
     return "\n".join(lines)
 
 
-
 # --------------------------------------------------------------------------
 # Checkpoint, fingerprint, resume
 # --------------------------------------------------------------------------
@@ -265,6 +268,8 @@ def _fingerprint(
     """
     settings = load_settings()
     payload = {
+        "schema": 2,
+        "inputs": _input_digest(),
         "start": args.start.isoformat(),
         "end": args.end.isoformat(),
         "folds": [[d.isoformat() for d in fold] for fold in folds],
@@ -278,9 +283,41 @@ def _fingerprint(
         "allocation": settings.allocation.model_dump(mode="json"),
         "regime_policy": settings.regime_policy.model_dump(mode="json"),
         "features": settings.features.model_dump(mode="json"),
+        "execution": settings.execution.model_dump(mode="json"),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _input_digest() -> str:
+    """Content identity, not mtimes: resume cannot mix code or data revisions."""
+    digest = hashlib.sha256()
+    paths = list(DATA_CACHE.rglob("*.csv"))
+    paths += [HOLIDAY_FILE, COST_SCHEDULE]
+    for folder in ("backtest", "core", "data", "universe", "portfolio", "risk", "config"):
+        paths += list((REPO_ROOT / folder).rglob("*.py"))
+    paths += [Path(__file__)]
+    for path in sorted(set(paths)):
+        relative = (
+            path.relative_to(DATA_CACHE)
+            if path.is_relative_to(DATA_CACHE)
+            else path.relative_to(REPO_ROOT)
+        )
+        digest.update(str(relative).replace("\\", "/").encode())
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _save_fold_csv(path: Path, frame: pd.DataFrame, fold: int) -> None:
+    """Replace a fold as one atomic operation, including its empty trade log."""
+    if path.exists():
+        previous = pd.read_csv(path)
+        previous = previous[previous["fold"] != fold]
+        if not previous.empty:
+            frame = pd.concat([previous, frame], ignore_index=True)
+    atomic_write(path, frame.to_csv(index=False))
 
 
 def _git_commit() -> str:
@@ -307,7 +344,8 @@ def _write_manifest(
     if args.series_dir is None:
         return
     args.series_dir.mkdir(parents=True, exist_ok=True)
-    (args.series_dir / MANIFEST_NAME).write_text(
+    atomic_write(
+        args.series_dir / MANIFEST_NAME,
         json.dumps(
             {
                 "fingerprint": fingerprint,
@@ -321,7 +359,6 @@ def _write_manifest(
             },
             indent=2,
         ),
-        encoding="utf-8",
     )
 
 
@@ -370,9 +407,7 @@ def _load_resume(
             continue
         equity = _read_checkpoint_series(series_dir / f"{name}.folds.csv", "equity", folds_done)
         cash = _read_checkpoint_series(series_dir / f"{name}.cash.partial.csv", "cash", folds_done)
-        trades = _read_checkpoint_trades(
-            series_dir / f"{name}.trades.partial.csv", folds_done
-        )
+        trades = _read_checkpoint_trades(series_dir / f"{name}.trades.partial.csv", folds_done)
         resume[name] = CompletedFolds(
             folds_done=folds_done, equity=equity, trades=trades, cash=cash
         )
@@ -483,9 +518,7 @@ def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Seri
             f"--resume: {path} is missing but the manifest says {folds_done} folds "
             "are complete. The checkpoint is incomplete; start over."
         )
-    frame = _keep_last_run_per_fold(
-        pd.read_csv(path, parse_dates=["session_date"]), folds_done
-    )
+    frame = _keep_last_run_per_fold(pd.read_csv(path, parse_dates=["session_date"]), folds_done)
     if frame.empty:
         raise SystemExit(f"--resume: {path} has no rows for folds 1..{folds_done}")
     series = pd.Series(
@@ -497,10 +530,12 @@ def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Seri
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from", dest="start", type=dt.date.fromisoformat,
-                        default=dt.date(2016, 1, 1))
-    parser.add_argument("--to", dest="end", type=dt.date.fromisoformat,
-                        default=dt.date(2024, 12, 31))
+    parser.add_argument(
+        "--from", dest="start", type=dt.date.fromisoformat, default=dt.date(2016, 1, 1)
+    )
+    parser.add_argument(
+        "--to", dest="end", type=dt.date.fromisoformat, default=dt.date(2024, 12, 31)
+    )
     parser.add_argument("--state-dir", type=Path, default=REPO_ROOT / "state" / "walk_forward")
     parser.add_argument("--report", type=Path, default=REPORT_PATH)
     parser.add_argument(
@@ -543,6 +578,11 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv[1:])
 
+    if args.series_dir is None:
+        args.series_dir = args.state_dir / "series"
+    if not args.resume and (args.series_dir / MANIFEST_NAME).exists():
+        raise SystemExit("Run directory already exists; use --resume or a fresh --series-dir")
+
     if args.resume and args.series_dir is None:
         raise SystemExit("--resume needs --series-dir: that is where the checkpoint lives")
 
@@ -568,11 +608,12 @@ def main(argv: list[str]) -> int:
     folds_total = len(folds)
     selected_names = tuple(args.strategy) if args.strategy else tuple(STRATEGY_NAMES)
     fingerprint = _fingerprint(args, folds, validator.initial_equity)
+    validator.engine.checkpoint_dir = args.series_dir / "sessions"
+    validator.engine.run_identity = fingerprint
+    validator.engine.liquidate_at_end = True
     resume_state: dict[str, CompletedFolds] = {}
     if args.resume:
-        resume_state = _load_resume(
-            args.series_dir, selected_names, fingerprint, folds_total
-        )
+        resume_state = _load_resume(args.series_dir, selected_names, fingerprint, folds_total)
         for name, state in resume_state.items():
             _truncate_checkpoints(args.series_dir, name, state.folds_done)
         if resume_state:
@@ -584,6 +625,7 @@ def main(argv: list[str]) -> int:
         else:
             print("  resume: the checkpoint has no completed folds; starting from fold 1")
     resumed_counts = {name: state.folds_done for name, state in resume_state.items()}
+    _write_manifest(args, folds_total, dict(resumed_counts), fingerprint, validator.initial_equity)
 
     print("\nrunning all strategies (this refits the HMM per fold)...")
     started = dt.datetime.now(dt.UTC)
@@ -645,25 +687,18 @@ def main(argv: list[str]) -> int:
         # them. The completed run still overwrites these with the clean
         # concatenated series, so this is a safety net, not the product.
         checkpoint = args.series_dir / f"{name}.folds.csv"
-        header = not checkpoint.exists()
         frame = result.equity_curve.rename("equity").to_frame()
         frame.insert(0, "fold", fold_index + 1)
-        frame.to_csv(checkpoint, mode="a", header=header, index_label="session_date")
+        _save_fold_csv(checkpoint, frame.rename_axis("session_date").reset_index(), fold_index + 1)
 
         trades_checkpoint = args.series_dir / f"{name}.trades.partial.csv"
-        if not result.trade_log.empty:
-            # Tagged with the fold, like the other two checkpoints. Without it
-            # a resumed run cannot tell which trades belong to a fold it is
-            # about to recompute, and the only alternative -- truncating by
-            # date -- cannot distinguish a re-run fold from a duplicated one.
-            tagged = result.trade_log.copy()
-            tagged.insert(0, "fold", fold_index + 1)
-            tagged.to_csv(
-                trades_checkpoint,
-                mode="a",
-                header=not trades_checkpoint.exists(),
-                index=False,
-            )
+        # Tagged with the fold, like the other two checkpoints. Without it
+        # a resumed run cannot tell which trades belong to a fold it is
+        # about to recompute, and the only alternative -- truncating by
+        # date -- cannot distinguish a re-run fold from a duplicated one.
+        tagged = result.trade_log.copy()
+        tagged.insert(0, "fold", fold_index + 1)
+        _save_fold_csv(trades_checkpoint, tagged, fold_index + 1)
 
         # Cash too, and for the same reason the completed run keeps it: a
         # resumed run that cannot read back the cash balance of the folds it
@@ -673,17 +708,12 @@ def main(argv: list[str]) -> int:
         cash_checkpoint = args.series_dir / f"{name}.cash.partial.csv"
         cash_frame = result.cash_history.rename("cash").to_frame()
         cash_frame.insert(0, "fold", fold_index + 1)
-        cash_frame.to_csv(
-            cash_checkpoint,
-            mode="a",
-            header=not cash_checkpoint.exists(),
-            index_label="session_date",
+        _save_fold_csv(
+            cash_checkpoint, cash_frame.rename_axis("session_date").reset_index(), fold_index + 1
         )
 
         completed_folds[name] = fold_index + 1
-        _write_manifest(
-            args, folds_total, completed_folds, fingerprint, validator.initial_equity
-        )
+        _write_manifest(args, folds_total, completed_folds, fingerprint, validator.initial_equity)
 
         for day in result.risk_decisions:
             for decision in day.decisions:
@@ -697,9 +727,7 @@ def main(argv: list[str]) -> int:
                         "instrument_id": decision.instrument_id,
                         "wanted_weight": decision.target_weight,
                         "circuit_state": str(decision.circuit_state),
-                        "violations": "|".join(
-                            str(v.check) for v in decision.violations
-                        ),
+                        "violations": "|".join(str(v.check) for v in decision.violations),
                     }
                 )
         if result.positions_history:

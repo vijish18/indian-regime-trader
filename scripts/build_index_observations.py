@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import sys
 from pathlib import Path
 
@@ -46,7 +47,7 @@ from broker.zerodha.kite_session import KiteSessionError, load_session  # noqa: 
 from data.calendar import NSETradingCalendar  # noqa: E402
 
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
-INDEX_OUT = REPO_ROOT / "data_cache" / "raw" / "index"
+INDEX_OUT = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache")) / "raw" / "index"
 
 NIFTY_SYMBOL = "NIFTY50"
 VIX_SYMBOL = "INDIAVIX"

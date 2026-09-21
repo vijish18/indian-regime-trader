@@ -39,6 +39,7 @@ htmlcov/
 
 # Data artifacts (raw/normalized market data, model registry, caches)
 data_cache/
+data_runs/
 model_registry/
 *.sqlite
 *.sqlite3

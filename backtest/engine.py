@@ -78,6 +78,8 @@ stop-distance risk-based reconciliation (Phase 7c, still stubbed).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +87,7 @@ from typing import cast
 
 import pandas as pd
 
+from backtest import checkpoint
 from backtest.costs import CostModel, ExecutionCostEstimate, TradeSide
 from config.models import RiskConfig
 from core.regime.allocation import AllocationRegime, AllocationTarget
@@ -104,6 +107,7 @@ from risk.portfolio_risk_state import PortfolioRiskState, PositionRisk
 from risk.risk_manager import RiskDecision, RiskManager
 from risk.stop_loss import StopBreach, StopLossPolicy
 from risk.stop_loss import evaluate as evaluate_stop
+from storage.atomic import atomic_write
 from universe.stock_selector import StockSelector
 
 _TRADING_DAYS_PER_YEAR = 252
@@ -141,9 +145,7 @@ def market_liquidity_stats(
     closes = pd.Series([float(bar.close) for bar in bars])
     returns = closes.pct_change().dropna()
     volatility = (
-        float(returns.std(ddof=0) * math.sqrt(_TRADING_DAYS_PER_YEAR))
-        if not returns.empty
-        else 0.0
+        float(returns.std(ddof=0) * math.sqrt(_TRADING_DAYS_PER_YEAR)) if not returns.empty else 0.0
     )
     return avg_daily_value, volatility
 
@@ -287,8 +289,18 @@ class BacktestEngine:
         stale_mark_lookback_days: int = 400,
         stale_mark_warn_days: int = 30,
         stop_loss_policy: StopLossPolicy | None = None,
+        checkpoint_dir: Path | None = None,
+        run_identity: str = "",
+        checkpoint_sessions: int = 1,
+        liquidate_at_end: bool = False,
     ) -> None:
         self.calendar = calendar
+        self.checkpoint_dir = checkpoint_dir
+        self.run_identity = run_identity
+        self.checkpoint_sessions = checkpoint_sessions
+        self.liquidate_at_end = liquidate_at_end
+        if checkpoint_sessions < 1:
+            raise ValueError("checkpoint_sessions must be positive")
         self.market_data = market_data
         self.stock_selector = stock_selector
         self.portfolio_constructor = portfolio_constructor
@@ -358,8 +370,29 @@ class BacktestEngine:
             raise BacktestEngineError(f"exposure_targets is missing entries for: {missing}")
 
         state_path = self.circuit_breaker_state_dir / f"{strategy_name}.json"
+        identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "run": self.run_identity,
+                    "strategy": strategy_name,
+                    "dates": [day.isoformat() for day in signal_dates],
+                    "equity": initial_equity,
+                    "targets": checkpoint.encode(exposure_targets),
+                    "liquidate": self.liquidate_at_end,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        checkpoint_path = (
+            self.checkpoint_dir / f"{strategy_name}.{signal_dates[0]}.session.json"
+            if self.checkpoint_dir
+            else None
+        )
+        restored = checkpoint.load(checkpoint_path, identity) if checkpoint_path else None
         if state_path.exists():
             state_path.unlink()
+        if restored and restored["breaker"] is not None:
+            atomic_write(state_path, restored["breaker"])
         circuit_breaker = CircuitBreaker(self.risk_config, state_path)
         risk_manager = RiskManager(self.risk_config, circuit_breaker)
 
@@ -383,7 +416,40 @@ class BacktestEngine:
 
         current_target = empty_portfolio(signal_dates[0], AllocationRegime.NORMAL_RISK)
 
-        for signal_date in signal_dates:
+        completed_sessions = 0
+        if restored:
+            cash = restored["cash"]
+            holdings = restored["holdings"]
+            avg_price = restored["avg_price"]
+            cost_basis = restored["cost_basis"]
+            equity_history = restored["equity_history"]
+            equity_points = restored["equity_points"]
+            cash_points = restored["cash_points"]
+            regime_points = restored["regime_points"]
+            confidence_points = restored["confidence_points"]
+            turnover_points = restored["turnover_points"]
+            positions_history = restored["positions_history"]
+            orders = restored["orders"]
+            fills = restored["fills"]
+            trade_log_rows = restored["trade_log_rows"]
+            risk_decision_records = restored["risk_decision_records"]
+            stop_exits = restored["stop_exits"]
+            stop_checks_skipped = restored["stop_checks_skipped"]
+            current_target = restored["current_target"]
+            completed_sessions = restored["completed_sessions"]
+            self.stale_marks = restored["stale_marks"]
+            self.unadjustable_marks = restored["unadjustable_marks"]
+            if not 0 <= completed_sessions <= len(signal_dates):
+                raise BacktestEngineError("Invalid checkpoint session count")
+            print(
+                f"resumed {strategy_name} {signal_dates[0]}: "
+                f"{completed_sessions}/{len(signal_dates)} sessions",
+                flush=True,
+            )
+
+        for session_index, signal_date in enumerate(signal_dates):
+            if session_index < completed_sessions:
+                continue
             exposure_target = exposure_targets[signal_date]
             regime_points[signal_date] = exposure_target.regime.value
             confidence_points[signal_date] = exposure_target.confidence
@@ -460,12 +526,91 @@ class BacktestEngine:
                 skipped=stop_checks_skipped,
             )
 
+            # A scheduled fold-end close is known before this session. Record
+            # actual sales and costs rather than silently turning holdings into cash.
+            if self.liquidate_at_end and signal_date == signal_dates[-1]:
+                for instrument_id in sorted(holdings):
+                    quantity = holdings[instrument_id]
+                    if quantity <= 0:
+                        continue
+                    bar = self._session_bar(instrument_id, execution_date)
+                    if bar is None:
+                        raise BacktestEngineError(
+                            f"Cannot liquidate {instrument_id} at fold end {execution_date}: "
+                            "no tradable bar; refusing a fabricated liquidation"
+                        )
+                    price = float(bar.close)
+                    adv, vol = self._market_stats(instrument_id, signal_date)
+                    cost = self.cost_model.estimate_execution_cost(
+                        instrument_id,
+                        TradeSide.SELL,
+                        quantity,
+                        price,
+                        execution_date,
+                        spread_bps=self.assumed_spread_bps,
+                        avg_daily_value=adv,
+                        volatility=vol,
+                    )
+                    weight = executed_target.weight_for(instrument_id)
+                    order = OrderRecord(
+                        signal_date,
+                        execution_date,
+                        instrument_id,
+                        TradeAction.EXIT,
+                        weight,
+                        0.0,
+                        -weight,
+                    )
+                    fill = FillRecord(order, TradeSide.SELL, quantity, price, cost)
+                    orders.append(order)
+                    fills.append(fill)
+                    cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
+                    row = _trade_log_row(fill)
+                    row["exit_reason"] = "fold_end_liquidation"
+                    trade_log_rows.append(row)
+                executed_target = empty_portfolio(signal_date, exposure_target.regime)
+
             equity_at_execution = self._mark_to_market(cash, holdings, execution_date)
             equity_points[execution_date] = equity_at_execution
             positions_history[execution_date] = dict(holdings)
             cash_points[execution_date] = cash
 
             current_target = executed_target
+
+            if checkpoint_path and (
+                (session_index + 1) % self.checkpoint_sessions == 0
+                or session_index + 1 == len(signal_dates)
+            ):
+                checkpoint.save(
+                    checkpoint_path,
+                    identity,
+                    {
+                        "completed_sessions": session_index + 1,
+                        "cash": cash,
+                        "holdings": holdings,
+                        "avg_price": avg_price,
+                        "cost_basis": cost_basis,
+                        "equity_history": equity_history,
+                        "equity_points": equity_points,
+                        "cash_points": cash_points,
+                        "regime_points": regime_points,
+                        "confidence_points": confidence_points,
+                        "turnover_points": turnover_points,
+                        "positions_history": positions_history,
+                        "orders": orders,
+                        "fills": fills,
+                        "trade_log_rows": trade_log_rows,
+                        "risk_decision_records": risk_decision_records,
+                        "stop_exits": stop_exits,
+                        "stop_checks_skipped": stop_checks_skipped,
+                        "current_target": current_target,
+                        "breaker": state_path.read_text(encoding="utf-8")
+                        if state_path.exists()
+                        else None,
+                        "stale_marks": self.stale_marks,
+                        "unadjustable_marks": self.unadjustable_marks,
+                    },
+                )
 
         equity_curve = pd.Series(equity_points, dtype=float).sort_index()
         trade_log = (
@@ -717,9 +862,7 @@ class BacktestEngine:
                 continue
             age = (as_of - bars[-1].session_date).days
             if age > self.stale_mark_warn_days:
-                self.stale_marks[instrument_id] = max(
-                    self.stale_marks.get(instrument_id, 0), age
-                )
+                self.stale_marks[instrument_id] = max(self.stale_marks.get(instrument_id, 0), age)
             return float(bars[-1].close)
 
         raise BacktestEngineError(f"no price data for {instrument_id} on or before {as_of}")
@@ -842,9 +985,7 @@ class BacktestEngine:
                 max(0.0, 1.0 - equity_history[-1] / window_peak) if window_peak > 0 else 0.0
             )
         all_time_peak = max(equity_history) if equity_history else equity
-        peak_to_trough = (
-            max(0.0, 1.0 - equity / all_time_peak) if all_time_peak > 0 else 0.0
-        )
+        peak_to_trough = max(0.0, 1.0 - equity / all_time_peak) if all_time_peak > 0 else 0.0
 
         return PortfolioRiskState(
             as_of=dt.datetime.combine(as_of, dt.time(15, 30), tzinfo=dt.UTC),
@@ -893,9 +1034,7 @@ class BacktestEngine:
         if quantity <= 0:
             return None
 
-        avg_daily_value, volatility = self._market_stats(
-            order.instrument_id, order.signal_date
-        )
+        avg_daily_value, volatility = self._market_stats(order.instrument_id, order.signal_date)
         execution_cost = self.cost_model.estimate_execution_cost(
             order.instrument_id,
             side,
@@ -973,17 +1112,13 @@ class BacktestEngine:
                     )
         return cash
 
-    def _mark_to_market(
-        self, cash: float, holdings: dict[str, int], as_of: dt.date
-    ) -> float:
+    def _mark_to_market(self, cash: float, holdings: dict[str, int], as_of: dt.date) -> float:
         equity = cash
         for instrument_id, quantity in holdings.items():
             equity += quantity * self._last_close(instrument_id, as_of)
         return equity
 
-    def dividend_cash_credit(
-        self, holdings: dict[str, int], execution_date: dt.date
-    ) -> float:
+    def dividend_cash_credit(self, holdings: dict[str, int], execution_date: dt.date) -> float:
         """Total cash to credit for dividends going ex on ``execution_date``
         for currently-held positions -- kept as a pure function of the
         ledger so it can be unit-tested without a full backtest run.
@@ -1040,9 +1175,7 @@ def _apply_risk_decisions(
     gross = sum(position.target_weight for position in final_positions)
     if gross > 1.0:
         scale = 1.0 / gross
-        final_positions = [
-            _scale_position(position, scale) for position in final_positions
-        ]
+        final_positions = [_scale_position(position, scale) for position in final_positions]
         gross = 1.0
 
     cash_weight = round(1.0 - gross, 12)

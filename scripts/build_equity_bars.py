@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -45,7 +46,7 @@ from data.calendar import NSETradingCalendar  # noqa: E402
 from data.nse_bhavcopy import BhavcopyError, load_bhavcopy  # noqa: E402
 
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
-DATA_CACHE = REPO_ROOT / "data_cache"
+DATA_CACHE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache"))
 BHAVCOPY_CACHE = DATA_CACHE / "raw" / "bhavcopy"
 MEMBERSHIP = DATA_CACHE / "reference" / "index_membership.csv"
 BARS_OUT = DATA_CACHE / "raw" / "equity_bars"

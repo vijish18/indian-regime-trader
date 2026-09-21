@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -71,7 +72,7 @@ from universe.bhavcopy_universe import (  # noqa: E402
 )
 
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
-DATA_CACHE = REPO_ROOT / "data_cache"
+DATA_CACHE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache"))
 BHAVCOPY_CACHE = DATA_CACHE / "raw" / "bhavcopy"
 REFERENCE = DATA_CACHE / "reference"
 
@@ -187,7 +188,9 @@ def write_corporate_actions(start: dt.date, end: dt.date, target: Path) -> tuple
             records = fetch_raw(window_start, window_end)
         except CorporateActionFeedError as exc:
             print(f"  corporate actions {year}: FAILED ({exc})", file=sys.stderr)
-            continue
+            raise SystemExit(
+                f"Incomplete corporate-action feed for {year}; refusing snapshot"
+            ) from exc
         result = to_corporate_actions(records)
         actions.extend(result.actions)
         unparsed.extend(result.unparsed)
@@ -356,6 +359,15 @@ def main(argv: list[str]) -> int:
     if not snapshots:
         raise SystemExit("no bhavcopy data available; run without --skip-download first")
 
+    action_counts = (0, 0, 0)
+    if not args.skip_corporate_actions:
+        print("fetching corporate actions...")
+        action_counts = write_corporate_actions(
+            args.start, end, REFERENCE / "corporate_actions.csv"
+        )
+        print(f"  {action_counts[0]} actions -> {REFERENCE / 'corporate_actions.csv'}\n")
+
+
     memberships = snapshots_to_membership(snapshots)
 
     # Remove spans this system cannot price through. An instrument with a
@@ -385,14 +397,6 @@ def main(argv: list[str]) -> int:
     membership_path = REFERENCE / "index_membership.csv"
     write_membership(memberships, membership_path)
     print(f"  {len(memberships)} spans, {instruments} instruments -> {membership_path}\n")
-
-    action_counts = (0, 0, 0)
-    if not args.skip_corporate_actions:
-        print("fetching corporate actions...")
-        action_counts = write_corporate_actions(
-            args.start, end, REFERENCE / "corporate_actions.csv"
-        )
-        print(f"  {action_counts[0]} actions -> {REFERENCE / 'corporate_actions.csv'}\n")
 
     report_path = REFERENCE / "backfill_report.md"
     write_report(

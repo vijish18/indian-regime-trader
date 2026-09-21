@@ -71,6 +71,9 @@ def live_quotes(instrument_ids: list[str], session_path: Path) -> dict[str, Any]
         # from, and they are running values, so they are correct at the
         # moment they are read rather than only after the close.
         quotes[instrument_id] = {
+            "exchange_timestamp": row.get("timestamp"),
+            "last_trade_time": row.get("last_trade_time"),
+            "depth": row.get("depth") or {},
             "last": last,
             "prev_close": prev,
             "day_open": float(ohlc.get("open") or last),
