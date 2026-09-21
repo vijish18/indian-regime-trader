@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from risk.stop_loss import (
+    StopBreach,
     StopLossError,
     StopLossPolicy,
     StopReason,
@@ -303,7 +304,7 @@ def test_unusable_inputs_produce_no_breach_rather_than_a_guess() -> None:
         }
         base.update(kwargs)
         assert (
-            evaluate("ACME", net_sale_value=net_sale, policy=POLICY, **base)  # type: ignore[arg-type]
+            evaluate("ACME", net_sale_value=net_sale, policy=POLICY, **base)
             is None
         )
 
@@ -448,16 +449,20 @@ def test_the_hard_stop_still_wins_over_a_take_profit_on_the_same_session() -> No
 def test_the_two_profit_policies_disagree_on_the_same_session() -> None:
     """The reason this is configuration. Up 4% and still at its high: the
     take profit banks it, the trailing stop holds on for more."""
-    kwargs = dict(
-        entry_price=100.0,
-        cost_basis=basis_for(100.0),
-        session_high=105.5,
-        session_low=99.8,
-        reference_price=105.5,
-        net_sale_value=net_sale,
-    )
-    banked = evaluate("ACME", **kwargs, policy=POLICY)  # type: ignore[arg-type]
-    held = evaluate("ACME", **kwargs, policy=TRAIL_POLICY)  # type: ignore[arg-type]
+    def at(policy: StopLossPolicy) -> StopBreach | None:
+        return evaluate(
+            "ACME",
+            entry_price=100.0,
+            cost_basis=basis_for(100.0),
+            session_high=105.5,
+            session_low=99.8,
+            reference_price=105.5,
+            net_sale_value=net_sale,
+            policy=policy,
+        )
+
+    banked = at(POLICY)
+    held = at(TRAIL_POLICY)
 
     assert banked is not None and banked.reason is StopReason.TAKE_PROFIT
     assert held is None

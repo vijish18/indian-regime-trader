@@ -471,6 +471,36 @@ class BrokerConfig(BaseModel):
     static_ip_required: bool
 
 
+class PaperBookConfig(BaseModel):
+    """Rules the paper ACCOUNT follows between full rebalances
+    (``execution/paper_book.py``).
+
+    Distinct from :class:`PaperTradingConfig`, which configures the simulated
+    broker's latency and fill behaviour. These decide what the account is
+    allowed to own and when it asks for a new ranking.
+    """
+
+    model_config = {"frozen": True}
+
+    budget_inr: float = Field(gt=0)
+    """The account's starting capital."""
+
+    max_rank_to_buy: int = Field(ge=1)
+    """The deepest rank a new position may be opened at. At the book's own
+    size this means every holding is a name the selector picked; a candidate
+    below it is skipped even when there is cash and nothing else to buy."""
+
+    rerank_at_positions: int = Field(ge=0)
+    """Recompute the ranking and the regime once stops have taken the book
+    down to this many holdings. Below it the account is mostly cash held
+    against a ranking several stops old."""
+
+    rerank_cooldown_minutes: int = Field(ge=0)
+    """Minimum gap between recomputations. Running the selector and the
+    regime model over real history takes minutes, and a book that cannot be
+    refilled would otherwise ask on every refresh."""
+
+
 class PaperTradingConfig(BaseModel):
     """Simulation-only parameters for ``broker.adapters.paper_broker.PaperBroker``
     -- never consulted by a live adapter, which experiences real latency and
@@ -741,6 +771,7 @@ class Settings(BaseModel):
     risk: RiskConfig
     execution: ExecutionConfig
     broker: BrokerConfig
+    paper_book: PaperBookConfig
     paper_trading: PaperTradingConfig
     compliance: ComplianceConfig
     backtest: BacktestConfig

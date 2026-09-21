@@ -22,10 +22,20 @@ refresh running every few minutes.
 
 ## What opens one
 
-Free cash, and only free cash. ``reallocate`` spends what the closures
-released on the highest-ranked candidate that is not already held -- which
-is why a bench deeper than the ten names in the book is needed, and why
-``candidates`` is a parameter rather than something this module fetches.
+Free cash, and only free cash, and only on a name the strategy currently
+ranks. ``reallocate`` spends what the closures released on the best
+candidate that is not already held, and ``max_rank`` caps how far down the
+ranking it may reach -- set to the book's own size, it means the account
+never holds a name the selector did not pick.
+
+That cap has a cost, and it is the point: when every ranked name is already
+held, a stop frees cash that has nowhere to go and it sits idle. The
+alternative is buying rank 11, 12, 13 -- names the strategy considered and
+did not choose. Idle cash earns nothing; an unranked position can lose.
+
+When the book has shrunk far enough that most of it is cash, the answer is
+not to reach further down a stale ranking but to compute a new one. See
+``needs_rerank``.
 
 **A name stopped out today cannot be re-bought today.** Without that rule a
 position stopped at -3% is immediately re-entered a few paise lower, the
@@ -227,6 +237,12 @@ class PaperBook:
     name being bought back the moment it is sold; cleared when the date
     changes."""
 
+    last_rerank_at: str = ""
+    """When the ranking was last recomputed for this book, ISO timestamp.
+    Rate-limits ``needs_rerank``: recomputing takes minutes, and a book that
+    cannot be refilled (because every ranked name is blocked) would otherwise
+    ask for a fresh ranking on every refresh."""
+
     # -- lifecycle ---------------------------------------------------------
 
     @classmethod
@@ -297,6 +313,7 @@ class PaperBook:
             "positions": [p.to_dict() for p in self.positions.values()],
             "closed": [t.to_dict() for t in self.closed],
             "blocked_today": self.blocked_today,
+            "last_rerank_at": self.last_rerank_at,
         }
 
     @classmethod
@@ -310,6 +327,7 @@ class PaperBook:
             opened_at=str(raw.get("opened_at", "")),
             updated_at=str(raw.get("updated_at", "")),
             blocked_today=dict(raw.get("blocked_today") or {}),
+            last_rerank_at=str(raw.get("last_rerank_at", "")),
         )
 
     @classmethod
@@ -473,14 +491,22 @@ class PaperBook:
         today: dt.date,
         slot: float,
         max_positions: int,
+        max_rank: int | None = None,
     ) -> list[PaperPosition]:
         """Spend free cash on the best candidates not already held.
 
-        Walks the bench in rank order and buys the first names that fit.
+        Walks the candidates in rank order and buys the first names that fit.
         Each new position is capped at ``slot`` so one replacement cannot
         take a share of the account no ranking asked for, and at whatever
         cash is actually free -- an account cannot buy what it cannot pay
         for, and there is no margin here.
+
+        ``max_rank`` is the floor of the ranking this account will reach
+        down to. Set to the book's own size it means every position is a
+        name the selector actually picked; a candidate ranked below it is
+        skipped even when there is cash and nothing else to buy, because
+        "the strategy did not choose this" is a reason not to own something.
+        ``None`` disables the cap.
 
         Returns the positions opened. Nothing is sold to raise cash: this is
         a redeployment of what the stops released, not a rebalance.
@@ -493,6 +519,9 @@ class PaperBook:
             if not instrument_id or instrument_id in self.positions:
                 continue
             if instrument_id in self.blocked_today:
+                continue
+            rank = int(candidate.get("rank") or 0)
+            if max_rank is not None and (rank <= 0 or rank > max_rank):
                 continue
             quote = quotes.get(instrument_id)
             if not quote:
@@ -537,6 +566,34 @@ class PaperBook:
             self.positions[instrument_id] = position
             opened.append(position)
         return opened
+
+    def needs_rerank(
+        self, *, at_or_below: int, now: dt.datetime, cooldown_minutes: int
+    ) -> bool:
+        """Whether the book has shrunk enough to deserve a fresh ranking.
+
+        A book down to a handful of names is mostly cash, and the ranking
+        that chose those names is by then several stops old -- the market
+        that stopped them out is not the one the selector last looked at.
+        Reaching further down that stale list buys names it already passed
+        over; recomputing it asks the current question instead.
+
+        Rate-limited because recomputing means running the selector and the
+        regime model over real history, which takes minutes. Without the
+        cooldown a book that cannot be refilled -- every ranked name held or
+        blocked -- would ask again on every refresh.
+        """
+        if len(self.positions) > at_or_below:
+            return False
+        if not self.last_rerank_at:
+            return True
+        try:
+            last = dt.datetime.fromisoformat(self.last_rerank_at)
+        except ValueError:
+            return True
+        if last.tzinfo is not None and now.tzinfo is None:
+            last = last.replace(tzinfo=None)
+        return (now - last) >= dt.timedelta(minutes=cooldown_minutes)
 
     # -- reporting ---------------------------------------------------------
 

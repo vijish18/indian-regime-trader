@@ -193,6 +193,23 @@ broker:
   provider: paper
   static_ip_required: true
 
+# The paper ACCOUNT (execution/paper_book.py) -- distinct from paper_trading
+# below, which configures the simulated broker. These are the rules the
+# account itself follows between full rebalances.
+paper_book:
+  budget_inr: 100000
+  max_rank_to_buy: 10          # never open a position outside the current top N of
+                                # the ranking. The strategy's thesis IS the top ten;
+                                # rank 11 is a name it considered and did not choose,
+                                # so cash waits rather than buying one.
+  rerank_at_positions: 5       # when stops have taken the book down to this many
+                                # holdings it is mostly cash against a ranking several
+                                # stops old -- recompute the ranking and the regime
+                                # rather than reaching further down the stale list
+  rerank_cooldown_minutes: 45  # recomputing runs the selector and the regime model
+                                # over real history and takes minutes; without this a
+                                # book that cannot be refilled would ask every refresh
+
 paper_trading:
   submission_latency_ms: 150         # a realistic retail-API round trip; simulated via
                                       # recorded timestamps, never a real sleep

@@ -11,12 +11,17 @@ What it does each time, in order:
 
 1. Opens ``state/paper_book.json``, or creates it from the hypothetical
    sizing the collector produced if this is the first run.
-2. Fetches quotes for everything held *and* everything on the bench -- the
-   bench prices are needed before a replacement can be bought, not after.
+2. Fetches quotes for everything held *and* every name in the current
+   ranking -- a candidate's price is needed before it can be bought, not
+   after.
 3. Closes any position whose stop fired (risk/stop_loss.py), crediting the
    net proceeds to cash.
-4. Spends the free cash on the best-ranked candidates not already held.
-5. Writes the book back and pushes the marked payload to the dashboard.
+4. If the stops have taken the book down to ``paper_book.rerank_at_positions``
+   holdings or fewer, recomputes the ranking and the regime. This is the one
+   slow step -- minutes, not a second -- and is rate-limited and locked.
+5. Spends the free cash on the best-ranked candidates not already held,
+   never reaching below ``paper_book.max_rank_to_buy``.
+6. Writes the book back and pushes the marked payload to the dashboard.
 
 Steps 3 and 4 make this the only process that changes the account. It is
 still paper: no order reaches a broker, and ``execution.mode`` stays
@@ -50,6 +55,12 @@ from config.loader import load_settings  # noqa: E402
 from execution.paper_book import PaperBook  # noqa: E402
 from risk.stop_loss import StopLossPolicy  # noqa: E402
 from scripts._dashboard_live import book_view, live_quotes  # noqa: E402
+from scripts._rerank import (  # noqa: E402
+    RerankUnavailable,
+    latest_session,
+    rerank_lock,
+    rerun_ranking,
+)
 
 MARKET_OPEN = dt.time(9, 15)
 MARKET_CLOSE = dt.time(15, 30)
@@ -75,24 +86,18 @@ def build_cost_model(settings: object) -> CostModel:
     )
 
 
-def candidate_bench(
-    selection: dict[str, Any], picks: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """The ranking a replacement is drawn from, best first.
+def buy_candidates(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The names this account may open a position in, best rank first.
 
-    ``selection.bench`` carries ranks beyond the book's own ten when the
-    collector was run with one. Without it the only candidates are the ten
-    already held, so a stop frees cash that has nowhere to go -- which is a
-    real state of the account and is reported rather than papered over.
+    The current ranking and nothing else. ``selection.bench`` -- the names
+    just outside it -- is carried in the payload for display and is
+    deliberately *not* here: rank 11 is a name the selector considered and
+    did not choose, and an account that reaches for it when a stop frees
+    cash ends up holding what the strategy rejected. When every ranked name
+    is held or blocked the cash waits, and if the book runs far enough down
+    the ranking is recomputed instead (see ``paper_book.rerank_at_positions``).
     """
-    bench = selection.get("bench") or []
-    seen, ordered = set(), []
-    for row in [*picks, *bench]:
-        instrument_id = row.get("instrument_id")
-        if not instrument_id or instrument_id in seen:
-            continue
-        seen.add(instrument_id)
-        ordered.append(row)
+    ordered = [row for row in picks if row.get("instrument_id")]
     ordered.sort(key=lambda r: r.get("rank") or 10_000)
     return ordered
 
@@ -106,6 +111,15 @@ def main(argv: list[str]) -> int:
         "--no-trade",
         action="store_true",
         help="re-price only: do not close stopped positions or redeploy cash",
+    )
+    parser.add_argument(
+        "--force-rerank",
+        action="store_true",
+        help=(
+            "recompute the ranking and the regime now, whatever the book's size "
+            "and the cooldown (takes minutes). Entries still only happen while "
+            "the market is open."
+        ),
     )
     args = parser.parse_args(argv[1:])
 
@@ -122,6 +136,7 @@ def main(argv: list[str]) -> int:
     costs = build_cost_model(settings)
     policy = StopLossPolicy.from_mapping(settings.risk.stop_loss.model_dump())
     max_positions = settings.selection.max_holdings
+    book_config = settings.paper_book
 
     ist_now = dt.datetime.now(dt.UTC) + IST
     today = ist_now.date()
@@ -145,12 +160,15 @@ def main(argv: list[str]) -> int:
         )
     book.roll_session(today)
 
-    bench = candidate_bench(selection, picks)
-    instrument_ids = sorted(
-        {p.instrument_id for p in book.positions.values()}
-        | {str(row["instrument_id"]) for row in bench}
-    )
-    quotes = live_quotes(instrument_ids, REPO_ROOT / "state" / "kite_session.json")
+    def fetch_quotes(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        instrument_ids = sorted(
+            {p.instrument_id for p in book.positions.values()}
+            | {str(row["instrument_id"]) for row in candidates}
+        )
+        return live_quotes(instrument_ids, REPO_ROOT / "state" / "kite_session.json")
+
+    candidates = buy_candidates(picks)
+    quotes = fetch_quotes(candidates)
     if not quotes.get("available"):
         raise SystemExit(f"no live quotes: {quotes.get('reason')}")
 
@@ -166,15 +184,66 @@ def main(argv: list[str]) -> int:
         # available, and the cash is better left idle until the next session
         # prices the bench properly.
         closed_now = book.apply_stops(quote_rows, policy=policy, costs=costs, today=today)
+
+        # A book the stops have run down is mostly cash held against a
+        # ranking several stops old. Recompute it rather than reach further
+        # down the stale one -- which is the whole reason max_rank_to_buy
+        # exists and why there is nothing else to buy by this point.
+        wants_rerank = args.force_rerank or (
+            is_open
+            and book.needs_rerank(
+                at_or_below=book_config.rerank_at_positions,
+                now=ist_now.replace(tzinfo=None),
+                cooldown_minutes=book_config.rerank_cooldown_minutes,
+            )
+        )
+        if wants_rerank:
+            with rerank_lock(REPO_ROOT / "state" / "rerank.lock") as acquired:
+                if not acquired:
+                    print("  rerank already running elsewhere; skipping")
+                else:
+                    why = (
+                        "forced"
+                        if args.force_rerank
+                        else f"book down to {len(book.positions)} positions "
+                        f"(<= {book_config.rerank_at_positions})"
+                    )
+                    print(
+                        f"  {why}; recomputing the ranking and the regime "
+                        "-- this takes minutes"
+                    )
+                    try:
+                        fresh = rerun_ranking(latest_session(today))
+                    except RerankUnavailable as exc:
+                        print(f"  rerank failed, keeping the old ranking: {exc}")
+                    else:
+                        selection = fresh["selection"]
+                        picks = selection.get("picks") or picks
+                        data["selection"] = selection
+                        data["regime_now"] = fresh["regime_now"]
+                        candidates = buy_candidates(picks)
+                        book.last_rerank_at = ist_now.replace(tzinfo=None).isoformat(
+                            timespec="seconds"
+                        )
+                        refreshed = fetch_quotes(candidates)
+                        if refreshed.get("available"):
+                            quotes, quote_rows = refreshed, refreshed["quotes"]
+                        print(
+                            "  new top "
+                            f"{len(picks)}: "
+                            + ", ".join(str(row["symbol"]) for row in picks)
+                        )
+
         if is_open:
             slot = book.budget / max_positions if max_positions else book.budget
             opened_now = book.reallocate(
-                bench,
+                candidates,
                 quote_rows,
                 costs=costs,
                 today=today,
                 slot=slot,
                 max_positions=max_positions,
+                max_rank=book_config.max_rank_to_buy,
             )
         book.updated_at = ist_now.isoformat(timespec="seconds")
         book.save(args.book)
@@ -192,7 +261,11 @@ def main(argv: list[str]) -> int:
             f"cost {position.entry_cost:,.0f}"
         )
     if closed_now and not opened_now and book.cash > 0:
-        why = "market closed" if not is_open else "no ranked candidate available to buy"
+        why = (
+            "market closed"
+            if not is_open
+            else f"every name in the top {book_config.max_rank_to_buy} is held or blocked"
+        )
         print(f"  cash {book.cash:,.0f} idle: {why}")
 
     book_payload = book_view(book, quotes, policy, costs)

@@ -335,6 +335,16 @@ properties:
       provider: { type: string, enum: [paper, zerodha] }
       static_ip_required: { type: boolean }
 
+  paper_book:
+    type: object
+    additionalProperties: false
+    required: [budget_inr, max_rank_to_buy, rerank_at_positions, rerank_cooldown_minutes]
+    properties:
+      budget_inr: { type: number, exclusiveMinimum: 0 }
+      max_rank_to_buy: { type: integer, minimum: 1 }
+      rerank_at_positions: { type: integer, minimum: 0 }
+      rerank_cooldown_minutes: { type: integer, minimum: 0 }
+
   paper_trading:
     type: object
     additionalProperties: false

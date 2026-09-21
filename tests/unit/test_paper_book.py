@@ -50,7 +50,9 @@ def costs() -> CostModel:
     )
 
 
-def quote(last: float, *, high: float | None = None, low: float | None = None) -> dict:
+def quote(
+    last: float, *, high: float | None = None, low: float | None = None
+) -> dict[str, float]:
     return {
         "last": last,
         "day_high": high if high is not None else last,
@@ -58,7 +60,7 @@ def quote(last: float, *, high: float | None = None, low: float | None = None) -
     }
 
 
-def seeded(costs: CostModel, **overrides) -> PaperBook:
+def seeded(costs: CostModel, **overrides: object) -> PaperBook:
     """A two-name book: ALPHA at 100, BETA at 200, out of a 100k budget,
     opened four sessions ago."""
     sizing = [
@@ -572,3 +574,150 @@ def test_the_held_extremes_survive_a_save_and_reload(
     assert beta.session_date == TODAY.isoformat()
     # Held since before today, so the session high applies in full.
     assert beta.session_high == pytest.approx(206.0)
+
+
+# -- only names the strategy actually ranks ---------------------------------
+
+
+RANKED = [
+    {"rank": 3, "symbol": "GAMMA", "instrument_id": "NSE:GAMMA"},
+    {"rank": 11, "symbol": "ELEVEN", "instrument_id": "NSE:ELEVEN"},
+    {"rank": 12, "symbol": "TWELVE", "instrument_id": "NSE:TWELVE"},
+]
+
+
+def test_a_candidate_below_the_rank_cap_is_never_bought(costs: CostModel) -> None:
+    """Rank 11 is a name the selector considered and did not choose. The
+    account holds what the strategy picked, or it holds cash."""
+    book = seeded(costs)
+    book.cash = 40_000.0
+    quotes = {
+        "NSE:ELEVEN": quote(100.0),
+        "NSE:TWELVE": quote(100.0),
+    }
+
+    opened = book.reallocate(
+        RANKED[1:],
+        quotes,
+        costs=costs,
+        today=TODAY,
+        slot=10_000.0,
+        max_positions=10,
+        max_rank=10,
+    )
+
+    assert opened == []
+    assert book.cash == pytest.approx(40_000.0)
+
+
+def test_cash_waits_rather_than_reaching_past_the_cap(costs: CostModel) -> None:
+    """The ranked name is taken and the unranked ones are left, even though
+    there is cash for all three."""
+    book = seeded(costs)
+    book.cash = 40_000.0
+    quotes = {
+        "NSE:GAMMA": quote(100.0),
+        "NSE:ELEVEN": quote(100.0),
+        "NSE:TWELVE": quote(100.0),
+    }
+
+    opened = book.reallocate(
+        RANKED, quotes, costs=costs, today=TODAY, slot=10_000.0, max_positions=10, max_rank=10
+    )
+
+    assert [p.symbol for p in opened] == ["GAMMA"]
+    assert book.cash > 29_000.0
+
+
+def test_a_candidate_with_no_rank_is_refused_under_a_cap(costs: CostModel) -> None:
+    """An unranked row cannot be shown to satisfy the cap, so it does not."""
+    book = seeded(costs)
+    book.cash = 20_000.0
+
+    opened = book.reallocate(
+        [{"symbol": "NORANK", "instrument_id": "NSE:NORANK"}],
+        {"NSE:NORANK": quote(100.0)},
+        costs=costs,
+        today=TODAY,
+        slot=10_000.0,
+        max_positions=10,
+        max_rank=10,
+    )
+
+    assert opened == []
+
+
+def test_without_a_cap_any_candidate_is_eligible(costs: CostModel) -> None:
+    """The cap is a policy, not a hard-wired rule -- a backtest comparing
+    with and against it needs the other side to exist."""
+    book = seeded(costs)
+    book.cash = 20_000.0
+
+    opened = book.reallocate(
+        RANKED[1:],
+        {"NSE:ELEVEN": quote(100.0), "NSE:TWELVE": quote(100.0)},
+        costs=costs,
+        today=TODAY,
+        slot=10_000.0,
+        max_positions=10,
+        max_rank=None,
+    )
+
+    assert [p.symbol for p in opened] == ["ELEVEN", "TWELVE"]
+
+
+# -- asking for a new ranking ----------------------------------------------
+
+
+NOW = dt.datetime(2026, 9, 21, 11, 0)
+
+
+def test_a_full_book_does_not_ask_for_a_new_ranking(costs: CostModel) -> None:
+    book = seeded(costs)  # two positions
+
+    assert not book.needs_rerank(at_or_below=1, now=NOW, cooldown_minutes=45)
+
+
+def test_a_book_run_down_to_the_threshold_asks_for_one(costs: CostModel) -> None:
+    book = seeded(costs)
+
+    assert book.needs_rerank(at_or_below=2, now=NOW, cooldown_minutes=45)
+
+
+def test_the_cooldown_stops_it_asking_again_immediately(costs: CostModel) -> None:
+    """Recomputing runs the selector over real history. A book that cannot be
+    refilled -- every ranked name held or blocked -- would otherwise ask on
+    every refresh, which is every few minutes."""
+    book = seeded(costs)
+    book.last_rerank_at = (NOW - dt.timedelta(minutes=10)).isoformat()
+
+    assert not book.needs_rerank(at_or_below=2, now=NOW, cooldown_minutes=45)
+
+
+def test_the_cooldown_expires(costs: CostModel) -> None:
+    book = seeded(costs)
+    book.last_rerank_at = (NOW - dt.timedelta(minutes=60)).isoformat()
+
+    assert book.needs_rerank(at_or_below=2, now=NOW, cooldown_minutes=45)
+
+
+def test_an_unreadable_rerank_timestamp_allows_one_rather_than_blocking(
+    costs: CostModel,
+) -> None:
+    """Failing closed here would mean never recomputing again."""
+    book = seeded(costs)
+    book.last_rerank_at = "not a timestamp"
+
+    assert book.needs_rerank(at_or_below=2, now=NOW, cooldown_minutes=45)
+
+
+def test_the_rerank_timestamp_survives_a_save(costs: CostModel, tmp_path: Path) -> None:
+    book = seeded(costs)
+    book.last_rerank_at = NOW.isoformat()
+    path = tmp_path / "book.json"
+    book.save(path)
+
+    restored = PaperBook.load(path)
+
+    assert restored is not None
+    assert restored.last_rerank_at == NOW.isoformat()
