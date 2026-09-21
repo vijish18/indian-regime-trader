@@ -75,10 +75,19 @@ def main(argv: list[str]) -> int:
             ticks = json.loads(ticks_path.read_text(encoding="utf-8")).get("ticks", [])
         except (OSError, ValueError):
             ticks = []
-        step = max(1, len(ticks) // 120)
+        # Thinned to a fixed point count AND stripped to two decimals.
+        # The published document has a 262 KB limit and every refresh adds a
+        # full session's worth of ticks, so an unthinned payload grows past
+        # it before the close and the push simply starts failing. A
+        # 74-pixel-wide sparkline cannot resolve more than this anyway.
+        step = max(1, len(ticks) // 90)
+        thinned = ticks[::step][-90:]
         data["ticks"] = {
             "updated_at": ticks[-1]["t"] if ticks else None,
-            "points": ticks[::step][-120:],
+            "points": [
+                {"hhmm": p["hhmm"], "px": {k: round(v, 2) for k, v in p["px"].items()}}
+                for p in thinned
+            ],
         }
     data["generated_at"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     args.data.write_text(json.dumps(data, indent=2), encoding="utf-8")
