@@ -7,8 +7,11 @@ consume Azure credits or incur charges; free-account status is not a billing
 guarantee.
 
 Inputs cover 2015-01-01 through 2026-09-21. Each strategy starts with INR
-100,000. Training windows contain 756 sessions and test windows 63 sessions;
-the latest incomplete window is excluded by the fold generator. The five
+100,000. Training windows contain 756 sessions and test windows up to 63
+signal sessions. The final partial window is included: 34 folds, with the
+last 54 signals from 6 July through 18 September, executed through 21 September.
+The cutoff bounds execution/valuation dates; no signal requires future data.
+The five
 policies are HMM, shuffled HMM control, rolling volatility, moving-average
 trend, and the existing `buy_and_hold` policy. That last name denotes the
 existing always-invested stock-selection baseline, not passive NIFTY returns.
@@ -23,10 +26,14 @@ their terminal close with execution costs, then carry cash into the next fold.
 
 Remote paths:
 
-- Checkout: `/home/irt/backtest_20260921`
+- Checkout: `/home/irt/backtest_20260921_full`
 - Dataset: `/home/irt/data_runs/2026-09-21`
-- Results: `/home/irt/backtest_runs/fresh_20260921`
+- Results: `/home/irt/backtest_runs/fresh_20260921_full`
 - Service: `irt-backtest-20260921`
+
+The initial 33-fold run was stopped and retained at
+`/home/irt/backtest_runs/fresh_20260921`. The corrected run starts independently:
+its changed coverage/code fingerprint intentionally cannot resume old state.
 
 Inspect with `systemctl status irt-backtest-20260921`, and read each strategy's
 `run.log` and `series/run.manifest.json` under the results directory. The

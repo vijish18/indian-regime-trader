@@ -108,6 +108,53 @@ def test_generate_folds_is_empty_when_no_fold_fits(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("n_days", [50, 51, 52, 61, 65])
+def test_final_window_covers_all_executable_signals_without_overlap(
+    tmp_path: Path,
+    n_days: int,
+) -> None:
+    env = Environment(n_days=n_days)
+    config = type(env.backtest_cfg).model_validate(
+        {
+            **env.backtest_cfg.model_dump(),
+            "training_window_sessions": 50,
+            "test_window_sessions": 10,
+            "roll_step_sessions": 10,
+        }
+    )
+    validator = env.validator(tmp_path, config=config)
+    folds = validator.generate_folds(env.dates[0], env.dates[-1])
+    signals = []
+    for train_start, train_end, test_start, test_end in folds:
+        assert len(env.calendar.trading_days_between(train_start, train_end)) == 50
+        assert train_end < test_start <= test_end
+        days = env.calendar.trading_days_between(test_start, test_end)
+        assert 1 <= len(days) <= 10
+        signals.extend(days)
+        assert env.calendar.next_trading_day(test_end) <= env.dates[-1]
+    assert signals == env.dates[50:-1]
+    assert len(signals) == len(set(signals))
+    if signals:
+        assert env.calendar.next_trading_day(signals[-1]) == env.dates[-1]
+
+
+def test_partial_final_fold_executes_through_cutoff(tmp_path: Path) -> None:
+    env = Environment(n_days=147, n_stocks=3)
+    validator = env.validator(tmp_path)
+    validator.engine.liquidate_at_end = True
+    captured = []
+    validator.run_all_strategies(
+        env.dates[0],
+        env.dates[-1],
+        strategies=[BUY_AND_HOLD],
+        on_fold=lambda name, index, result: captured.append(result),
+    )
+    final = captured[-1]
+    assert final.equity_curve.index[-1] == env.dates[-1]
+    assert final.cash_history.iloc[-1] == final.equity_curve.iloc[-1]
+    assert max(final.trade_log.execution_date) <= env.dates[-1]
+
+
 def test_run_produces_one_fold_per_window(tmp_path: Path) -> None:
     env = Environment(n_days=150)
     validator = env.validator(tmp_path)
@@ -284,9 +331,7 @@ def test_run_shuffled_regime_control_returns_one_overall_report(tmp_path: Path) 
     assert isinstance(report, PerformanceReport)
 
 
-def _targets(
-    dates: list[dt.date], exposures: list[float]
-) -> dict[dt.date, AllocationTarget]:
+def _targets(dates: list[dt.date], exposures: list[float]) -> dict[dt.date, AllocationTarget]:
     """Finished exposure decisions, as ``_hmm_exposure_targets`` returns them."""
     return {
         day: AllocationTarget(
@@ -498,9 +543,7 @@ def _capture_folds(
         trades.append(result.trade_log)
         cash.append(result.cash_history)
 
-    validator.run_all_strategies(
-        env.dates[0], env.dates[-1], strategies=[name], on_fold=on_fold
-    )
+    validator.run_all_strategies(env.dates[0], env.dates[-1], strategies=[name], on_fold=on_fold)
     return CompletedFolds(
         folds_done=stop_after,
         equity=pd.concat(equity).sort_index(),
@@ -533,18 +576,12 @@ def test_a_resumed_run_matches_the_run_it_resumes(tmp_path: Path) -> None:
     )
 
     assert resumed[BUY_AND_HOLD].cagr == pytest.approx(whole[BUY_AND_HOLD].cagr)
-    assert resumed[BUY_AND_HOLD].total_return == pytest.approx(
-        whole[BUY_AND_HOLD].total_return
-    )
-    assert resumed[BUY_AND_HOLD].max_drawdown == pytest.approx(
-        whole[BUY_AND_HOLD].max_drawdown
-    )
+    assert resumed[BUY_AND_HOLD].total_return == pytest.approx(whole[BUY_AND_HOLD].total_return)
+    assert resumed[BUY_AND_HOLD].max_drawdown == pytest.approx(whole[BUY_AND_HOLD].max_drawdown)
     assert resumed[BUY_AND_HOLD].trade_count == whole[BUY_AND_HOLD].trade_count
     # The one a naive resume gets wrong: cash is not in the equity curve, so
     # a resume that cannot read it back reports nan for the whole period.
-    assert resumed[BUY_AND_HOLD].pct_invested == pytest.approx(
-        whole[BUY_AND_HOLD].pct_invested
-    )
+    assert resumed[BUY_AND_HOLD].pct_invested == pytest.approx(whole[BUY_AND_HOLD].pct_invested)
 
 
 def test_a_resumed_run_does_not_recompute_the_folds_it_was_given(

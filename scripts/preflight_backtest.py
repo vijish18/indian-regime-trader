@@ -138,8 +138,10 @@ def check_folds(start: dt.date, end: dt.date) -> tuple[Check, int]:
     check = Check("folds")
     try:
         from config.loader import load_settings
+        from data.calendar import NSETradingCalendar
 
         config = load_settings().backtest
+        calendar = NSETradingCalendar.from_file(REPO_ROOT / "config" / "nse_holidays.csv")
     except Exception as exc:  # noqa: BLE001
         check.fail(f"{type(exc).__name__}: {exc}")
         return check, 0
@@ -150,18 +152,19 @@ def check_folds(start: dt.date, end: dt.date) -> tuple[Check, int]:
             "and every statistic would double count the overlap"
         )
         return check, 0
-    sessions = (end - start).days * 252 // 365
-    needed = config.training_window_sessions + config.test_window_sessions
+    sessions = len(calendar.trading_days_between(start, end))
+    needed = config.training_window_sessions + 2
     estimate = max(0, (sessions - needed) // config.roll_step_sessions + 1)
     if estimate <= 0:
         check.fail(
-            f"~{sessions} sessions in range, but a fold needs {needed} "
-            f"({config.training_window_sessions} train + {config.test_window_sessions} test)"
+            f"{sessions} sessions in range, but a fold needs at least {needed} "
+            f"({config.training_window_sessions} train + one signal + one execution)"
         )
         return check, 0
     check.note(
-        f"~{estimate} folds: {config.training_window_sessions} train, "
-        f"{config.test_window_sessions} test, step {config.roll_step_sessions} (tiling)"
+        f"{estimate} folds: {config.training_window_sessions} train, "
+        f"up to {config.test_window_sessions} test signals, step {config.roll_step_sessions}; "
+        "partial final window included, execution bounded by cutoff"
     )
     return check, estimate
 

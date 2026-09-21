@@ -251,6 +251,10 @@ class WalkForwardValidator:
         ``roll_step_sessions`` each time -- so a later fold's model is
         never fit on strictly more history than an earlier one's, isolating
         "did the regime change" from "did the model just see more data".
+
+        Include a shorter final test window. ``end`` bounds execution data,
+        not just signals: reserve the last available trading day for filling
+        the preceding session's signal, so no execution runs beyond ``end``.
         """
         trading_days = self.calendar.trading_days_between(start, end)
         train_n = self.config.training_window_sessions
@@ -262,9 +266,10 @@ class WalkForwardValidator:
         while True:
             train_end_idx = train_start_idx + train_n - 1
             test_start_idx = train_end_idx + 1
-            test_end_idx = test_start_idx + test_n - 1
-            if test_end_idx >= len(trading_days):
+            last_signal_idx = len(trading_days) - 2
+            if test_start_idx > last_signal_idx:
                 break
+            test_end_idx = min(test_start_idx + test_n - 1, last_signal_idx)
             folds.append(
                 (
                     trading_days[train_start_idx],

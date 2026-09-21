@@ -603,12 +603,17 @@ def main(argv: list[str]) -> int:
     if not folds:
         raise SystemExit(
             "no folds generated: the period is shorter than "
-            "backtest.training_window_sessions + backtest.test_window_sessions"
+            "backtest.training_window_sessions + one signal and one execution session"
         )
     for train_start, train_end, test_start, test_end in folds[:3]:
         print(f"  train {train_start}..{train_end}   test {test_start}..{test_end}")
     if len(folds) > 3:
         print(f"  ... and {len(folds) - 3} more")
+    final = folds[-1]
+    final_sessions = len(validator.calendar.trading_days_between(final[2], final[3]))
+    final_execution = validator.calendar.next_trading_day(final[3])
+    print(f"  final window: {final_sessions} signals {final[2]}..{final[3]}")
+    print(f"  final execution/valuation: {final_execution} (data cutoff {args.end})")
 
     folds_total = len(folds)
     selected_names = tuple(args.strategy) if args.strategy else tuple(STRATEGY_NAMES)
