@@ -65,13 +65,32 @@ def main(argv: list[str]) -> int:
 
     book = live_book(data.get("paper_sizing") or {}, quotes, picks)
     data["live"], data["live_book"] = quotes, book
+
+    # Intraday ticks from the background poller, if it is running. Thinned
+    # to a bounded number of points: a sparkline this size cannot resolve
+    # more, and the payload has a document limit to respect.
+    ticks_path = REPO_ROOT / "state" / "live_ticks.json"
+    if ticks_path.is_file():
+        try:
+            ticks = json.loads(ticks_path.read_text(encoding="utf-8")).get("ticks", [])
+        except (OSError, ValueError):
+            ticks = []
+        step = max(1, len(ticks) // 120)
+        data["ticks"] = {
+            "updated_at": ticks[-1]["t"] if ticks else None,
+            "points": ticks[::step][-120:],
+        }
     data["generated_at"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     args.data.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     # Only the fast-moving fields. The full payload with trade history is
     # well past the data channel's document limit, and the page merges
     # rather than replaces, so omitting the rest leaves it intact.
-    slim = {k: data[k] for k in ("generated_at", "live", "live_book", "paper_sizing") if k in data}
+    slim = {
+        k: data[k]
+        for k in ("generated_at", "live", "live_book", "paper_sizing", "ticks")
+        if k in data
+    }
     args.out.write_text(
         json.dumps({"payload": json.dumps(slim, separators=(",", ":")),
                     "updated_at": data["generated_at"]}),
