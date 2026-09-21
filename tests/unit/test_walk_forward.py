@@ -11,13 +11,16 @@ import datetime as dt
 import math
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from backtest.engine import BacktestResult
 from backtest.performance import PerformanceReport
 from backtest.walk_forward import (
     BUY_AND_HOLD,
     HMM,
     STRATEGY_NAMES,
+    CompletedFolds,
     WalkForwardError,
     WalkForwardFold,
     WalkForwardValidator,
@@ -453,3 +456,222 @@ def test_percent_invested_is_reported_not_nan(tmp_path: Path) -> None:
 
     assert not math.isnan(results[BUY_AND_HOLD].pct_invested)
     assert 0.0 <= results[BUY_AND_HOLD].pct_invested <= 1.0
+
+
+# --------------------------------------------------------------------------
+# Resuming a run that died partway
+# --------------------------------------------------------------------------
+
+
+def _multi_fold_validator(env: Environment, tmp_path: Path) -> WalkForwardValidator:
+    """Four tiling folds, so there is a "partway" to resume from.
+
+    A 60-session training window, not less: the HMM needs enough
+    observations after feature warmup to fit at all, and a shorter one fails
+    model selection rather than testing anything about resuming."""
+    return env.validator(
+        tmp_path,
+        config=type(env.backtest_cfg).model_validate(
+            {
+                **env.backtest_cfg.model_dump(),
+                "training_window_sessions": 60,
+                "test_window_sessions": 20,
+                "roll_step_sessions": 20,
+            }
+        ),
+    )
+
+
+def _capture_folds(
+    validator: WalkForwardValidator, env: Environment, name: str, stop_after: int
+) -> CompletedFolds:
+    """Run the folds and keep exactly what a crash after ``stop_after`` of
+    them would have left on disk."""
+    equity: list[pd.Series] = []
+    trades: list[pd.DataFrame] = []
+    cash: list[pd.Series] = []
+
+    def on_fold(strategy: str, fold_index: int, result: BacktestResult) -> None:
+        if strategy != name or fold_index >= stop_after:
+            return
+        equity.append(result.equity_curve)
+        trades.append(result.trade_log)
+        cash.append(result.cash_history)
+
+    validator.run_all_strategies(
+        env.dates[0], env.dates[-1], strategies=[name], on_fold=on_fold
+    )
+    return CompletedFolds(
+        folds_done=stop_after,
+        equity=pd.concat(equity).sort_index(),
+        trades=pd.concat(trades, ignore_index=True),
+        cash=pd.concat(cash).sort_index(),
+    )
+
+
+def test_a_resumed_run_matches_the_run_it_resumes(tmp_path: Path) -> None:
+    """The property everything else here rests on.
+
+    A run that died at fold 3 and was resumed must report exactly what one
+    uninterrupted pass would have reported. If it does not, resuming is not
+    a recovery -- it is a second, different experiment wearing the first
+    one name, and nobody could tell from the output.
+    """
+    env = Environment(n_days=150, n_stocks=4)
+    whole = _multi_fold_validator(env, tmp_path / "whole").run_all_strategies(
+        env.dates[0], env.dates[-1], strategies=[BUY_AND_HOLD]
+    )
+
+    partial = _capture_folds(
+        _multi_fold_validator(env, tmp_path / "died"), env, BUY_AND_HOLD, stop_after=2
+    )
+    resumed = _multi_fold_validator(env, tmp_path / "resumed").run_all_strategies(
+        env.dates[0],
+        env.dates[-1],
+        strategies=[BUY_AND_HOLD],
+        resume={BUY_AND_HOLD: partial},
+    )
+
+    assert resumed[BUY_AND_HOLD].cagr == pytest.approx(whole[BUY_AND_HOLD].cagr)
+    assert resumed[BUY_AND_HOLD].total_return == pytest.approx(
+        whole[BUY_AND_HOLD].total_return
+    )
+    assert resumed[BUY_AND_HOLD].max_drawdown == pytest.approx(
+        whole[BUY_AND_HOLD].max_drawdown
+    )
+    assert resumed[BUY_AND_HOLD].trade_count == whole[BUY_AND_HOLD].trade_count
+    # The one a naive resume gets wrong: cash is not in the equity curve, so
+    # a resume that cannot read it back reports nan for the whole period.
+    assert resumed[BUY_AND_HOLD].pct_invested == pytest.approx(
+        whole[BUY_AND_HOLD].pct_invested
+    )
+
+
+def test_a_resumed_run_does_not_recompute_the_folds_it_was_given(
+    tmp_path: Path,
+) -> None:
+    """Otherwise "resume" saves nothing, which is the entire point on a run
+    measured in hours."""
+    env = Environment(n_days=150, n_stocks=4)
+    partial = _capture_folds(
+        _multi_fold_validator(env, tmp_path / "died"), env, BUY_AND_HOLD, stop_after=2
+    )
+
+    seen: list[int] = []
+
+    def on_fold(name: str, fold_index: int, result: BacktestResult) -> None:
+        seen.append(fold_index)
+
+    validator = _multi_fold_validator(env, tmp_path / "resumed")
+    total = len(validator.generate_folds(env.dates[0], env.dates[-1]))
+    validator.run_all_strategies(
+        env.dates[0],
+        env.dates[-1],
+        strategies=[BUY_AND_HOLD],
+        on_fold=on_fold,
+        resume={BUY_AND_HOLD: partial},
+    )
+
+    assert total > 2
+    assert seen == list(range(2, total))
+
+
+def test_equity_continues_from_where_the_crashed_run_reached(tmp_path: Path) -> None:
+    """Equity chains across folds. Resuming at the initial equity instead of
+    the checkpoint would silently restate the whole run."""
+    env = Environment(n_days=150, n_stocks=4)
+    partial = _capture_folds(
+        _multi_fold_validator(env, tmp_path / "died"), env, BUY_AND_HOLD, stop_after=2
+    )
+
+    starts: list[float] = []
+    validator = _multi_fold_validator(env, tmp_path / "resumed")
+
+    def on_fold(name: str, fold_index: int, result: BacktestResult) -> None:
+        starts.append(float(result.equity_curve.iloc[0]))
+
+    validator.run_all_strategies(
+        env.dates[0],
+        env.dates[-1],
+        strategies=[BUY_AND_HOLD],
+        on_fold=on_fold,
+        resume={BUY_AND_HOLD: partial},
+    )
+
+    assert starts
+    # Within one session of where the checkpoint ended, not back at the start.
+    assert abs(starts[0] / partial.running_equity - 1.0) < 0.25
+    assert abs(starts[0] / validator.initial_equity - 1.0) > 1e-9
+
+
+def test_a_resume_state_for_a_strategy_not_being_run_is_refused(
+    tmp_path: Path,
+) -> None:
+    env = Environment(n_days=150, n_stocks=4)
+    validator = _multi_fold_validator(env, tmp_path)
+    state = CompletedFolds(
+        folds_done=1,
+        equity=pd.Series({env.dates[0]: 1.0}),
+        trades=pd.DataFrame(),
+        cash=pd.Series({env.dates[0]: 1.0}),
+    )
+
+    with pytest.raises(WalkForwardError, match="not being run"):
+        validator.run_all_strategies(
+            env.dates[0], env.dates[-1], strategies=[BUY_AND_HOLD], resume={HMM: state}
+        )
+
+
+def test_a_resume_claiming_more_folds_than_exist_is_refused(tmp_path: Path) -> None:
+    """A checkpoint from a different date range or window size. Splicing it in
+    would report two different experiments as one."""
+    env = Environment(n_days=150, n_stocks=4)
+    validator = _multi_fold_validator(env, tmp_path)
+    state = CompletedFolds(
+        folds_done=999,
+        equity=pd.Series({env.dates[0]: 1.0}),
+        trades=pd.DataFrame(),
+        cash=pd.Series({env.dates[0]: 1.0}),
+    )
+
+    with pytest.raises(WalkForwardError, match="different run"):
+        validator.run_all_strategies(
+            env.dates[0],
+            env.dates[-1],
+            strategies=[BUY_AND_HOLD],
+            resume={BUY_AND_HOLD: state},
+        )
+
+
+def test_a_resume_with_completed_folds_but_no_equity_is_refused() -> None:
+    """The checkpoint existed but had nothing in it. Continuing from an empty
+    curve would restart at the initial equity while reporting folds done."""
+    with pytest.raises(WalkForwardError, match="not usable"):
+        CompletedFolds(
+            folds_done=3,
+            equity=pd.Series(dtype=float),
+            trades=pd.DataFrame(),
+            cash=pd.Series(dtype=float),
+        )
+
+
+def test_an_empty_resume_state_behaves_exactly_like_no_resume(tmp_path: Path) -> None:
+    env = Environment(n_days=150, n_stocks=4)
+    plain = _multi_fold_validator(env, tmp_path / "plain").run_all_strategies(
+        env.dates[0], env.dates[-1], strategies=[BUY_AND_HOLD]
+    )
+    zeroed = _multi_fold_validator(env, tmp_path / "zero").run_all_strategies(
+        env.dates[0],
+        env.dates[-1],
+        strategies=[BUY_AND_HOLD],
+        resume={
+            BUY_AND_HOLD: CompletedFolds(
+                folds_done=0,
+                equity=pd.Series(dtype=float),
+                trades=pd.DataFrame(),
+                cash=pd.Series(dtype=float),
+            )
+        },
+    )
+
+    assert zeroed[BUY_AND_HOLD].cagr == pytest.approx(plain[BUY_AND_HOLD].cagr)

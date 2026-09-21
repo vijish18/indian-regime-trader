@@ -40,8 +40,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
+import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
@@ -55,7 +58,11 @@ from backtest.cost_schedule import CostScheduleRepository  # noqa: E402
 from backtest.costs import CostModel  # noqa: E402
 from backtest.engine import BacktestResult  # noqa: E402
 from backtest.performance import PerformanceReport  # noqa: E402
-from backtest.walk_forward import STRATEGY_NAMES, WalkForwardValidator  # noqa: E402
+from backtest.walk_forward import (  # noqa: E402
+    STRATEGY_NAMES,
+    CompletedFolds,
+    WalkForwardValidator,
+)
 from config.loader import load_settings  # noqa: E402
 from core.features.feature_engineering import (  # noqa: E402
     FeaturePipeline,
@@ -210,6 +217,196 @@ def render(reports: dict[str, PerformanceReport], start: dt.date, end: dt.date) 
     return "\n".join(lines)
 
 
+
+# --------------------------------------------------------------------------
+# Checkpoint, fingerprint, resume
+# --------------------------------------------------------------------------
+
+TRADE_LOG_COLUMNS = (
+    "signal_date",
+    "execution_date",
+    "instrument_id",
+    "side",
+    "quantity",
+    "fill_price",
+    "gross_value",
+    "cost",
+    "net_value",
+)
+"""Matches ``BacktestEngine.run``'s empty trade log, so a resumed run with
+no recorded trades concatenates against the same columns the engine would
+have produced rather than an empty frame with none."""
+
+MANIFEST_NAME = "run.manifest.json"
+"""Written into ``--series-dir`` after every completed fold. Names what the
+run is, which folds are done, and a fingerprint of the configuration that
+produced them."""
+
+
+def _fingerprint(
+    args: argparse.Namespace,
+    folds: Sequence[tuple[dt.date, ...]],
+    initial_equity: float,
+) -> str:
+    """A hash of everything that would change the numbers.
+
+    Resuming across a configuration change would splice two different models'
+    output into one equity curve and report it as one run. The result would
+    look entirely plausible: a continuous curve, sensible drawdowns, and no
+    indication that folds 1-20 used a 3% take-profit and folds 21-33 a 5%
+    trailing stop. So the fingerprint covers the fold boundaries, the money,
+    and every config block that reaches the engine -- and a resume against a
+    different one is refused rather than warned about.
+
+    ``git_commit`` is recorded but deliberately NOT hashed: a commit that
+    only touches a docstring or a test must not invalidate ten hours of
+    completed folds. What matters is whether the inputs changed, and the
+    config blocks below are the inputs.
+    """
+    settings = load_settings()
+    payload = {
+        "start": args.start.isoformat(),
+        "end": args.end.isoformat(),
+        "folds": [[d.isoformat() for d in fold] for fold in folds],
+        "initial_equity": initial_equity,
+        "selection": settings.selection.model_dump(mode="json"),
+        "universe": settings.universe.model_dump(mode="json"),
+        "portfolio": settings.portfolio.model_dump(mode="json"),
+        "risk": settings.risk.model_dump(mode="json"),
+        "backtest": settings.backtest.model_dump(mode="json"),
+        "hmm": settings.hmm.model_dump(mode="json"),
+        "allocation": settings.allocation.model_dump(mode="json"),
+        "regime_policy": settings.regime_policy.model_dump(mode="json"),
+        "features": settings.features.model_dump(mode="json"),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _write_manifest(
+    args: argparse.Namespace,
+    folds_total: int,
+    completed: dict[str, int],
+    fingerprint: str,
+    initial_equity: float,
+) -> None:
+    if args.series_dir is None:
+        return
+    args.series_dir.mkdir(parents=True, exist_ok=True)
+    (args.series_dir / MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "fingerprint": fingerprint,
+                "start": args.start.isoformat(),
+                "end": args.end.isoformat(),
+                "folds_total": folds_total,
+                "completed_folds": completed,
+                "initial_equity": initial_equity,
+                "git_commit": _git_commit(),
+                "updated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _load_resume(
+    series_dir: Path, selected: tuple[str, ...], fingerprint: str, folds_total: int
+) -> dict[str, CompletedFolds]:
+    """Read back what an earlier run of this exact configuration finished.
+
+    Raises rather than returning a partial state. Every failure here means
+    "the checkpoint on disk is not what this run is computing", and the only
+    safe answers are to start over or to point --series-dir somewhere else;
+    quietly continuing would produce a curve spliced from two different runs.
+    """
+    manifest_path = series_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        raise SystemExit(
+            f"--resume: no {MANIFEST_NAME} in {series_dir}. Nothing to resume from; "
+            "drop --resume to start the run."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--resume: {manifest_path} is unreadable: {exc}") from exc
+
+    if manifest.get("fingerprint") != fingerprint:
+        raise SystemExit(
+            "--resume: the configuration has changed since those folds were computed.\n"
+            f"  checkpoint: {manifest.get('fingerprint', '?')[:16]}  "
+            f"({manifest.get('git_commit', '?')[:8]}, {manifest.get('updated_at', '?')})\n"
+            f"  this run:   {fingerprint[:16]}\n"
+            "Resuming would splice folds computed under two different configurations "
+            "into one equity curve and report it as one run. Start over, or point "
+            "--series-dir at a new directory."
+        )
+    if manifest.get("folds_total") != folds_total:
+        raise SystemExit(
+            f"--resume: the checkpoint covers {manifest.get('folds_total')} folds, "
+            f"this run generates {folds_total}."
+        )
+
+    completed = manifest.get("completed_folds") or {}
+    resume: dict[str, CompletedFolds] = {}
+    for name in selected:
+        folds_done = int(completed.get(name, 0))
+        if folds_done <= 0:
+            continue
+        equity = _read_checkpoint_series(series_dir / f"{name}.folds.csv", "equity", folds_done)
+        cash = _read_checkpoint_series(series_dir / f"{name}.cash.partial.csv", "cash", folds_done)
+        trades_path = series_dir / f"{name}.trades.partial.csv"
+        trades = (
+            pd.read_csv(trades_path)
+            if trades_path.exists()
+            else pd.DataFrame(columns=list(TRADE_LOG_COLUMNS))
+        )
+        resume[name] = CompletedFolds(
+            folds_done=folds_done, equity=equity, trades=trades, cash=cash
+        )
+    return resume
+
+
+def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Series:
+    """One checkpoint file as a session-indexed series, truncated to the
+    folds the manifest says are complete.
+
+    The truncation matters. A crash mid-fold can leave rows for a fold the
+    manifest never recorded, because the CSV is appended before the manifest
+    is rewritten. Trusting the file over the manifest would count a fold that
+    was interrupted partway through as finished.
+    """
+    if not path.exists():
+        raise SystemExit(
+            f"--resume: {path} is missing but the manifest says {folds_done} folds "
+            "are complete. The checkpoint is incomplete; start over."
+        )
+    frame = pd.read_csv(path, parse_dates=["session_date"])
+    frame = frame[frame["fold"] <= folds_done]
+    if frame.empty:
+        raise SystemExit(f"--resume: {path} has no rows for folds 1..{folds_done}")
+    series = pd.Series(
+        frame[column].to_numpy(dtype=float),
+        index=pd.Index([d.date() for d in frame["session_date"]]),
+    )
+    return series.sort_index()
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--from", dest="start", type=dt.date.fromisoformat,
@@ -247,7 +444,19 @@ def main(argv: list[str]) -> int:
         default=None,
         help="write each strategy's equity curve and trade log as CSV here",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "continue from the folds already checkpointed in --series-dir instead of "
+            "starting over. Refused if the configuration has changed since those folds "
+            "were computed."
+        ),
+    )
     args = parser.parse_args(argv[1:])
+
+    if args.resume and args.series_dir is None:
+        raise SystemExit("--resume needs --series-dir: that is where the checkpoint lives")
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
     validator = build_validator(
@@ -267,6 +476,24 @@ def main(argv: list[str]) -> int:
         print(f"  train {train_start}..{train_end}   test {test_start}..{test_end}")
     if len(folds) > 3:
         print(f"  ... and {len(folds) - 3} more")
+
+    folds_total = len(folds)
+    selected_names = tuple(args.strategy) if args.strategy else tuple(STRATEGY_NAMES)
+    fingerprint = _fingerprint(args, folds, validator.initial_equity)
+    resume_state: dict[str, CompletedFolds] = {}
+    if args.resume:
+        resume_state = _load_resume(
+            args.series_dir, selected_names, fingerprint, folds_total
+        )
+        if resume_state:
+            for name, state in sorted(resume_state.items()):
+                print(
+                    f"  resuming {name}: {state.folds_done}/{folds_total} folds already "
+                    f"done, equity {state.running_equity:,.0f}"
+                )
+        else:
+            print("  resume: the checkpoint has no completed folds; starting from fold 1")
+    resumed_counts = {name: state.folds_done for name, state in resume_state.items()}
 
     print("\nrunning all strategies (this refits the HMM per fold)...")
     started = dt.datetime.now(dt.UTC)
@@ -305,6 +532,7 @@ def main(argv: list[str]) -> int:
 
     vetoes: list[dict[str, object]] = []
     holdings: list[dict[str, object]] = []
+    completed_folds: dict[str, int] = dict(resumed_counts)
 
     def on_fold(name: str, fold_index: int, result: BacktestResult) -> None:
         """Keep the two things only the fold result knows.
@@ -340,6 +568,26 @@ def main(argv: list[str]) -> int:
                 header=not trades_checkpoint.exists(),
                 index=False,
             )
+
+        # Cash too, and for the same reason the completed run keeps it: a
+        # resumed run that cannot read back the cash balance of the folds it
+        # skipped reports pct_invested as nan for the whole period. Honest,
+        # and useless -- it is the one figure showing how much of the run was
+        # actually spent in the market.
+        cash_checkpoint = args.series_dir / f"{name}.cash.partial.csv"
+        cash_frame = result.cash_history.rename("cash").to_frame()
+        cash_frame.insert(0, "fold", fold_index + 1)
+        cash_frame.to_csv(
+            cash_checkpoint,
+            mode="a",
+            header=not cash_checkpoint.exists(),
+            index_label="session_date",
+        )
+
+        completed_folds[name] = fold_index + 1
+        _write_manifest(
+            args, folds_total, completed_folds, fingerprint, validator.initial_equity
+        )
 
         for day in result.risk_decisions:
             for decision in day.decisions:
@@ -378,6 +626,7 @@ def main(argv: list[str]) -> int:
         strategies=args.strategy,
         on_series=on_series,
         on_fold=on_fold,
+        resume=resume_state or None,
     )
 
     if args.series_dir is not None:

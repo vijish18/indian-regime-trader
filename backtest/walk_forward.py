@@ -64,7 +64,7 @@ zero-cost liquidation.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -109,6 +109,48 @@ STRATEGY_NAMES = (
 
 class WalkForwardError(RuntimeError):
     """A walk-forward run could not proceed."""
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedFolds:
+    """Folds one strategy already finished in an earlier run.
+
+    A full run is measured in hours, and before this existed a failure on
+    the last fold discarded every fold before it -- four strategies once
+    lost ten hours each to a corporate action in fold 33, having computed
+    folds 1 to 32 correctly and kept them nowhere. The per-fold checkpoint
+    fixed the *keeping*; this fixes the *using*, so a resumed run starts at
+    the fold that failed rather than at the beginning.
+
+    ``equity``, ``trades`` and ``cash`` are the completed folds' own output,
+    read back so the final report covers the whole period and not only the
+    folds this process happened to run. Without ``cash`` a resumed run
+    reports ``pct_invested`` as nan for everything it did not recompute,
+    which is honest and useless.
+
+    ``running_equity`` is where the next fold starts. Equity chains across
+    folds, so resuming at the initial equity would silently restate the
+    whole run.
+    """
+
+    folds_done: int
+    equity: pd.Series
+    trades: pd.DataFrame
+    cash: pd.Series
+
+    def __post_init__(self) -> None:
+        if self.folds_done < 0:
+            raise WalkForwardError(f"folds_done must be >= 0, got {self.folds_done}")
+        if self.folds_done and self.equity.empty:
+            raise WalkForwardError(
+                f"{self.folds_done} folds reported complete but the equity curve is empty; "
+                "the checkpoint is not usable and the run must start over"
+            )
+
+    @property
+    def running_equity(self) -> float:
+        """Equity at the end of the last completed fold."""
+        return float(self.equity.iloc[-1])
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +521,7 @@ class WalkForwardValidator:
         strategies: Iterable[str] | None = None,
         on_series: Callable[[str, pd.Series, pd.DataFrame], None] | None = None,
         on_fold: Callable[[str, int, BacktestResult], None] | None = None,
+        resume: Mapping[str, CompletedFolds] | None = None,
     ) -> dict[str, PerformanceReport]:
         """Buy-and-hold, the rolling-volatility baseline, the moving-average
         trend baseline, the HMM, and the shuffled-regime control, all over
@@ -503,6 +546,21 @@ class WalkForwardValidator:
         resets it per fold), so a subset run returns exactly what the same
         names return in a whole run.
 
+        ``resume`` carries folds a previous run already completed, per
+        strategy. Those folds are not recomputed: their equity, trades and
+        cash are read back into the result, and each strategy continues from
+        the equity it had reached. A fold is skipped only when *every*
+        selected strategy has already done it, so a run that died partway
+        through fold 20 redoes fold 20 for the strategies that never
+        finished it and nothing before.
+
+        Nothing here validates that the resumed folds came from the same
+        configuration -- the validator cannot know what produced a series it
+        is handed. The caller owns that check, and
+        ``scripts/run_walk_forward.py`` refuses to resume across a changed
+        fingerprint rather than silently splicing two different models'
+        output into one curve.
+
         What must *not* vary with the subset is the fold's session list.
         ``dates`` comes from the HMM's own targets, so the model is fitted
         on every fold even when only a baseline is selected: skipping it
@@ -525,22 +583,62 @@ class WalkForwardValidator:
                 f"no fold fits in [{start}, {end}] given the configured window sizes"
             )
 
-        equity_curves: dict[str, list[pd.Series]] = {name: [] for name in selected}
-        trade_logs: dict[str, list[pd.DataFrame]] = {name: [] for name in selected}
-        cash_curves: dict[str, list[pd.Series]] = {name: [] for name in selected}
-        running_equity: dict[str, float] = dict.fromkeys(selected, self.initial_equity)
+        done = resume or {}
+        unknown_resume = [name for name in done if name not in selected]
+        if unknown_resume:
+            raise WalkForwardError(
+                f"resume state names strategies that are not being run: {unknown_resume}"
+            )
+        for name, state in done.items():
+            if state.folds_done > len(folds):
+                raise WalkForwardError(
+                    f"{name} reports {state.folds_done} completed folds but this range "
+                    f"only has {len(folds)}; the checkpoint is from a different run"
+                )
+
+        equity_curves: dict[str, list[pd.Series]] = {
+            name: ([done[name].equity] if name in done and done[name].folds_done else [])
+            for name in selected
+        }
+        trade_logs: dict[str, list[pd.DataFrame]] = {
+            name: ([done[name].trades] if name in done and done[name].folds_done else [])
+            for name in selected
+        }
+        cash_curves: dict[str, list[pd.Series]] = {
+            name: ([done[name].cash] if name in done and done[name].folds_done else [])
+            for name in selected
+        }
+        folds_done: dict[str, int] = {
+            name: done[name].folds_done if name in done else 0 for name in selected
+        }
+        running_equity: dict[str, float] = {
+            name: done[name].running_equity
+            if name in done and done[name].folds_done
+            else self.initial_equity
+            for name in selected
+        }
 
         for fold_index, (train_start, train_end, test_start, test_end) in enumerate(folds):
+            pending = [name for name in selected if fold_index >= folds_done[name]]
+            if not pending:
+                # Every selected strategy already has this fold. Skipping it
+                # costs nothing; fitting the model here would cost 2.5s a
+                # fold to produce targets nothing consumes.
+                continue
+
             model, params, engine, _model_id = self._fit_fold(train_start, train_end)
             hmm_targets, _test_states = self._hmm_exposure_targets(
                 model, params, engine, test_start, test_end
             )
             dates = sorted(hmm_targets)
+            # Seeded from fold_index, not from how many folds this process
+            # has run, so a resumed fold gets the same permutation it would
+            # have got in one pass.
             shuffled_targets = self._shuffled_exposure_targets(
                 hmm_targets, seed=self.random_seed + fold_index
             )
 
-            for name in selected:
+            for name in pending:
                 # Built here rather than all five up front: a subset run must
                 # not pay for baselines it was not asked for, and each of
                 # these recomputes index features over the fold.
@@ -572,7 +670,7 @@ class WalkForwardValidator:
                 cash_curves[name].append(result.cash_history)
 
             if progress is not None:
-                equity = "  ".join(f"{name}={running_equity[name]:,.0f}" for name in selected)
+                equity = "  ".join(f"{name}={running_equity[name]:,.0f}" for name in pending)
                 progress(
                     f"fold {fold_index + 1}/{len(folds)} "
                     f"test {test_start}..{test_end}  {equity}"
