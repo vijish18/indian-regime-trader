@@ -704,6 +704,14 @@ def _sell_fill(instrument_id: str, quantity: int, price: float) -> FillRecord:
 STOP_POLICY = StopLossPolicy(
     hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03
 )
+"""The shipped setting: +3% net closes the position outright."""
+
+TRAIL_STOP_POLICY = StopLossPolicy(
+    hard_stop_pct=0.03,
+    trail_drop_pct=0.02,
+    trail_arm_net_profit_pct=0.03,
+    close_on_arm=False,
+)
 
 
 def _reshape_session(
@@ -776,7 +784,7 @@ def test_a_trailing_stop_banks_a_profitable_pullback(tmp_path: Path) -> None:
     """Up 10% at the high, closed 7% up -- a fall of more than 2% from the
     high, and the exit still clears 3% after costs."""
     env = Environment(n_days=120, n_stocks=1)
-    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    engine = env.engine(tmp_path, stop_loss_policy=TRAIL_STOP_POLICY)
     signal_date = env.dates[80]
     execution_date = env.calendar.next_trading_day(signal_date)
     instrument_id = env.instrument_ids[0]
@@ -793,7 +801,7 @@ def test_a_trailing_stop_banks_a_profitable_pullback(tmp_path: Path) -> None:
     assert exit_record.breach.reference_price == pytest.approx(float(bar.high))
     assert exit_record.breach.stop_level == pytest.approx(float(bar.high) * 0.98)
     assert exit_record.realized_pnl > 0
-    assert exit_record.breach.net_profit_pct > STOP_POLICY.trail_arm_net_profit_pct
+    assert exit_record.breach.net_profit_pct > TRAIL_STOP_POLICY.trail_arm_net_profit_pct
     assert result.positions_history[execution_date] == {}
 
 
@@ -955,3 +963,33 @@ def test_a_partial_sale_retires_its_share_of_the_basis_and_keeps_the_price() -> 
     assert holdings["NSE:ACME"] == 150
     assert avg_price["NSE:ACME"] == pytest.approx(110.0)
     assert cost_basis["NSE:ACME"] == pytest.approx(full_basis * 0.75)
+
+
+def test_a_take_profit_banks_the_gain_without_waiting_for_a_pullback(
+    tmp_path: Path,
+) -> None:
+    """The shipped rule. Closed 7% up and still near its high: the trailing
+    stop would hold on, the take profit sells."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    signal_date = env.dates[80]
+    execution_date = env.calendar.next_trading_day(signal_date)
+    bar = _reshape_session(
+        env,
+        env.instrument_ids[0],
+        execution_date,
+        high_mult=1.075,
+        low_mult=1.0,
+        close_mult=1.07,
+    )
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("take_profit", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert len(result.stop_exits) == 1
+    exit_record = result.stop_exits[0]
+    assert exit_record.breach.reason is StopReason.TAKE_PROFIT
+    # Sold at the close -- the price the rule was tested at, not the high.
+    assert exit_record.breach.fill_price == pytest.approx(float(bar.close))
+    assert exit_record.realized_pnl > 0
+    assert result.positions_history[execution_date] == {}

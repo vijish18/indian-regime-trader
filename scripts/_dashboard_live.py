@@ -162,18 +162,27 @@ def stop_status(
 
     basis = entry * shares
     hard = hard_stop_level(entry, policy.hard_stop_pct)
-    trail = trailing_stop_level(day_high, policy.trail_drop_pct) if day_high > 0 else 0.0
     net_now = (net_sale(last) / basis) - 1.0 if basis > 0 else 0.0
+    at_target = net_now > policy.trail_arm_net_profit_pct
 
     hard_hit = day_low > 0 and day_low <= hard
-    trail_armed = trail > 0 and net_now > policy.trail_arm_net_profit_pct
-    trail_hit = trail_armed and last <= trail
+    # With close_on_arm the threshold IS the exit, so there is no armed-but-
+    # open state to show: a position that reaches it is sold on this same
+    # refresh and appears under realised P&L, not here.
+    trail = (
+        trailing_stop_level(day_high, policy.trail_drop_pct)
+        if day_high > 0 and not policy.close_on_arm
+        else 0.0
+    )
+    trail_hit = at_target and trail > 0 and last <= trail
 
     if hard_hit:
         state = "hard_stop_hit"
+    elif policy.close_on_arm and at_target:
+        state = "take_profit_hit"
     elif trail_hit:
         state = "trail_hit"
-    elif trail_armed:
+    elif at_target:
         state = "trail_armed"
     else:
         state = "ok"
@@ -181,12 +190,17 @@ def stop_status(
     return {
         "available": True,
         "state": state,
+        "close_on_arm": policy.close_on_arm,
         "hard_level": hard,
         "hard_distance_pct": (last / hard - 1) if hard > 0 else 0.0,
-        "trail_level": trail if trail_armed else None,
-        "trail_distance_pct": (last / trail - 1) if trail_armed and trail > 0 else None,
+        "trail_level": trail if at_target and trail > 0 else None,
+        "trail_distance_pct": (last / trail - 1) if at_target and trail > 0 else None,
         "net_profit_pct": net_now,
         "arm_threshold_pct": policy.trail_arm_net_profit_pct,
+        # How much further the price has to move to reach the profit exit,
+        # as a fraction of the current price -- the counterpart to
+        # hard_distance_pct on the downside.
+        "target_distance_pct": max(policy.trail_arm_net_profit_pct - net_now, 0.0),
     }
 
 
@@ -348,8 +362,13 @@ def book_view(book: Any, quotes: dict[str, Any], policy: Any, costs: Any) -> dic
             "hard_stop_pct": policy.hard_stop_pct if policy else None,
             "trail_drop_pct": policy.trail_drop_pct if policy else None,
             "trail_arm_net_profit_pct": policy.trail_arm_net_profit_pct if policy else None,
+            "close_on_arm": policy.close_on_arm if policy else None,
             "hard_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "hard_stop_hit"),
-            "trail_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "trail_hit"),
+            "trail_hit": sum(
+                1
+                for r in rows
+                if (r["stop"] or {}).get("state") in ("trail_hit", "take_profit_hit")
+            ),
             "trail_armed": sum(
                 1 for r in rows if (r["stop"] or {}).get("state") == "trail_armed"
             ),

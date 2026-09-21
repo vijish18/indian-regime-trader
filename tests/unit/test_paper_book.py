@@ -23,6 +23,14 @@ from risk.stop_loss import StopLossPolicy
 POLICY = StopLossPolicy(
     hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03
 )
+"""The shipped setting: +3% net closes the position outright."""
+
+TRAIL_POLICY = StopLossPolicy(
+    hard_stop_pct=0.03,
+    trail_drop_pct=0.02,
+    trail_arm_net_profit_pct=0.03,
+    close_on_arm=False,
+)
 TODAY = dt.date(2026, 9, 21)
 SEED_DATE = TODAY - dt.timedelta(days=4)
 """The fixture book is opened from a previous session's selection, which is
@@ -144,13 +152,29 @@ def test_the_exit_fills_at_the_worse_of_the_level_and_the_screen(
     assert closed[0].exit_price == pytest.approx(92.0)
 
 
-def test_a_trailing_stop_closes_a_winner_and_books_the_profit(
+def test_a_take_profit_closes_a_winner_and_books_the_profit(
     costs: CostModel,
 ) -> None:
+    """The shipped rule: reaching the threshold sells, no pullback needed."""
     book = seeded(costs)
     quotes = {"NSE:ALPHA": quote(107.0, high=110.0, low=106.0)}
 
     closed = book.apply_stops(quotes, policy=POLICY, costs=costs, today=TODAY)
+
+    assert [t.exit_reason for t in closed] == ["take_profit"]
+    assert closed[0].exit_price == pytest.approx(107.0)
+    assert closed[0].net_pnl > 0
+    assert closed[0].net_pnl_pct > POLICY.trail_arm_net_profit_pct
+
+
+def test_a_trailing_stop_closes_a_winner_and_books_the_profit(
+    costs: CostModel,
+) -> None:
+    """The alternative rule, still supported: wait for the 2% pullback."""
+    book = seeded(costs)
+    quotes = {"NSE:ALPHA": quote(107.0, high=110.0, low=106.0)}
+
+    closed = book.apply_stops(quotes, policy=TRAIL_POLICY, costs=costs, today=TODAY)
 
     assert [t.exit_reason for t in closed] == ["trailing_profit_stop"]
     assert closed[0].net_pnl > 0
@@ -333,7 +357,7 @@ def test_realized_summary_counts_wins_losses_and_cost_drag(costs: CostModel) -> 
     assert summary["losses"] == 1
     assert summary["win_rate"] == pytest.approx(0.5)
     assert summary["costs"] > 0
-    assert set(summary["by_reason"]) == {"hard_stop", "trailing_profit_stop"}
+    assert set(summary["by_reason"]) == {"hard_stop", "take_profit"}
     assert len(summary["history"]) == 2
     # Newest first.
     assert summary["history"][0]["symbol"] == "BETA"

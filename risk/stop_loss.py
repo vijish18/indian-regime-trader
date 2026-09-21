@@ -13,20 +13,39 @@ Two independent rules, either of which exits the whole position:
     A loss limiter: it does not move, it does not care about the day, and it
     is the only thing standing between a position and an unbounded loss.
 
-``TRAILING_PROFIT_STOP``
+``TAKE_PROFIT`` (while ``close_on_arm`` is on -- the shipped setting)
+    Selling right now would realise more than ``trail_arm_net_profit_pct``
+    *net of the costs of selling*, DP charge included. The position is closed
+    there and then. Together with the hard stop this is a symmetric band:
+    out at roughly -3% net, out at roughly +3% net, nothing in between.
+
+``TRAILING_PROFIT_STOP`` (while ``close_on_arm`` is off)
     The price falls ``trail_drop_pct`` below **the session's high**, but only
     once selling there would realise more than ``trail_arm_net_profit_pct``
-    *net of the costs of selling*, DP charge included. A profit-taker, not a
-    loss limiter: it gives back at most 2% of a gain to avoid round-tripping
-    a winner, and it is silent on any position that isn't already well ahead.
+    net. A profit-taker that gives back at most 2% of a gain rather than
+    capping the gain, so a name that keeps running is still held.
 
-The arming test is deliberately computed at the price the exit would fill
-at, not at the session high: a position 3.1% up at its high and 1.1% up
-after a 2% pullback was never a 3% winner at any price this rule could have
-sold at, and arming on the high would book a "profit-protecting" exit that
-protects a profit nobody could have taken.
+The two profit rules are different bets. Closing on arm banks every winner
+at the threshold and keeps none of the upside beyond it -- a name that goes
+on to +20% is sold at +3%, and the strategy's returns become a stream of
+small wins against whatever the hard stop lets through. Waiting for the
+pullback keeps the position while it is still rising and pays for that with
+the 2% given back at the top. Which is better depends on the return
+distribution of the names this strategy picks, which is an empirical
+question, so it is configuration rather than a constant.
+
+Both profit tests are computed at the price the exit would fill at, never at
+a high the sale could not reach: a position 3.1% up at its high and 1.1% up
+after a pullback was never a 3% winner at any price the rule could have sold
+at, and testing the high would book a "profit-protecting" exit that protects
+a profit nobody could have taken.
 
 ## What a daily bar proves, and what it doesn't
+
+This section is about the two rules that read a session's extremes: the hard
+stop, always, and the trailing stop when ``close_on_arm`` is off. The
+take-profit reads neither -- it tests the price on the screen and sells
+there, so there is nothing to infer.
 
 ``low <= level`` proves the level *traded*: the hard stop's breach is a
 fact, not an estimate. What the bar cannot give is the fill -- the stop may
@@ -51,12 +70,12 @@ traded price, both known at the moment the question is asked.
 
 ## Precedence
 
-If both rules fire on one session the hard stop is reported. The two can
-only coexist on a session that opened well up, made a high, then collapsed
-through the buy price; chronologically the trail would have sold first, at a
-profit, and the hard stop would never have been reached. Reporting the hard
-stop therefore understates that exit -- again the conservative direction,
-and it never credits a backtest with a sale it cannot prove.
+If both a loss rule and a profit rule fire on one session the hard stop is
+reported. They can only coexist on a session that ran well up, then
+collapsed through the buy price; chronologically the profit rule would have
+sold first, at a gain, and the hard stop would never have been reached.
+Reporting the hard stop therefore understates that exit -- the conservative
+direction, and it never credits a backtest with a sale it cannot prove.
 
 Nothing here decides position size or ranking. It answers one question about
 one holding on one session.
@@ -86,7 +105,13 @@ class StopReason(StrEnum):
 
     TRAILING_PROFIT_STOP = "trailing_profit_stop"
     """Fell ``trail_drop_pct`` below the session high while more than
-    ``trail_arm_net_profit_pct`` ahead, net of selling costs."""
+    ``trail_arm_net_profit_pct`` ahead, net of selling costs. Only reachable
+    when ``close_on_arm`` is off."""
+
+    TAKE_PROFIT = "take_profit"
+    """Reached ``trail_arm_net_profit_pct`` net of selling costs and was
+    closed there, without waiting for a pullback. What ``close_on_arm``
+    does."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +126,23 @@ class StopLossPolicy:
     hard_stop_pct: float
     trail_drop_pct: float
     trail_arm_net_profit_pct: float
+    close_on_arm: bool = True
+    """Whether reaching ``trail_arm_net_profit_pct`` closes the position
+    outright (``TAKE_PROFIT``) instead of arming a trailing stop that waits
+    for a ``trail_drop_pct`` pullback (``TRAILING_PROFIT_STOP``).
+
+    The two are different bets, not different spellings of one. Closing on
+    arm banks every winner at the threshold and keeps none of the upside
+    beyond it: a name that goes on to +20% is sold at +3%. Waiting for the
+    pullback gives back up to ``trail_drop_pct`` of whatever the high
+    reached, and in exchange keeps the position while it is still rising.
+    Which is better is a question about the return distribution of the names
+    this strategy picks, so it is configuration and not a constant.
+
+    ``trail_drop_pct`` is unused while this is on. It stays configured
+    rather than being deleted so the setting can be turned off again without
+    having to rediscover the number."""
+
     enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -117,7 +159,13 @@ class StopLossPolicy:
         threshold is worse than no stop policy: it would report protection
         at a level nobody chose.
         """
-        required = ("hard_stop_pct", "trail_drop_pct", "trail_arm_net_profit_pct", "enabled")
+        required = (
+            "hard_stop_pct",
+            "trail_drop_pct",
+            "trail_arm_net_profit_pct",
+            "close_on_arm",
+            "enabled",
+        )
         missing = [key for key in required if key not in raw]
         if missing:
             raise StopLossError(f"stop_loss config is missing required keys: {missing}")
@@ -125,6 +173,7 @@ class StopLossPolicy:
             hard_stop_pct=float(raw["hard_stop_pct"]),
             trail_drop_pct=float(raw["trail_drop_pct"]),
             trail_arm_net_profit_pct=float(raw["trail_arm_net_profit_pct"]),
+            close_on_arm=bool(raw["close_on_arm"]),
             enabled=bool(raw["enabled"]),
         )
 
@@ -244,6 +293,26 @@ def evaluate(
             fill_price=fill,
             net_profit_pct=net_profit_pct(cost_basis, net_sale_value, fill),
         )
+
+    if policy.close_on_arm:
+        # The take-profit sells at the price on the screen, so the threshold
+        # is tested there too -- no separate level to fill at, and nothing
+        # about the session's extremes is involved. In a backtest
+        # ``reference_price`` is the close, so a session that crossed the
+        # threshold intraday and closed below it is not counted: the profit
+        # has to be there at a price the rule could actually have sold at.
+        profit = net_profit_pct(cost_basis, net_sale_value, reference_price)
+        if profit > policy.trail_arm_net_profit_pct:
+            return StopBreach(
+                instrument_id=instrument_id,
+                reason=StopReason.TAKE_PROFIT,
+                entry_price=entry_price,
+                reference_price=reference_price,
+                stop_level=reference_price,
+                fill_price=reference_price,
+                net_profit_pct=profit,
+            )
+        return None
 
     trail_level = trailing_stop_level(session_high, policy.trail_drop_pct)
     if reference_price <= trail_level:

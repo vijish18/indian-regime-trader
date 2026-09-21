@@ -154,19 +154,28 @@ def main(argv: list[str]) -> int:
     if not quotes.get("available"):
         raise SystemExit(f"no live quotes: {quotes.get('reason')}")
 
+    is_open = market_is_open(ist_now)
     closed_now, opened_now = [], []
     if not args.no_trade:
         quote_rows = quotes["quotes"]
+        # Exits are always allowed, entries only while the market is open.
+        # The asymmetry is deliberate: a quote after the close is the closing
+        # print, which is a real price a resting stop could have sold into,
+        # so acting on a breach is honest. Opening a *new* position on it is
+        # not -- the account would be buying at a price that is no longer
+        # available, and the cash is better left idle until the next session
+        # prices the bench properly.
         closed_now = book.apply_stops(quote_rows, policy=policy, costs=costs, today=today)
-        slot = book.budget / max_positions if max_positions else book.budget
-        opened_now = book.reallocate(
-            bench,
-            quote_rows,
-            costs=costs,
-            today=today,
-            slot=slot,
-            max_positions=max_positions,
-        )
+        if is_open:
+            slot = book.budget / max_positions if max_positions else book.budget
+            opened_now = book.reallocate(
+                bench,
+                quote_rows,
+                costs=costs,
+                today=today,
+                slot=slot,
+                max_positions=max_positions,
+            )
         book.updated_at = ist_now.isoformat(timespec="seconds")
         book.save(args.book)
 
@@ -183,7 +192,8 @@ def main(argv: list[str]) -> int:
             f"cost {position.entry_cost:,.0f}"
         )
     if closed_now and not opened_now and book.cash > 0:
-        print(f"  cash {book.cash:,.0f} idle: no ranked candidate available to buy")
+        why = "market closed" if not is_open else "no ranked candidate available to buy"
+        print(f"  cash {book.cash:,.0f} idle: {why}")
 
     book_payload = book_view(book, quotes, policy, costs)
     data["live"] = quotes
@@ -232,7 +242,7 @@ def main(argv: list[str]) -> int:
         encoding="utf-8",
     )
 
-    state = "OPEN" if market_is_open(ist_now) else "closed"
+    state = "OPEN" if is_open else "closed"
     realized = data["realized"]
     if book_payload.get("available"):
         print(

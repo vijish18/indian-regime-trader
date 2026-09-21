@@ -380,15 +380,22 @@ class StopLossConfig(BaseModel):
     """Exit when the price falls this far below the price the position was
     bought at. A fixed level, not a trailing one."""
 
+    close_on_arm: bool
+    """True: sell as soon as the exit would net ``trail_arm_net_profit_pct``.
+    False: arm a trailing stop at that point and wait for a
+    ``trail_drop_pct`` pullback off the session high instead. See
+    ``risk/stop_loss.py`` for why this is a real choice and not a detail."""
+
     trail_drop_pct: Percent = Field(gt=0, lt=1)
     """Exit when the price falls this far below the session's high -- but
-    only if ``trail_arm_net_profit_pct`` is also satisfied."""
+    only if ``trail_arm_net_profit_pct`` is also satisfied. Unused while
+    ``close_on_arm`` is true."""
 
     trail_arm_net_profit_pct: Percent = Field(gt=0, lt=1)
-    """The trailing stop stays disarmed until selling would realise more than
+    """The profit rule does nothing until selling would realise more than
     this, **net of every sell-side charge including the DP charge**. Without
-    it the trailing rule would fire on positions that are flat or losing,
-    which is the hard stop's job at a much wider level."""
+    it a profit rule would fire on positions that are flat or losing, which
+    is the hard stop's job at a much wider level."""
 
 
 class RiskConfig(BaseModel):

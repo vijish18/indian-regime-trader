@@ -172,9 +172,14 @@ risk:
   stop_loss:
     enabled: true
     hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
-    trail_drop_pct: 0.02             # exit if price falls 2% below the session HIGH...
-    trail_arm_net_profit_pct: 0.03   # ...but only once that exit still nets >3% after
-                                      # every sell-side charge, DP charge included
+    trail_arm_net_profit_pct: 0.03   # exit once the sale nets >3% after every sell-side
+                                      # charge, DP charge included
+    close_on_arm: true               # true: sell AT the 3% net threshold (take profit).
+                                      # false: arm a trailing stop there instead and wait
+                                      # for trail_drop_pct off the session high, keeping
+                                      # the position while it is still rising.
+    trail_drop_pct: 0.02             # unused while close_on_arm is true; kept so the
+                                      # setting can be turned off without rediscovering it
 
 execution:
   mode: paper                        # paper | live

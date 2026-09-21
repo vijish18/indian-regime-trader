@@ -59,6 +59,7 @@ def risk_config(**overrides: object) -> RiskConfig:
             "hard_stop_pct": 0.03,
             "trail_drop_pct": 0.02,
             "trail_arm_net_profit_pct": 0.03,
+            "close_on_arm": True,
         },
     }
     defaults.update(overrides)
