@@ -55,6 +55,9 @@ include = [
 ]
 exclude = ["tests*", "scripts*", "docs*"]
 
+[tool.setuptools.package-data]
+monitoring = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

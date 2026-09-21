@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socket import socket
+from socketserver import BaseServer
 from urllib.parse import urlsplit
 
 ASSETS = Path(__file__).with_name("web")
@@ -36,7 +39,9 @@ def read_snapshot(state_dir: Path) -> bytes:
             parse_constant=invalid,
         )
         ticks = tick_data.get("ticks", [])
-        if ticks and ticks[-1]["t"] > (data.get("ticks", {}).get("updated_at") or ""):
+        previous = data.get("ticks", {}).get("updated_at")
+        if ticks and (not previous or dt.datetime.fromisoformat(ticks[-1]["t"])
+                      > dt.datetime.fromisoformat(previous)):
             data["ticks"] = {"updated_at": ticks[-1]["t"], "points": ticks[-840:]}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
@@ -44,9 +49,12 @@ def read_snapshot(state_dir: Path) -> bytes:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    def __init__(self, *args: object, state_dir: Path, **kwargs: object) -> None:
+    def __init__(
+        self, request: socket, client_address: tuple[str, int], server: BaseServer,
+        *, state_dir: Path,
+    ) -> None:
         self.state_dir = state_dir
-        super().__init__(*args, **kwargs)
+        super().__init__(request, client_address, server)
 
     def do_GET(self) -> None:
         route = urlsplit(self.path).path
@@ -72,7 +80,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+        )
         self.end_headers()
         self.wfile.write(body)
 
