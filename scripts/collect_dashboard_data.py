@@ -32,6 +32,7 @@ import yaml  # noqa: E402
 
 from backtest.walk_forward import STRATEGY_NAMES  # noqa: E402
 from data.calendar import NSETradingCalendar  # noqa: E402
+from scripts._dashboard_live import live_book, live_quotes  # noqa: E402
 
 DATA_CACHE = REPO_ROOT / "data_cache"
 REFERENCE = DATA_CACHE / "reference"
@@ -401,6 +402,83 @@ def paper_sizing(selection: dict[str, Any], capital: float) -> dict[str, Any]:
     }
 
 
+
+def trade_history(series_dir: Path | None, limit: int = 300) -> dict[str, Any]:
+    """Closed round trips per strategy, plus the gap that makes them partial.
+
+    A fold boundary flattens the book, so a fold's final holdings are dropped
+    rather than sold and never produce a fill. On the HMM run that is 220,468
+    of 2,138,185 bought shares. Closed trips therefore cover only the
+    positions the strategy chose to exit -- which skews them toward winners,
+    and is why their profit factor (1.68) disagrees with an equity curve that
+    lost money.
+
+    Both figures are reported from their own source and never summed. The
+    unmatched lots are counted here so the gap is visible rather than
+    inferred from a discrepancy later.
+    """
+    if series_dir is None or not series_dir.is_dir():
+        return {"available": False, "reason": "no series directory"}
+
+    import pandas as pd
+
+    from backtest.trade_analysis import by_instrument, round_trips, summarize
+
+    out: dict[str, Any] = {}
+    for path in sorted(series_dir.glob("*.trades*.csv")):
+        name = path.name.split(".trades")[0]
+        if name in out:
+            continue
+        frame = pd.read_csv(path)
+        for column in ("signal_date", "execution_date"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column]).dt.date
+        closed, still_open = round_trips(frame)
+        if not closed:
+            continue
+        stats = summarize(closed)
+        per_name = by_instrument(closed)
+        recent = sorted(closed, key=lambda t: t.exit_date, reverse=True)[:limit]
+        out[name] = {
+            "summary": {
+                "round_trips": stats.round_trips,
+                "wins": stats.wins,
+                "losses": stats.losses,
+                "win_rate": stats.win_rate,
+                "net_pnl": stats.net_pnl,
+                "gross_profit": stats.gross_profit,
+                "gross_loss": stats.gross_loss,
+                "profit_factor": (
+                    None if stats.profit_factor == float("inf") else stats.profit_factor
+                ),
+                "avg_win": stats.avg_win,
+                "avg_loss": stats.avg_loss,
+                "avg_holding_days": stats.avg_holding_days,
+                "total_costs": stats.total_costs,
+                "unmatched_lots": len(still_open),
+                "unmatched_shares": sum(p.quantity for p in still_open),
+            },
+            "trades": [
+                {
+                    "instrument_id": t.instrument_id,
+                    "entry_date": t.entry_date.isoformat(),
+                    "exit_date": t.exit_date.isoformat(),
+                    "quantity": t.quantity,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "net_pnl": t.net_pnl,
+                    "cost": t.cost,
+                    "return_pct": t.return_pct,
+                    "holding_days": t.holding_days,
+                }
+                for t in recent
+            ],
+            "best": per_name.head(8).to_dict("records"),
+            "worst": per_name.tail(8).to_dict("records"),
+        }
+    return {"available": bool(out), "strategies": out}
+
+
 def broker_account() -> dict[str, Any]:
     """Zerodha session state, reported rather than assumed.
 
@@ -472,6 +550,11 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     selection = stock_selection(args.selection_as_of)
+    sizing = paper_sizing(selection, args.paper_capital)
+    quotes = live_quotes(
+        [p["instrument_id"] for p in (selection.get("picks") or [])],
+        REPO_ROOT / "state" / "kite_session.json",
+    )
     data: dict[str, Any] = {
         "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "provenance": provenance(),
@@ -482,7 +565,10 @@ def main(argv: list[str]) -> int:
         "regimes": regime_distribution(args.regime_cache),
         "hmm": hmm_model(),
         "selection": selection,
-        "paper_sizing": paper_sizing(selection, args.paper_capital),
+        "paper_sizing": sizing,
+        "live": quotes,
+        "live_book": live_book(sizing, quotes, selection.get("picks") or []),
+        "trade_history": trade_history(args.series_dir),
         "broker": broker_account(),
     }
 
@@ -497,6 +583,12 @@ def main(argv: list[str]) -> int:
     print(f"  cost eras        : {len(data['cost_eras'])}")
     sel = data["selection"]
     print(f"  stock selection  : {sel['count'] if sel.get('available') else sel.get('reason')}")
+    lb = data["live_book"]
+    live = data["live"]
+    print(f"  live quotes      : {len(live.get('quotes', {})) or live.get('reason')}")
+    if lb.get("available"):
+        print(f"  live book        : {lb['winners']}W/{lb['losers']}L  "
+              f"P&L {lb['pnl']:+,.0f} ({lb['pnl_pct']*100:+.2f}%)")
     print(f"  equity curves    : {len(data['equity_curves'])}")
     strategies = data["strategies"]
     if strategies["available"]:
