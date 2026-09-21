@@ -37,6 +37,9 @@ DATA_CACHE = REPO_ROOT / "data_cache"
 REFERENCE = DATA_CACHE / "reference"
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
 COST_SCHEDULE = REPO_ROOT / "config" / "cost_schedules.yaml"
+DP_CHARGE_INR = 15.93
+"""Flat per-scrip sell charge from the cost schedule. Flat is the point:
+it does not shrink with the position, so it dominates small accounts."""
 
 
 
@@ -332,6 +335,72 @@ def stock_selection(as_of_text: str | None, frame_cache: int = 400) -> dict[str,
     }
 
 
+
+def paper_sizing(selection: dict[str, Any], capital: float) -> dict[str, Any]:
+    """What the selection actually becomes at a given account size.
+
+    A weight is a fraction; a share is an integer. At Rs 1 crore that gap is
+    a rounding error, and at Rs 1 lakh it is structural: a Rs 10,000 slot
+    buys two shares of a Rs 4,360 stock and none at all of an Rs 11,803 one.
+    The portfolio then sits well below the exposure the regime asked for,
+    for reasons no part of the strategy decided.
+
+    Flat fees behave the same way. The DP charge is Rs 15.93 per scrip per
+    sell whatever the position is worth -- about 0.02 bps on Rs 10 lakh and
+    16-18 bps on Rs 10,000.
+
+    Shown rather than corrected, because the fix is a portfolio decision
+    (fewer, larger positions, or a price filter) and not something this
+    collector should make on its own.
+    """
+    picks = selection.get("picks") or []
+    if not picks or capital <= 0:
+        return {"available": False, "reason": "no selection or no capital"}
+
+    bars = DATA_CACHE / "raw" / "equity_bars"
+    slot = capital / len(picks)
+    rows, deployed, unbuyable = [], 0.0, 0
+    for pick in picks:
+        path = bars / f"{pick['instrument_id'].replace(':', '_')}.csv"
+        price = None
+        if path.is_file():
+            with path.open(encoding="utf-8", newline="") as handle:
+                rows_in_file = list(csv.DictReader(handle))
+            if rows_in_file:
+                try:
+                    price = float(rows_in_file[-1]["close"])
+                except (KeyError, ValueError):
+                    price = None
+        if not price:
+            continue
+        shares = int(slot // price)
+        value = shares * price
+        deployed += value
+        if shares == 0:
+            unbuyable += 1
+        rows.append(
+            {
+                "symbol": pick["symbol"],
+                "rank": pick["rank"],
+                "price": price,
+                "shares": shares,
+                "value": value,
+                "drift_pct": (value - slot) / slot if slot else 0.0,
+                "dp_bps": (DP_CHARGE_INR / value * 10_000) if value else None,
+            }
+        )
+    return {
+        "available": True,
+        "capital": capital,
+        "slot": slot,
+        "positions": rows,
+        "deployed": deployed,
+        "stranded": capital - deployed,
+        "stranded_pct": (capital - deployed) / capital if capital else 0.0,
+        "unbuyable": unbuyable,
+    }
+
+
 def broker_account() -> dict[str, Any]:
     """Zerodha session state, reported rather than assumed.
 
@@ -390,12 +459,19 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "state" / "dashboard_data.json")
     parser.add_argument(
+        "--paper-capital",
+        type=float,
+        default=100_000.0,
+        help="account size to size the current selection against (default Rs 1 lakh)",
+    )
+    parser.add_argument(
         "--selection-as-of",
         default=None,
         help="run the real stock selector for this date (YYYY-MM-DD); takes a few minutes",
     )
     args = parser.parse_args(argv[1:])
 
+    selection = stock_selection(args.selection_as_of)
     data: dict[str, Any] = {
         "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "provenance": provenance(),
@@ -405,7 +481,8 @@ def main(argv: list[str]) -> int:
         "equity_curves": equity_curves(args.series_dir),
         "regimes": regime_distribution(args.regime_cache),
         "hmm": hmm_model(),
-        "selection": stock_selection(args.selection_as_of),
+        "selection": selection,
+        "paper_sizing": paper_sizing(selection, args.paper_capital),
         "broker": broker_account(),
     }
 
