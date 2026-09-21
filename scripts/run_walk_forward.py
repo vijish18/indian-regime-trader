@@ -42,6 +42,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -501,7 +502,7 @@ def _truncate_checkpoints(series_dir: Path, name: str, folds_done: int) -> None:
                 f"  checkpoint: {filename} {len(frame)} -> {len(kept)} rows "
                 f"(stale or duplicated folds removed)"
             )
-            kept.to_csv(path, index=False)
+            atomic_write(path, kept.to_csv(index=False))
 
 
 def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Series:
@@ -538,6 +539,7 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--state-dir", type=Path, default=REPO_ROOT / "state" / "walk_forward")
     parser.add_argument("--report", type=Path, default=REPORT_PATH)
+    parser.add_argument("--initial-equity", type=float, default=10_000_000.0)
     parser.add_argument(
         "--frame-cache",
         type=int,
@@ -593,6 +595,9 @@ def main(argv: list[str]) -> int:
         frame_cache=args.frame_cache,
     )
 
+    if not math.isfinite(args.initial_equity) or args.initial_equity <= 0:
+        raise SystemExit("--initial-equity must be finite and positive")
+    validator.initial_equity = args.initial_equity
     folds = validator.generate_folds(args.start, args.end)
     print(f"{len(folds)} walk-forward folds from {args.start} to {args.end}")
     if not folds:
@@ -656,14 +661,13 @@ def main(argv: list[str]) -> int:
         if args.series_dir is None:
             return
         args.series_dir.mkdir(parents=True, exist_ok=True)
-        curve.rename("equity").to_csv(
-            args.series_dir / f"{name}.equity.csv", index_label="session_date"
+        atomic_write(
+            args.series_dir / f"{name}.equity.csv",
+            curve.rename("equity").to_csv(index_label="session_date"),
         )
-        trades.to_csv(args.series_dir / f"{name}.trades.csv", index=False)
+        atomic_write(args.series_dir / f"{name}.trades.csv", trades.to_csv(index=False))
         print(f"  series -> {args.series_dir / f'{name}.equity.csv'} ({len(curve):,} rows)")
 
-    vetoes: list[dict[str, object]] = []
-    holdings: list[dict[str, object]] = []
     completed_folds: dict[str, int] = dict(resumed_counts)
 
     def on_fold(name: str, fold_index: int, result: BacktestResult) -> None:
@@ -712,9 +716,8 @@ def main(argv: list[str]) -> int:
             cash_checkpoint, cash_frame.rename_axis("session_date").reset_index(), fold_index + 1
         )
 
-        completed_folds[name] = fold_index + 1
-        _write_manifest(args, folds_total, completed_folds, fingerprint, validator.initial_equity)
-
+        vetoes: list[dict[str, object]] = []
+        holdings: list[dict[str, object]] = []
         for day in result.risk_decisions:
             for decision in day.decisions:
                 if decision.approved:
@@ -743,6 +746,12 @@ def main(argv: list[str]) -> int:
                     }
                 )
 
+        audit_dir = args.series_dir / "audit"
+        for label, rows in (("vetoes", vetoes), ("holdings", holdings)):
+            atomic_write(audit_dir / f"{name}.{fold_index + 1}.{label}.json", json.dumps(rows))
+        completed_folds[name] = fold_index + 1
+        _write_manifest(args, folds_total, completed_folds, fingerprint, validator.initial_equity)
+
     reports = validator.run_all_strategies(
         args.start,
         args.end,
@@ -756,9 +765,16 @@ def main(argv: list[str]) -> int:
     if args.series_dir is not None:
         args.series_dir.mkdir(parents=True, exist_ok=True)
         tag = args.strategy[0] if args.strategy else "all"
-        pd.DataFrame(vetoes).to_csv(args.series_dir / f"{tag}.vetoes.csv", index=False)
-        pd.DataFrame(holdings).to_csv(args.series_dir / f"{tag}.holdings.csv", index=False)
-        print(f"  vetoes -> {len(vetoes):,} rows   holdings -> {len(holdings):,} rows")
+        for label in ("vetoes", "holdings"):
+            rows = []
+            for name in selected_names:
+                for fold_number in range(1, completed_folds[name] + 1):
+                    audit = args.series_dir / "audit" / f"{name}.{fold_number}.{label}.json"
+                    rows.extend(json.loads(audit.read_text(encoding="utf-8")))
+            atomic_write(
+                args.series_dir / f"{tag}.{label}.csv", pd.DataFrame(rows).to_csv(index=False)
+            )
+            print(f"  {label} -> {len(rows):,} rows")
 
     print()
     header = (
@@ -775,7 +791,8 @@ def main(argv: list[str]) -> int:
 
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(
+        atomic_write(
+            args.json_out,
             json.dumps(
                 {
                     "start": args.start.isoformat(),
@@ -784,7 +801,6 @@ def main(argv: list[str]) -> int:
                 },
                 indent=2,
             ),
-            encoding="utf-8",
         )
         print(f"\njson -> {args.json_out}")
 
@@ -793,7 +809,7 @@ def main(argv: list[str]) -> int:
     # report path would leave a four-row comparison looking like the answer.
     if args.strategy is None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(render(reports, args.start, args.end), encoding="utf-8")
+        atomic_write(args.report, render(reports, args.start, args.end))
         print(f"\nreport -> {args.report}")
     return 0
 

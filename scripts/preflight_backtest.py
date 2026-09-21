@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,7 +65,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT))
 
-REFERENCE = REPO_ROOT / "data_cache" / "reference"
+DATA_CACHE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache"))
+REFERENCE = DATA_CACHE / "reference"
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -198,8 +200,8 @@ def check_index_history(start: dt.date, end: dt.date) -> Check:
         from data.storage import LocalDataStore, StorageFormat
 
         store = LocalDataStore(
-            raw_root=REPO_ROOT / "data_cache" / "raw",
-            normalized_root=REPO_ROOT / "data_cache" / "normalized",
+            raw_root=DATA_CACHE / "raw",
+            normalized_root=DATA_CACHE / "normalized",
             reference_root=REFERENCE,
             storage_format=StorageFormat.CSV,
         )
@@ -284,8 +286,8 @@ def check_unadjustable_actions() -> Check:
 
         actions = InMemoryCorporateActionProvider.from_file(REFERENCE / "corporate_actions.csv")
         store = LocalDataStore(
-            raw_root=REPO_ROOT / "data_cache" / "raw",
-            normalized_root=REPO_ROOT / "data_cache" / "normalized",
+            raw_root=DATA_CACHE / "raw",
+            normalized_root=DATA_CACHE / "normalized",
             reference_root=REFERENCE,
             storage_format=StorageFormat.CSV,
         )
