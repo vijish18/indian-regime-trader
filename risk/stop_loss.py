@@ -1,5 +1,19 @@
 """Per-position stops: the two rules that take a single holding out.
 
+The master rule, as configured (``risk.stop_loss`` in settings.yaml). A
+position leaves the book when either holds:
+
+1. it trades more than 3% below the price it was **bought** at, or
+2. it is more than 5% in profit **after every sell-side charge, DP charge
+   included**, and has fallen 2% below **today's running high**.
+
+The asymmetry is the design. Losses are cut at 3%; winners are left alone
+until they are 5% ahead and then trailed rather than capped, so a name that
+keeps running keeps running. An earlier setting closed winners at the
+threshold itself, which made every win the same size as a loss and put the
+whole result on the win rate; ``close_on_arm`` still selects that behaviour
+so a backtest can measure the difference instead of arguing about it.
+
 Until these existed nothing limited one name's loss. The circuit breakers
 act on the *book* -- daily loss, rolling loss, drawdown -- so a single
 position could bleed 30% without tripping anything, and a holding only left
@@ -13,17 +27,16 @@ Two independent rules, either of which exits the whole position:
     A loss limiter: it does not move, it does not care about the day, and it
     is the only thing standing between a position and an unbounded loss.
 
-``TAKE_PROFIT`` (while ``close_on_arm`` is on -- the shipped setting)
-    Selling right now would realise more than ``trail_arm_net_profit_pct``
-    *net of the costs of selling*, DP charge included. The position is closed
-    there and then. Together with the hard stop this is a symmetric band:
-    out at roughly -3% net, out at roughly +3% net, nothing in between.
-
-``TRAILING_PROFIT_STOP`` (while ``close_on_arm`` is off)
+``TRAILING_PROFIT_STOP`` (while ``close_on_arm`` is off -- the shipped setting)
     The price falls ``trail_drop_pct`` below **the session's high**, but only
     once selling there would realise more than ``trail_arm_net_profit_pct``
     net. A profit-taker that gives back at most 2% of a gain rather than
     capping the gain, so a name that keeps running is still held.
+
+``TAKE_PROFIT`` (while ``close_on_arm`` is on)
+    Selling right now would realise more than ``trail_arm_net_profit_pct``
+    net. The position is closed there and then, giving up everything above
+    the threshold.
 
 The two profit rules are different bets. Closing on arm banks every winner
 at the threshold and keeps none of the upside beyond it -- a name that goes

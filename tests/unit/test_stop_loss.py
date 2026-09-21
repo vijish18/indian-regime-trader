@@ -352,14 +352,27 @@ def test_policy_from_mapping_requires_every_key() -> None:
         StopLossPolicy.from_mapping({"enabled": True, "hard_stop_pct": 0.03})
 
 
-def test_policy_from_mapping_matches_the_shipped_settings() -> None:
+def test_the_shipped_settings_are_the_master_rule() -> None:
+    """A position leaves the book when either holds:
+
+      1. it trades more than 3% below the price it was BOUGHT at
+      2. it is more than 5% in profit after every sell-side charge, DP
+         charge included, AND has fallen 2% below today's running high
+
+    Pinned here because changing any of it is a decision about the strategy,
+    not a tweak. If this test fails, the master rule was edited -- which is
+    allowed, but it should be on purpose.
+    """
     from config.loader import load_settings
 
-    configured = load_settings().risk.stop_loss
-    policy = StopLossPolicy.from_mapping(configured.model_dump())
+    policy = StopLossPolicy.from_mapping(load_settings().risk.stop_loss.model_dump())
+
+    assert policy.enabled is True
     assert policy.hard_stop_pct == pytest.approx(0.03)
+    assert policy.trail_arm_net_profit_pct == pytest.approx(0.05)
     assert policy.trail_drop_pct == pytest.approx(0.02)
-    assert policy.trail_arm_net_profit_pct == pytest.approx(0.03)
+    # Arm and trail, not sell at the threshold: a winner is not capped at 5%.
+    assert policy.close_on_arm is False
 
 
 # -- the take profit (close_on_arm) ----------------------------------------
@@ -480,8 +493,82 @@ def test_close_on_arm_is_required_in_config() -> None:
         )
 
 
-def test_the_shipped_settings_close_on_arm() -> None:
-    from config.loader import load_settings
+def test_the_master_rule_holds_a_winner_that_has_not_pulled_back() -> None:
+    """The point of arming rather than closing. Up 7% net and still at its
+    high: nothing fires, and the position keeps running."""
+    master = StopLossPolicy(
+        hard_stop_pct=0.03,
+        trail_drop_pct=0.02,
+        trail_arm_net_profit_pct=0.05,
+        close_on_arm=False,
+    )
+    assert (
+        evaluate(
+            "ACME",
+            entry_price=100.0,
+            cost_basis=basis_for(100.0),
+            session_high=109.0,
+            session_low=101.0,
+            reference_price=109.0,
+            net_sale_value=net_sale,
+            policy=master,
+        )
+        is None
+    )
 
-    policy = StopLossPolicy.from_mapping(load_settings().risk.stop_loss.model_dump())
-    assert policy.close_on_arm is True
+
+def test_the_master_rule_needs_five_percent_not_three() -> None:
+    """A 2% pullback from a high that only ever showed a 4% net gain does
+    nothing: the trail is disarmed below the threshold, and the hard stop is
+    the only thing live until the position is properly ahead."""
+    master = StopLossPolicy(
+        hard_stop_pct=0.03,
+        trail_drop_pct=0.02,
+        trail_arm_net_profit_pct=0.05,
+        close_on_arm=False,
+    )
+    # High 106.5, pulled back to 104.3 -- through the trail level, netting
+    # about 2.5%, which is under 5%.
+    assert (
+        evaluate(
+            "ACME",
+            entry_price=100.0,
+            cost_basis=basis_for(100.0),
+            session_high=106.5,
+            session_low=104.0,
+            reference_price=104.3,
+            net_sale_value=net_sale,
+            policy=master,
+        )
+        is None
+    )
+
+
+def test_the_master_rule_banks_a_five_percent_winner_on_a_two_percent_pullback(
+) -> None:
+    quantity = 5_000
+
+    def large_sale(price: float) -> float:
+        return net_sale(price, quantity=quantity)
+
+    master = StopLossPolicy(
+        hard_stop_pct=0.03,
+        trail_drop_pct=0.02,
+        trail_arm_net_profit_pct=0.05,
+        close_on_arm=False,
+    )
+    # Ran to 112, fell to 109.5 -- below 112 * 0.98, and netting about 9%.
+    breach = evaluate(
+        "ACME",
+        entry_price=100.0,
+        cost_basis=basis_for(100.0, quantity),
+        session_high=112.0,
+        session_low=109.0,
+        reference_price=109.5,
+        net_sale_value=large_sale,
+        policy=master,
+    )
+
+    assert breach is not None
+    assert breach.reason is StopReason.TRAILING_PROFIT_STOP
+    assert breach.net_profit_pct > 0.05

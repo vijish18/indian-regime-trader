@@ -169,17 +169,28 @@ risk:
   # Per-position stops (risk/stop_loss.py). These act on ONE holding; every
   # threshold above acts on the book. Both are needed: a circuit breaker never
   # fires for a single name bleeding out inside an otherwise flat portfolio.
+  # THE MASTER STOP RULE. A position leaves the book when either holds:
+  #
+  #   1. it trades more than hard_stop_pct below the price it was BOUGHT at
+  #   2. it is more than trail_arm_net_profit_pct in profit AFTER every
+  #      sell-side charge (DP charge included) AND has fallen trail_drop_pct
+  #      below today's running high
+  #
+  # The asymmetry is the whole design: losses are cut at 3% and winners are
+  # left alone until they are 5% ahead, then trailed rather than capped. An
+  # earlier setting closed winners at the threshold itself (close_on_arm),
+  # which made every win the same size as a loss and put the entire result on
+  # the win rate.
   stop_loss:
     enabled: true
     hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
-    trail_arm_net_profit_pct: 0.03   # exit once the sale nets >3% after every sell-side
-                                      # charge, DP charge included
-    close_on_arm: true               # true: sell AT the 3% net threshold (take profit).
-                                      # false: arm a trailing stop there instead and wait
-                                      # for trail_drop_pct off the session high, keeping
-                                      # the position while it is still rising.
-    trail_drop_pct: 0.02             # unused while close_on_arm is true; kept so the
-                                      # setting can be turned off without rediscovering it
+    trail_arm_net_profit_pct: 0.05   # the trail stays disarmed until the sale would net
+                                      # >5% after every sell-side charge, DP included
+    trail_drop_pct: 0.02             # once armed, exit on a 2% fall from today's high
+    close_on_arm: false              # false: arm and trail (the master rule above).
+                                      # true: sell at the threshold instead, capping every
+                                      # winner there. Kept switchable so the backtest can
+                                      # measure the difference rather than argue about it.
 
 execution:
   mode: paper                        # paper | live
