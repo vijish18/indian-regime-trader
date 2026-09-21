@@ -721,3 +721,210 @@ def test_the_rerank_timestamp_survives_a_save(costs: CostModel, tmp_path: Path) 
 
     assert restored is not None
     assert restored.last_rerank_at == NOW.isoformat()
+
+
+# -- reconciling the book against a new ranking -----------------------------
+
+
+def held_ids(book: PaperBook) -> set[str]:
+    return set(book.positions)
+
+
+def test_a_name_the_new_ranking_still_holds_is_retained(costs: CostModel) -> None:
+    book = seeded(costs)
+    quotes = {"NSE:ALPHA": quote(100.0), "NSE:BETA": quote(200.0)}
+
+    closed = book.apply_ranking(
+        ["NSE:ALPHA", "NSE:BETA"], quotes, costs=costs, today=TODAY
+    )
+
+    assert closed == []
+    assert held_ids(book) == {"NSE:ALPHA", "NSE:BETA"}
+    assert all(p.ranking_exit_after == "" for p in book.positions.values())
+
+
+def test_a_dropped_name_at_a_loss_is_sold_at_once_however_small_the_loss(
+    costs: CostModel,
+) -> None:
+    """No threshold. The 3% stop asks whether the name broke down; this asks
+    whether the strategy still backs it, and a name it has dropped that is
+    also losing has nothing left arguing to hold it."""
+    book = seeded(costs)
+    # Down about 0.5% -- nowhere near the hard stop.
+    quotes = {"NSE:ALPHA": quote(99.5), "NSE:BETA": quote(200.0)}
+
+    closed = book.apply_ranking(["NSE:BETA"], quotes, costs=costs, today=TODAY)
+
+    assert [t.symbol for t in closed] == ["ALPHA"]
+    assert closed[0].exit_reason == "dropped_from_ranking"
+    assert closed[0].exit_price == pytest.approx(99.5)
+    assert closed[0].net_pnl < 0
+    assert held_ids(book) == {"NSE:BETA"}
+
+
+def test_a_name_up_on_the_screen_but_down_after_charges_counts_as_losing(
+    costs: CostModel,
+) -> None:
+    """Profit is measured net, as everywhere else: a position up 0.1% on the
+    screen has not covered its own charges and is not in profit."""
+    book = seeded(costs)
+    quotes = {"NSE:ALPHA": quote(100.1), "NSE:BETA": quote(200.0)}
+
+    closed = book.apply_ranking(["NSE:BETA"], quotes, costs=costs, today=TODAY)
+
+    assert [t.symbol for t in closed] == ["ALPHA"]
+    assert closed[0].exit_reason == "dropped_from_ranking"
+
+
+def test_a_dropped_name_in_profit_keeps_the_day_and_is_marked_to_go(
+    costs: CostModel,
+) -> None:
+    book = seeded(costs)
+    quotes = {"NSE:ALPHA": quote(102.0), "NSE:BETA": quote(200.0)}
+
+    closed = book.apply_ranking(["NSE:BETA"], quotes, costs=costs, today=TODAY)
+
+    assert closed == []
+    assert held_ids(book) == {"NSE:ALPHA", "NSE:BETA"}
+    assert book.positions["NSE:ALPHA"].ranking_exit_after == TODAY.isoformat()
+
+
+def test_a_graced_position_still_has_its_stops(costs: CostModel) -> None:
+    """The grace is from the ranking, not from risk management. A name held
+    to the close because it was winning can still break down before it."""
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+    assert book.positions["NSE:ALPHA"].ranking_exit_after == TODAY.isoformat()
+
+    closed = book.apply_stops(
+        {"NSE:ALPHA": quote(96.0, high=102.0, low=95.0)},
+        policy=POLICY,
+        costs=costs,
+        today=TODAY,
+    )
+
+    assert [t.exit_reason for t in closed] == ["hard_stop"]
+
+
+def test_the_grace_lasts_exactly_one_session(costs: CostModel) -> None:
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+    quotes = {"NSE:ALPHA": quote(103.0), "NSE:BETA": quote(200.0)}
+
+    same_day = book.apply_scheduled_exits(
+        {"NSE:BETA"}, quotes, costs=costs, today=TODAY
+    )
+    assert same_day == []
+    assert "NSE:ALPHA" in book.positions
+
+    tomorrow = book.apply_scheduled_exits(
+        {"NSE:BETA"}, quotes, costs=costs, today=TODAY + dt.timedelta(days=1)
+    )
+
+    assert [t.symbol for t in tomorrow] == ["ALPHA"]
+    assert tomorrow[0].exit_reason == "ranking_exit"
+    assert tomorrow[0].net_pnl > 0
+
+
+def test_the_grace_is_not_renewed_by_a_second_drop(costs: CostModel) -> None:
+    """Still unranked the next day and still winning: it goes anyway. One
+    session, not a rolling reprieve."""
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+    tomorrow = TODAY + dt.timedelta(days=1)
+    quotes = {"NSE:ALPHA": quote(104.0), "NSE:BETA": quote(200.0)}
+
+    book.apply_ranking({"NSE:BETA"}, quotes, costs=costs, today=tomorrow)
+    closed = book.apply_scheduled_exits(
+        {"NSE:BETA"}, quotes, costs=costs, today=tomorrow
+    )
+
+    assert [t.symbol for t in closed] == ["ALPHA"]
+
+
+def test_a_ranking_that_takes_the_name_back_cancels_the_grace(
+    costs: CostModel,
+) -> None:
+    """A full reprieve, not a pause. Selling a name the strategy has just
+    re-picked only to buy it back on the next refresh pays two sets of
+    charges to end up where it started."""
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+
+    book.apply_ranking(
+        {"NSE:ALPHA", "NSE:BETA"},
+        {"NSE:ALPHA": quote(102.0), "NSE:BETA": quote(200.0)},
+        costs=costs,
+        today=TODAY,
+    )
+
+    assert book.positions["NSE:ALPHA"].ranking_exit_after == ""
+
+
+def test_a_scheduled_exit_is_cancelled_if_the_name_is_ranked_again(
+    costs: CostModel,
+) -> None:
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+
+    closed = book.apply_scheduled_exits(
+        {"NSE:ALPHA", "NSE:BETA"},
+        {"NSE:ALPHA": quote(102.0)},
+        costs=costs,
+        today=TODAY + dt.timedelta(days=1),
+    )
+
+    assert closed == []
+    assert book.positions["NSE:ALPHA"].ranking_exit_after == ""
+
+
+def test_a_holding_with_no_price_is_neither_sold_nor_graced(
+    costs: CostModel,
+) -> None:
+    """A position that cannot be valued cannot be judged. Guessing either way
+    would be a decision made on no information."""
+    book = seeded(costs)
+
+    closed = book.apply_ranking({"NSE:BETA"}, {}, costs=costs, today=TODAY)
+
+    assert closed == []
+    assert book.positions["NSE:ALPHA"].ranking_exit_after == ""
+
+
+def test_the_ranking_exit_flag_survives_a_save(
+    costs: CostModel, tmp_path: Path
+) -> None:
+    """It is the only record that a position is living on borrowed time."""
+    book = seeded(costs)
+    book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(102.0)}, costs=costs, today=TODAY
+    )
+    path = tmp_path / "book.json"
+    book.save(path)
+
+    restored = PaperBook.load(path)
+
+    assert restored is not None
+    assert restored.positions["NSE:ALPHA"].ranking_exit_after == TODAY.isoformat()
+
+
+def test_ranking_exits_credit_cash_like_any_other_sale(costs: CostModel) -> None:
+    book = seeded(costs)
+    cash_before = book.cash
+
+    closed = book.apply_ranking(
+        {"NSE:BETA"}, {"NSE:ALPHA": quote(99.5)}, costs=costs, today=TODAY
+    )
+
+    assert book.cash == pytest.approx(cash_before + closed[0].net_proceeds)
+    assert book.realized()["trades"] == 1

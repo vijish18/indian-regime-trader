@@ -183,7 +183,17 @@ def main(argv: list[str]) -> int:
         # not -- the account would be buying at a price that is no longer
         # available, and the cash is better left idle until the next session
         # prices the bench properly.
-        closed_now = book.apply_stops(quote_rows, policy=policy, costs=costs, today=today)
+        ranked_ids = [str(row["instrument_id"]) for row in candidates]
+        # Grace granted by an earlier ranking expires on a later session and
+        # nothing else would notice, so this runs every refresh, before the
+        # stops: a position due to go today goes at today's price, and is not
+        # first re-examined against a stop level it no longer needs.
+        closed_now = book.apply_scheduled_exits(
+            ranked_ids, quote_rows, costs=costs, today=today
+        )
+        closed_now += book.apply_stops(
+            quote_rows, policy=policy, costs=costs, today=today
+        )
 
         # A book the stops have run down is mostly cash held against a
         # ranking several stops old. Recompute it rather than reach further
@@ -222,6 +232,7 @@ def main(argv: list[str]) -> int:
                         data["selection"] = selection
                         data["regime_now"] = fresh["regime_now"]
                         candidates = buy_candidates(picks)
+                        ranked_ids = [str(row["instrument_id"]) for row in candidates]
                         book.last_rerank_at = ist_now.replace(tzinfo=None).isoformat(
                             timespec="seconds"
                         )
@@ -233,6 +244,23 @@ def main(argv: list[str]) -> int:
                             f"{len(picks)}: "
                             + ", ".join(str(row["symbol"]) for row in picks)
                         )
+                        # Reconcile what is held against what was just
+                        # computed: keep the names it still backs, sell the
+                        # ones it dropped that are losing, give the ones it
+                        # dropped that are winning the rest of the day.
+                        closed_now += book.apply_ranking(
+                            ranked_ids, quote_rows, costs=costs, today=today
+                        )
+                        graced = [
+                            p.symbol
+                            for p in book.positions.values()
+                            if p.ranking_exit_after == today.isoformat()
+                        ]
+                        if graced:
+                            print(
+                                "  dropped from the ranking but in profit, held to the "
+                                f"close and sold next session: {', '.join(sorted(graced))}"
+                            )
 
         if is_open:
             slot = book.budget / max_positions if max_positions else book.budget

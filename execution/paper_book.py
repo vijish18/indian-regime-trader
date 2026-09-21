@@ -14,11 +14,20 @@ snapshot.
 
 ## What closes a position
 
-Only a stop, for now. ``apply_stops`` runs both rules from
-:mod:`risk.stop_loss` against live quotes and closes whatever breached.
-There is no ranking-driven exit here: a name dropping out of the top ten is
-a *rebalance* decision that belongs to a trading session, not to a price
-refresh running every few minutes.
+A stop, or the ranking.
+
+``apply_stops`` runs both rules from :mod:`risk.stop_loss` against live
+quotes and closes whatever breached.
+
+``apply_ranking`` runs when the ranking has just been recomputed, and asks a
+different question of each holding: does the strategy still back this name?
+A name it has dropped *and* that is losing money is sold immediately, at
+whatever the loss is -- no threshold, because the case for holding it has
+gone on both counts. A name it has dropped while in profit keeps the rest of
+the session, stops still live, and goes on the next one unless the ranking
+takes it back. ``apply_scheduled_exits`` is what collects those the day
+after, and runs on every refresh because nothing else would notice the grace
+had expired.
 
 ## What opens one
 
@@ -70,6 +79,16 @@ from typing import Any
 from backtest.costs import CostModel, TradeSide
 from risk.stop_loss import StopBreach, StopLossPolicy, evaluate, stop_fill_price
 
+DROPPED_FROM_RANKING = "dropped_from_ranking"
+"""Sold the moment a recomputed ranking no longer held it, because it was
+also at a loss. No grace: a name the strategy has stopped backing and that
+is already losing has nothing left arguing for it."""
+
+RANKING_EXIT = "ranking_exit"
+"""Sold because its one session of grace expired. A name dropped from the
+ranking while *in profit* is kept for the rest of that day -- its stops still
+apply -- and sold on the next session unless the ranking has taken it back."""
+
 SEED_REASON = "seed"
 """``exit_reason`` never takes this value; it marks a position created when
 the book was first opened from an existing hypothetical sizing, rather than
@@ -108,6 +127,11 @@ class PaperPosition:
 
     session_low: float = 0.0
 
+    ranking_exit_after: str = ""
+    """Set when a recomputed ranking dropped this name while it was in
+    profit: it keeps its grace for the rest of that session and is sold on
+    the next one. Empty for a position the ranking still holds."""
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -121,6 +145,7 @@ class PaperPosition:
             "session_date": self.session_date,
             "session_high": self.session_high,
             "session_low": self.session_low,
+            "ranking_exit_after": self.ranking_exit_after,
         }
 
     @classmethod
@@ -137,6 +162,7 @@ class PaperPosition:
             session_date=str(raw.get("session_date", "")),
             session_high=float(raw.get("session_high") or 0.0),
             session_low=float(raw.get("session_low") or 0.0),
+            ranking_exit_after=str(raw.get("ranking_exit_after", "")),
         )
 
 
@@ -566,6 +592,163 @@ class PaperBook:
             self.positions[instrument_id] = position
             opened.append(position)
         return opened
+
+    # -- reconciling the book with a new ranking ---------------------------
+
+    def _net_sale(
+        self, position: PaperPosition, price: float, costs: CostModel, today: dt.date
+    ) -> float:
+        """Cash this position would credit if sold at ``price`` right now."""
+        return float(
+            costs.estimate_execution_cost(
+                position.instrument_id,
+                TradeSide.SELL,
+                position.shares,
+                price,
+                today,
+                spread_bps=10.0,
+                avg_daily_value=0.0,
+                volatility=0.0,
+            ).net_value
+        )
+
+    def _close(
+        self,
+        position: PaperPosition,
+        *,
+        price: float,
+        reason: str,
+        costs: CostModel,
+        today: dt.date,
+    ) -> ClosedTrade:
+        """Sell the whole position at ``price`` and post it to the ledger."""
+        proceeds = self._net_sale(position, price, costs, today)
+        trade = ClosedTrade(
+            symbol=position.symbol,
+            instrument_id=position.instrument_id,
+            shares=position.shares,
+            entry_price=position.entry_price,
+            entry_cost=position.entry_cost,
+            entry_date=position.entry_date,
+            exit_price=price,
+            exit_date=today.isoformat(),
+            exit_reason=reason,
+            stop_level=0.0,
+            net_proceeds=proceeds,
+        )
+        self.cash += proceeds
+        del self.positions[position.instrument_id]
+        self.closed.append(trade)
+        return trade
+
+    def apply_ranking(
+        self,
+        ranked_ids: Iterable[str],
+        quotes: Mapping[str, Mapping[str, Any]],
+        *,
+        costs: CostModel,
+        today: dt.date,
+    ) -> list[ClosedTrade]:
+        """Reconcile the book against a freshly computed ranking.
+
+        Three outcomes per holding:
+
+        *Still ranked* -- retained, and any grace from an earlier ranking is
+        cleared. The ranking taking a name back is a full reprieve, not a
+        pause.
+
+        *Dropped and losing* -- sold now, at whatever the loss is. There is
+        no threshold here and deliberately so: the 3% hard stop asks "has
+        this broken down", and this asks a different question -- the strategy
+        has stopped backing the name *and* it is losing money, so there is
+        nothing left arguing to hold it. A 0.4% loss qualifies.
+
+        *Dropped and winning* -- kept for the rest of the session with its
+        stops still live, and marked to go on the next one. A position in
+        profit is given the day to finish what it was doing rather than being
+        sold into a ranking that may itself move; the grace is one session
+        and is not renewed.
+
+        Profit is measured **net** -- what selling would actually credit
+        against what the position cost -- so a name up 0.4% on the screen and
+        down after charges counts as losing, which is what it is.
+
+        Returns what this closed. Nothing is bought here; refilling from the
+        new ranking is ``reallocate``'s job.
+        """
+        ranked = {str(instrument_id) for instrument_id in ranked_ids}
+        closed_now: list[ClosedTrade] = []
+        for instrument_id in sorted(self.positions):
+            position = self.positions[instrument_id]
+            if instrument_id in ranked:
+                if position.ranking_exit_after:
+                    self.positions[instrument_id] = replace(position, ranking_exit_after="")
+                continue
+
+            quote = quotes.get(instrument_id)
+            price = float((quote or {}).get("last") or 0.0)
+            if price <= 0:
+                # No price, no decision. A holding that cannot be valued is
+                # neither sold nor given a grace it might not deserve.
+                continue
+
+            if self._net_sale(position, price, costs, today) < position.entry_cost:
+                closed_now.append(
+                    self._close(
+                        position,
+                        price=price,
+                        reason=DROPPED_FROM_RANKING,
+                        costs=costs,
+                        today=today,
+                    )
+                )
+            elif not position.ranking_exit_after:
+                self.positions[instrument_id] = replace(
+                    position, ranking_exit_after=today.isoformat()
+                )
+        return closed_now
+
+    def apply_scheduled_exits(
+        self,
+        ranked_ids: Iterable[str],
+        quotes: Mapping[str, Mapping[str, Any]],
+        *,
+        costs: CostModel,
+        today: dt.date,
+    ) -> list[ClosedTrade]:
+        """Sell the positions whose session of grace has expired.
+
+        Run before the stops on every refresh, not only on a rerank -- the
+        grace was granted on an earlier session and nothing else would notice
+        it had run out.
+
+        A name the current ranking holds again is reprieved instead of sold.
+        That is the same "still ranked, retained" rule as
+        :meth:`apply_ranking`, applied a day later: selling a name the
+        strategy has just re-picked, only to buy it back on the next refresh,
+        pays two sets of charges to end up where it started.
+        """
+        ranked = {str(instrument_id) for instrument_id in ranked_ids}
+        closed_now: list[ClosedTrade] = []
+        for instrument_id in sorted(self.positions):
+            position = self.positions[instrument_id]
+            if not position.ranking_exit_after:
+                continue
+            if position.ranking_exit_after >= today.isoformat():
+                continue
+            if instrument_id in ranked:
+                self.positions[instrument_id] = replace(position, ranking_exit_after="")
+                continue
+            quote = quotes.get(instrument_id)
+            price = float((quote or {}).get("last") or 0.0)
+            if price <= 0:
+                continue
+            closed_now.append(
+                self._close(
+                    position, price=price, reason=RANKING_EXIT, costs=costs, today=today
+                )
+            )
+        return closed_now
 
     def needs_rerank(
         self, *, at_or_below: int, now: dt.datetime, cooldown_minutes: int
