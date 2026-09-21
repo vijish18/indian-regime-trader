@@ -70,13 +70,18 @@ def current_regime(as_of: dt.date, history_days: int = 600) -> dict[str, Any]:
     labels = assign_labels(
         [model.statistics_for(i).expected_volatility for i in range(model.n_states)]
     )
+    # Same risk-order display index the model panel uses, so "s3" means the
+    # same thing in both places.
+    order = sorted(range(model.n_states), key=lambda i: model.statistics_for(i).expected_volatility)
+    display = {state_id: index for index, state_id in enumerate(order)}
     latest = states[-1]
     min_confidence = settings.hmm.min_confidence
     return {
         "available": True,
         "as_of": latest.as_of.isoformat(),
         "model_id": artifact.model_id,
-        "state_id": latest.state_id,
+        "state_id": display[latest.state_id],
+        "model_state_id": latest.state_id,
         "label": labels[latest.state_id].value,
         "confidence": float(latest.confidence),
         "min_confidence": float(min_confidence),
@@ -88,11 +93,11 @@ def current_regime(as_of: dt.date, history_days: int = 600) -> dict[str, Any]:
         "expected_volatility": float(latest.expected_volatility),
         "expected_return": float(latest.expected_return),
         "persistence": float(latest.persistence),
-        "probabilities": [float(p) for p in latest.probabilities],
+        "probabilities": [float(latest.probabilities[i]) for i in order],
         "recent": [
             {
                 "as_of": s.as_of.isoformat(),
-                "state_id": s.state_id,
+                "state_id": display[s.state_id],
                 "label": labels[s.state_id].value,
                 "confidence": float(s.confidence),
             }

@@ -256,6 +256,24 @@ def hmm_model() -> dict[str, Any]:
     # to each other where the difference is obvious, rather than looking like
     # one thing mentioned twice.
     states.sort(key=lambda s: s["expected_volatility"])
+
+    # A display index in risk order, so the dashboard reads s0 calm .. s4
+    # crisis. The fitted model's own ids are arbitrary -- refit with another
+    # seed and they move -- and here they are genuinely out of order (normal
+    # is model state 3, crisis is state 1), which makes any chart indexed by
+    # them read as scrambled.
+    #
+    # model_state_id is kept on every row because the artifact, the logs and
+    # model_registry all speak the fitted numbering. Renaming without
+    # carrying the original would make the dashboard disagree with the thing
+    # it describes.
+    order = [int(s["state_id"]) for s in states]
+    for index, state in enumerate(states):
+        state["model_state_id"] = state["state_id"]
+        state["state_id"] = index
+
+    raw_matrix = [[float(v) for v in row] for row in model.parameters.transition_matrix]
+    matrix = [[raw_matrix[i][j] for j in order] for i in order]
     training = model.training_result
     return {
         "available": True,
@@ -265,9 +283,8 @@ def hmm_model() -> dict[str, Any]:
         "n_states": model.n_states,
         "features": list(training.feature_columns),
         "states": states,
-        "transition_matrix": [
-            [float(v) for v in row] for row in model.parameters.transition_matrix
-        ],
+        "transition_matrix": matrix,
+        "model_state_order": order,
         "bic": float(training.bic),
         "aic": float(training.aic),
         "converged": bool(training.converged),
