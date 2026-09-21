@@ -1,0 +1,19 @@
+[Unit]
+Description=Regime Desk fresh checkpointed research backtest
+After=network.target
+
+[Service]
+Type=simple
+User=irt
+WorkingDirectory=/home/irt/backtest_20260921
+Environment=IRT_DATA_ROOT=/home/irt/data_runs/2026-09-21
+Environment=IRT_RUN_ROOT=/home/irt/backtest_runs/fresh_20260921
+ExecStart=/bin/bash /home/irt/backtest_20260921/deploy/azure/run_fresh_batch.sh
+KillMode=control-group
+TimeoutStopSec=30
+MemoryMax=14G
+CPUQuota=400%
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
