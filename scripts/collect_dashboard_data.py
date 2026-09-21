@@ -39,6 +39,29 @@ HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
 COST_SCHEDULE = REPO_ROOT / "config" / "cost_schedules.yaml"
 
 
+
+def _json_safe(value: Any) -> Any:
+    """Replace NaN/Infinity with null, recursively.
+
+    json.dumps emits bare ``NaN`` and ``Infinity`` for those floats. Python
+    reads them back happily, so every round-trip check here passes -- but
+    they are not JSON, and a browser's JSON.parse rejects the whole
+    document. The dashboard embeds this payload and falls back to an empty
+    object when parsing fails, so twelve NaNs from an unmeasured
+    pct_invested rendered the entire page blank.
+
+    null is the honest encoding: the metric genuinely has no value, and the
+    page already prints an em dash for it.
+    """
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def _count_rows(path: Path) -> int:
     if not path.is_file():
         return 0
@@ -387,7 +410,7 @@ def main(argv: list[str]) -> int:
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    args.out.write_text(json.dumps(_json_safe(data), indent=2), encoding="utf-8")
 
     prov = data["provenance"]
     print(f"wrote {args.out}")
