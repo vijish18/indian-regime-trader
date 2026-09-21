@@ -89,6 +89,7 @@ from core.regime.model_registry import build_model_id
 from core.regime.regime_policy import RegimePolicy
 from data.interfaces import CorporateActionProvider, MarketDataProvider, TradingCalendar
 from portfolio.portfolio_constructor import PortfolioConstructor
+from risk.stop_loss import StopLossPolicy
 from universe.stock_selector import StockSelector
 
 BUY_AND_HOLD = "buy_and_hold"
@@ -192,6 +193,7 @@ class WalkForwardValidator:
             cost_model=cost_model,
             circuit_breaker_state_dir=circuit_breaker_state_dir,
             corporate_actions=corporate_actions,
+            stop_loss_policy=StopLossPolicy.from_mapping(risk_config.stop_loss.model_dump()),
         )
 
     # -- fold generation ----------------------------------------------------

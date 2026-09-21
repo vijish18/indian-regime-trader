@@ -166,6 +166,16 @@ risk:
   max_daily_turnover_pct: 0.50         # guards against a bug causing repeated full rebalances
   reduced_risk_exposure_multiplier: 0.50
 
+  # Per-position stops (risk/stop_loss.py). These act on ONE holding; every
+  # threshold above acts on the book. Both are needed: a circuit breaker never
+  # fires for a single name bleeding out inside an otherwise flat portfolio.
+  stop_loss:
+    enabled: true
+    hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
+    trail_drop_pct: 0.02             # exit if price falls 2% below the session HIGH...
+    trail_arm_net_profit_pct: 0.03   # ...but only once that exit still nets >3% after
+                                      # every sell-side charge, DP charge included
+
 execution:
   mode: paper                        # paper | live
   order_type: limit

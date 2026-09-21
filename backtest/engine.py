@@ -79,7 +79,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -90,7 +90,7 @@ from config.models import RiskConfig
 from core.regime.allocation import AllocationRegime, AllocationTarget
 from data.errors import DataNotAvailableError
 from data.interfaces import CorporateActionProvider, MarketDataProvider, TradingCalendar
-from data.models import CorporateActionType, PriceBasis
+from data.models import CorporateActionType, DailyBar, PriceBasis
 from portfolio.portfolio_constructor import (
     PortfolioConstructor,
     TargetPortfolio,
@@ -102,6 +102,8 @@ from portfolio.portfolio_constructor import (
 from risk.circuit_breaker import CircuitBreaker
 from risk.portfolio_risk_state import PortfolioRiskState, PositionRisk
 from risk.risk_manager import RiskDecision, RiskManager
+from risk.stop_loss import StopBreach, StopLossPolicy
+from risk.stop_loss import evaluate as evaluate_stop
 from universe.stock_selector import StockSelector
 
 _TRADING_DAYS_PER_YEAR = 252
@@ -185,6 +187,29 @@ class DailyRiskDecisions:
 
 
 @dataclass(frozen=True, slots=True)
+class StopExit:
+    """One position taken out by a stop rather than by the ranking.
+
+    Kept separately from ``fills`` (which it also appears in) because the
+    question "how much did the stops actually do" cannot be answered from a
+    trade log: a stop exit and a rebalance exit are the same SELL row there.
+    """
+
+    execution_date: dt.date
+    breach: StopBreach
+    quantity: int
+    cost_basis: float
+    """What the position cost to acquire, buy-side charges included."""
+
+    net_proceeds: float
+    """What the sale actually credited, sell-side charges deducted."""
+
+    @property
+    def realized_pnl(self) -> float:
+        return self.net_proceeds - self.cost_basis
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestResult:
     strategy_name: str
     equity_curve: pd.Series
@@ -225,6 +250,17 @@ class BacktestResult:
     fills: tuple[FillRecord, ...]
     risk_decisions: tuple[DailyRiskDecisions, ...]
 
+    stop_exits: tuple[StopExit, ...] = ()
+    """Every position a stop took out, in order. Empty when the engine ran
+    with no stop policy -- which is not the same as a policy that never
+    fired, so a reader can tell the two apart."""
+
+    stop_checks_skipped: dict[str, int] = field(default_factory=dict)
+    """instrument -> sessions where a holding could not be stop-checked
+    because it had no bar that day (suspension, halt, missing data). Recorded
+    rather than silently passed over: an unprotected session is a fact about
+    the run, and a stop that cannot see a price must not invent a breach."""
+
 
 class BacktestEngine:
     """Runs one deterministic, single-strategy backtest over a fixed
@@ -250,6 +286,7 @@ class BacktestEngine:
         min_rebalance_weight_delta: float = 0.0,
         stale_mark_lookback_days: int = 400,
         stale_mark_warn_days: int = 30,
+        stop_loss_policy: StopLossPolicy | None = None,
     ) -> None:
         self.calendar = calendar
         self.market_data = market_data
@@ -280,6 +317,12 @@ class BacktestEngine:
         """instrument -> worst mark age in days, for marks older than
         ``stale_mark_warn_days``. Empty for a run that never valued a
         suspended holding, which is the normal case."""
+
+        self.stop_loss_policy = stop_loss_policy
+        """Per-position stops (risk/stop_loss.py), or ``None`` to run without
+        any -- which is what every backtest did before they existed, and is
+        kept available so a run can measure what the stops are worth by
+        comparing against it."""
 
         self.min_rebalance_weight_delta = min_rebalance_weight_delta
         """A position whose weight would move by less than this is left
@@ -322,6 +365,8 @@ class BacktestEngine:
 
         cash = initial_equity
         holdings: dict[str, int] = {}
+        avg_price: dict[str, float] = {}
+        cost_basis: dict[str, float] = {}
         equity_history: list[float] = []
         equity_points: dict[dt.date, float] = {}
         cash_points: dict[dt.date, float] = {}
@@ -333,6 +378,8 @@ class BacktestEngine:
         fills: list[FillRecord] = []
         trade_log_rows: list[dict[str, object]] = []
         risk_decision_records: list[DailyRiskDecisions] = []
+        stop_exits: list[StopExit] = []
+        stop_checks_skipped: dict[str, int] = {}
 
         current_target = empty_portfolio(signal_dates[0], AllocationRegime.NORMAL_RISK)
 
@@ -387,10 +434,31 @@ class BacktestEngine:
                 if fill is None:
                     continue
                 fills.append(fill)
-                cash = self._apply_fill(fill, cash, holdings)
+                cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
                 trade_log_rows.append(_trade_log_row(fill))
 
             cash += self.dividend_cash_credit(holdings, execution_date)
+
+            # Stops resolve within the execution session, after the
+            # rebalance and before the close is marked. They are resting
+            # orders: the decision to protect every holding at -3% was made
+            # before the session opened, so a fill inside it is not
+            # look-ahead -- only *when* it filled is being resolved, the same
+            # argument _next_open makes for a rebalance fill.
+            cash, executed_target = self._apply_stops(
+                signal_date=signal_date,
+                execution_date=execution_date,
+                cash=cash,
+                holdings=holdings,
+                avg_price=avg_price,
+                cost_basis=cost_basis,
+                current_target=executed_target,
+                orders=orders,
+                fills=fills,
+                trade_log_rows=trade_log_rows,
+                stop_exits=stop_exits,
+                skipped=stop_checks_skipped,
+            )
 
             equity_at_execution = self._mark_to_market(cash, holdings, execution_date)
             equity_points[execution_date] = equity_at_execution
@@ -430,7 +498,158 @@ class BacktestEngine:
             orders=tuple(orders),
             fills=tuple(fills),
             risk_decisions=tuple(risk_decision_records),
+            stop_exits=tuple(stop_exits),
+            stop_checks_skipped=dict(stop_checks_skipped),
         )
+
+    # -- stops --------------------------------------------------------------
+
+    def _session_bar(self, instrument_id: str, session_date: dt.date) -> DailyBar | None:
+        """That instrument's own bar for exactly ``session_date``, RAW.
+
+        RAW, not ADJUSTED, for the same reason :meth:`_next_open` is: a stop
+        level is compared against, and fills at, prices a trader saw on the
+        day. An adjusted bar restates the session into the window's terms and
+        would move the level.
+
+        ``None`` when the instrument did not trade that session. The caller
+        records that rather than treating it as "no breach", because an
+        unprotected session is a fact about the run.
+        """
+        try:
+            bars = self.market_data.get_equity_bars(
+                instrument_id, session_date, session_date, price_basis=PriceBasis.RAW
+            )
+        except DataNotAvailableError:
+            return None
+        if not bars:
+            return None
+        bar = bars[0]
+        return bar if bar.session_date == session_date else None
+
+    def _apply_stops(
+        self,
+        *,
+        signal_date: dt.date,
+        execution_date: dt.date,
+        cash: float,
+        holdings: dict[str, int],
+        avg_price: dict[str, float],
+        cost_basis: dict[str, float],
+        current_target: TargetPortfolio,
+        orders: list[OrderRecord],
+        fills: list[FillRecord],
+        trade_log_rows: list[dict[str, object]],
+        stop_exits: list[StopExit],
+        skipped: dict[str, int],
+    ) -> tuple[float, TargetPortfolio]:
+        """Sell every holding whose stop fired during ``execution_date``.
+
+        Returns the cash balance after the exits and the target portfolio
+        with the exited names removed. Dropping them matters: leave a sold
+        name in ``current_target`` and the next session diffs against a
+        position that no longer exists, proposing a sell of nothing and, worse,
+        reporting a weight the book does not hold.
+
+        A stopped-out name is not blocked from being bought back. If the
+        selector still ranks it tomorrow it is re-entered at tomorrow's open,
+        with a fresh entry price and therefore a fresh stop. That is a
+        deliberate choice, not an oversight -- a cooling-off rule is a
+        separate strategy decision, and inventing one here would quietly
+        change what the backtest measures.
+        """
+        policy = self.stop_loss_policy
+        if policy is None or not policy.enabled or not holdings:
+            return cash, current_target
+
+        for instrument_id in sorted(holdings):
+            quantity = holdings[instrument_id]
+            entry_price = avg_price.get(instrument_id, 0.0)
+            basis = cost_basis.get(instrument_id, 0.0)
+            if quantity <= 0 or entry_price <= 0 or basis <= 0:
+                continue
+
+            bar = self._session_bar(instrument_id, execution_date)
+            if bar is None:
+                skipped[instrument_id] = skipped.get(instrument_id, 0) + 1
+                continue
+
+            avg_daily_value, volatility = self._market_stats(instrument_id, signal_date)
+
+            def net_sale_value(
+                price: float,
+                _id: str = instrument_id,
+                _quantity: int = quantity,
+                _adv: float = avg_daily_value,
+                _vol: float = volatility,
+            ) -> float:
+                return self.cost_model.estimate_execution_cost(
+                    _id,
+                    TradeSide.SELL,
+                    _quantity,
+                    price,
+                    execution_date,
+                    spread_bps=self.assumed_spread_bps,
+                    avg_daily_value=_adv,
+                    volatility=_vol,
+                ).net_value
+
+            breach = evaluate_stop(
+                instrument_id,
+                entry_price=entry_price,
+                cost_basis=basis,
+                session_high=float(bar.high),
+                session_low=float(bar.low),
+                reference_price=float(bar.close),
+                net_sale_value=net_sale_value,
+                policy=policy,
+            )
+            if breach is None:
+                continue
+
+            current_weight = current_target.weight_for(instrument_id)
+            order = OrderRecord(
+                signal_date=signal_date,
+                execution_date=execution_date,
+                instrument_id=instrument_id,
+                action=TradeAction.EXIT,
+                current_weight=current_weight,
+                target_weight=0.0,
+                delta_weight=-current_weight,
+            )
+            execution_cost = self.cost_model.estimate_execution_cost(
+                instrument_id,
+                TradeSide.SELL,
+                quantity,
+                breach.fill_price,
+                execution_date,
+                spread_bps=self.assumed_spread_bps,
+                avg_daily_value=avg_daily_value,
+                volatility=volatility,
+            )
+            fill = FillRecord(
+                order=order,
+                side=TradeSide.SELL,
+                quantity=quantity,
+                fill_price=breach.fill_price,
+                execution_cost=execution_cost,
+            )
+            orders.append(order)
+            fills.append(fill)
+            stop_exits.append(
+                StopExit(
+                    execution_date=execution_date,
+                    breach=breach,
+                    quantity=quantity,
+                    cost_basis=basis,
+                    net_proceeds=execution_cost.net_value,
+                )
+            )
+            cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
+            trade_log_rows.append(_trade_log_row(fill))
+            current_target = _without_position(current_target, instrument_id)
+
+        return cash, current_target
 
     # -- pricing / market facts --------------------------------------------
 
@@ -696,18 +915,62 @@ class BacktestEngine:
         )
 
     @staticmethod
-    def _apply_fill(fill: FillRecord, cash: float, holdings: dict[str, int]) -> float:
+    def _apply_fill(
+        fill: FillRecord,
+        cash: float,
+        holdings: dict[str, int],
+        avg_price: dict[str, float] | None = None,
+        cost_basis: dict[str, float] | None = None,
+    ) -> float:
+        """Post one fill to the ledger and return the new cash balance.
+
+        ``avg_price`` and ``cost_basis`` are what the stop rules need and
+        nothing else reads, so they are optional: a caller that only wants
+        the cash/quantity arithmetic (``backtest/stress_test.py``) passes
+        neither and behaves exactly as before.
+
+        The two are deliberately different quantities. ``avg_price`` is the
+        weighted average *price* paid per share -- what the 3% hard stop is
+        measured from, because that is the number on the screen and the
+        number a broker's stop order would reference. ``cost_basis`` is the
+        total *cash* the position consumed, buy-side charges included -- what
+        profitability is measured against, because a position is not in
+        profit until it has earned back what it cost to open.
+        """
         instrument_id = fill.order.instrument_id
         if fill.side is TradeSide.BUY:
             cash -= fill.execution_cost.net_value
-            holdings[instrument_id] = holdings.get(instrument_id, 0) + fill.quantity
+            held = holdings.get(instrument_id, 0)
+            new_quantity = held + fill.quantity
+            holdings[instrument_id] = new_quantity
+            if avg_price is not None:
+                previous = avg_price.get(instrument_id, 0.0)
+                avg_price[instrument_id] = (
+                    held * previous + fill.quantity * fill.fill_price
+                ) / new_quantity
+            if cost_basis is not None:
+                cost_basis[instrument_id] = (
+                    cost_basis.get(instrument_id, 0.0) + fill.execution_cost.net_value
+                )
         else:
             cash += fill.execution_cost.net_value
-            remaining = holdings.get(instrument_id, 0) - fill.quantity
+            held = holdings.get(instrument_id, 0)
+            remaining = held - fill.quantity
             if remaining <= 0:
                 holdings.pop(instrument_id, None)
+                if avg_price is not None:
+                    avg_price.pop(instrument_id, None)
+                if cost_basis is not None:
+                    cost_basis.pop(instrument_id, None)
             else:
                 holdings[instrument_id] = remaining
+                # A partial sale retires its share of the basis and leaves the
+                # average price alone: selling half a position does not change
+                # what the other half was bought at.
+                if cost_basis is not None and held > 0:
+                    cost_basis[instrument_id] = cost_basis.get(instrument_id, 0.0) * (
+                        remaining / held
+                    )
         return cash
 
     def _mark_to_market(
@@ -863,6 +1126,29 @@ def _scale_position(position: TargetPosition, scale: float) -> TargetPosition:
         rank=position.rank,
         score=position.score,
         binding_constraint=position.binding_constraint,
+    )
+
+
+def _without_position(portfolio: TargetPortfolio, instrument_id: str) -> TargetPortfolio:
+    """``portfolio`` with one name removed and its weight returned to cash.
+
+    A :class:`TargetPortfolio` must always sum to exactly 1.0, so a position
+    cannot simply be dropped -- its weight has to go somewhere, and cash is
+    the only honest place: a stop exit produces cash, not a larger position in
+    whatever else was held.
+    """
+    weight = portfolio.weight_for(instrument_id)
+    if weight == 0.0 and instrument_id not in portfolio.instrument_ids:
+        return portfolio
+    positions = tuple(
+        position for position in portfolio.positions if position.instrument_id != instrument_id
+    )
+    return TargetPortfolio(
+        as_of=portfolio.as_of,
+        positions=positions,
+        cash_weight=portfolio.cash_weight + weight,
+        regime=portfolio.regime,
+        gross_exposure=portfolio.gross_exposure - weight,
     )
 
 

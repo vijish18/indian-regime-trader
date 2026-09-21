@@ -277,6 +277,7 @@ properties:
       - max_spread_bps
       - max_daily_turnover_pct
       - reduced_risk_exposure_multiplier
+      - stop_loss
     properties:
       max_gross_exposure: { type: number, minimum: 0, maximum: 1 }
       max_leverage: { type: number, minimum: 1, maximum: 1 }
@@ -296,6 +297,15 @@ properties:
       max_spread_bps: { type: number, exclusiveMinimum: 0 }
       max_daily_turnover_pct: { type: number, exclusiveMinimum: 0 }
       reduced_risk_exposure_multiplier: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
+      stop_loss:
+        type: object
+        additionalProperties: false
+        required: [enabled, hard_stop_pct, trail_drop_pct, trail_arm_net_profit_pct]
+        properties:
+          enabled: { type: boolean }
+          hard_stop_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
+          trail_drop_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
+          trail_arm_net_profit_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
 
   execution:
     type: object

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -63,16 +64,127 @@ def live_quotes(instrument_ids: list[str], session_path: Path) -> dict[str, Any]
         if not row:
             continue
         last = float(row["last_price"])
-        prev = float((row.get("ohlc") or {}).get("close") or last)
+        ohlc = row.get("ohlc") or {}
+        prev = float(ohlc.get("close") or last)
+        # Kite's `ohlc` is TODAY's open/high/low plus the PREVIOUS close --
+        # the high and low are exactly what the trailing stop is measured
+        # from, and they are running values, so they are correct at the
+        # moment they are read rather than only after the close.
         quotes[instrument_id] = {
             "last": last,
             "prev_close": prev,
+            "day_open": float(ohlc.get("open") or last),
+            "day_high": float(ohlc.get("high") or last),
+            "day_low": float(ohlc.get("low") or last),
             "day_pct": (last / prev - 1) if prev else 0.0,
         }
     return {
         "available": bool(quotes),
         "fetched_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "quotes": quotes,
+    }
+
+
+def _stop_policy_and_costs() -> tuple[Any, Any]:
+    """The configured stop policy and a cost model, or ``(None, None)``.
+
+    Imported lazily and failing soft on purpose: this is a monitoring script
+    that runs every few minutes while the market is open, and a config
+    problem should cost the stop column, not the whole price refresh. The
+    backtest path has the opposite rule -- there a missing policy is a
+    configuration error and fails loudly.
+    """
+    try:
+        from backtest.cost_schedule import CostScheduleRepository
+        from backtest.costs import CostModel
+        from config.loader import load_settings
+        from risk.stop_loss import StopLossPolicy
+
+        settings = load_settings()
+        policy = StopLossPolicy.from_mapping(settings.risk.stop_loss.model_dump())
+        costs = CostModel(
+            CostScheduleRepository.from_file(
+                Path(__file__).resolve().parents[1] / "config" / "cost_schedules.yaml"
+            ),
+            min_slippage_bps=settings.backtest.slippage_min_bps,
+            impact_coefficient=settings.backtest.slippage_impact_coefficient,
+        )
+        return policy, costs
+    except Exception as exc:  # noqa: BLE001 - monitoring must not die on config
+        print(f"stop status unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None, None
+
+
+def stop_status(
+    *,
+    symbol: str,
+    entry: float,
+    shares: int,
+    last: float,
+    day_high: float,
+    day_low: float,
+    policy: Any,
+    costs: Any,
+) -> dict[str, Any]:
+    """Where this holding stands against both stop rules, right now.
+
+    The live counterpart to ``risk.stop_loss.evaluate``. It answers the same
+    two questions with the same thresholds, but reports rather than sells:
+    nothing here places an order, and the paper book is not flattened by a
+    breach. What it gives the dashboard is the level, the distance to it,
+    and whether it has already traded today.
+
+    Unlike the backtest, the trailing rule can use the day's low as well as
+    the last price, because a live running high is known at the moment it is
+    read -- there is no question of which extreme came first when both are
+    read from the same snapshot. The backtest cannot do this; see
+    risk/stop_loss.py, "What a daily bar proves".
+    """
+    from backtest.costs import TradeSide
+    from risk.stop_loss import hard_stop_level, trailing_stop_level
+
+    if policy is None or costs is None or entry <= 0 or shares <= 0:
+        return {"available": False}
+
+    def net_sale(price: float) -> float:
+        return costs.estimate_execution_cost(
+            symbol,
+            TradeSide.SELL,
+            shares,
+            price,
+            dt.date.today(),
+            spread_bps=10.0,
+            avg_daily_value=0.0,
+            volatility=0.0,
+        ).net_value
+
+    basis = entry * shares
+    hard = hard_stop_level(entry, policy.hard_stop_pct)
+    trail = trailing_stop_level(day_high, policy.trail_drop_pct) if day_high > 0 else 0.0
+    net_now = (net_sale(last) / basis) - 1.0 if basis > 0 else 0.0
+
+    hard_hit = day_low > 0 and day_low <= hard
+    trail_armed = trail > 0 and net_now > policy.trail_arm_net_profit_pct
+    trail_hit = trail_armed and last <= trail
+
+    if hard_hit:
+        state = "hard_stop_hit"
+    elif trail_hit:
+        state = "trail_hit"
+    elif trail_armed:
+        state = "trail_armed"
+    else:
+        state = "ok"
+
+    return {
+        "available": True,
+        "state": state,
+        "hard_level": hard,
+        "hard_distance_pct": (last / hard - 1) if hard > 0 else 0.0,
+        "trail_level": trail if trail_armed else None,
+        "trail_distance_pct": (last / trail - 1) if trail_armed and trail > 0 else None,
+        "net_profit_pct": net_now,
+        "arm_threshold_pct": policy.trail_arm_net_profit_pct,
     }
 
 
@@ -90,6 +202,7 @@ def live_book(
         return {"available": False, "reason": "needs both sizing and live quotes"}
 
     by_symbol = {p["symbol"]: p for p in picks}
+    policy, costs = _stop_policy_and_costs()
     rows, cost_basis, market_value = [], 0.0, 0.0
     for position in sizing["positions"]:
         pick = by_symbol.get(position["symbol"])
@@ -114,6 +227,18 @@ def live_book(
                 "pnl": value - basis,
                 "pnl_pct": (quote["last"] / entry - 1) if entry else 0.0,
                 "day_pct": quote["day_pct"],
+                "day_high": quote.get("day_high"),
+                "day_low": quote.get("day_low"),
+                "stop": stop_status(
+                    symbol=pick["instrument_id"],
+                    entry=entry,
+                    shares=shares,
+                    last=quote["last"],
+                    day_high=quote.get("day_high") or quote["last"],
+                    day_low=quote.get("day_low") or quote["last"],
+                    policy=policy,
+                    costs=costs,
+                ),
             }
         )
     rows.sort(key=lambda r: r["pnl_pct"], reverse=True)
@@ -127,5 +252,19 @@ def live_book(
         "pnl_pct": (market_value / cost_basis - 1) if cost_basis else 0.0,
         "winners": sum(1 for r in rows if r["pnl"] > 0),
         "losers": sum(1 for r in rows if r["pnl"] < 0),
+        "stops": {
+            "available": policy is not None,
+            "hard_stop_pct": policy.hard_stop_pct if policy else None,
+            "trail_drop_pct": policy.trail_drop_pct if policy else None,
+            "trail_arm_net_profit_pct": policy.trail_arm_net_profit_pct if policy else None,
+            # Counted, not acted on. Nothing in this script sells; a breach
+            # here says the level traded, and the decision to exit is still
+            # the paper session's to make.
+            "hard_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "hard_stop_hit"),
+            "trail_hit": sum(1 for r in rows if (r["stop"] or {}).get("state") == "trail_hit"),
+            "trail_armed": sum(
+                1 for r in rows if (r["stop"] or {}).get("state") == "trail_armed"
+            ),
+        },
         "hypothetical": True,
     }

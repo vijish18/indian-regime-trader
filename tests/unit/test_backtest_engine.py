@@ -8,23 +8,29 @@ properties specifically are covered in
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from backtest.costs import TradeSide
+from backtest.cost_schedule import CostScheduleRepository
+from backtest.costs import CostModel, TradeSide
 from backtest.engine import (
     BacktestEngine,
     BacktestEngineError,
+    FillRecord,
+    OrderRecord,
     _apply_rebalance_threshold,
     _apply_risk_decisions,
 )
 from core.regime.allocation import AllocationRegime, AllocationTarget
 from core.regime.regime_policy import RegimePolicy
+from data.models import DailyBar
 from portfolio.portfolio_constructor import TargetPortfolio, TargetPosition, TradeAction
 from risk.circuit_breaker import CircuitState
 from risk.risk_manager import RiskCheck, RiskDecision, RiskViolation
-from tests.unit._wf_support import Environment, dividend
+from risk.stop_loss import StopLossPolicy, StopReason
+from tests.unit._wf_support import Environment, cost_schedule, dividend
 
 
 def full_exposure_target(as_of: dt.date, regime_policy: RegimePolicy) -> AllocationTarget:
@@ -646,3 +652,306 @@ def test_a_normal_holding_records_no_unadjustable_mark(tmp_path: Path) -> None:
     engine._last_close("NSE:OK", dt.date(2026, 5, 4))
 
     assert engine.unadjustable_marks == {}
+
+
+def _stop_test_cost_model() -> CostModel:
+    return CostModel(
+        CostScheduleRepository([cost_schedule()]),
+        min_slippage_bps=1.0,
+        impact_coefficient=0.1,
+    )
+
+
+def _ledger_fill(instrument_id: str, quantity: int, price: float, side: TradeSide) -> FillRecord:
+    order = OrderRecord(
+        signal_date=dt.date(2024, 1, 1),
+        execution_date=dt.date(2024, 1, 2),
+        instrument_id=instrument_id,
+        action=TradeAction.BUY if side is TradeSide.BUY else TradeAction.SELL,
+        current_weight=0.0,
+        target_weight=0.1,
+        delta_weight=0.1,
+    )
+    estimate = _stop_test_cost_model().estimate_execution_cost(
+        instrument_id,
+        side,
+        quantity,
+        price,
+        dt.date(2024, 1, 2),
+        spread_bps=10.0,
+        avg_daily_value=50_000_000.0,
+        volatility=0.2,
+    )
+    return FillRecord(
+        order=order, side=side, quantity=quantity, fill_price=price, execution_cost=estimate
+    )
+
+
+def _buy_fill(instrument_id: str, quantity: int, price: float) -> FillRecord:
+    return _ledger_fill(instrument_id, quantity, price, TradeSide.BUY)
+
+
+def _sell_fill(instrument_id: str, quantity: int, price: float) -> FillRecord:
+    return _ledger_fill(instrument_id, quantity, price, TradeSide.SELL)
+
+
+
+# --------------------------------------------------------------------------
+# Per-position stops
+# --------------------------------------------------------------------------
+
+
+STOP_POLICY = StopLossPolicy(
+    hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03
+)
+
+
+def _reshape_session(
+    env: Environment,
+    instrument_id: str,
+    session_date: dt.date,
+    *,
+    high_mult: float,
+    low_mult: float,
+    close_mult: float,
+) -> DailyBar:
+    """Rewrite one session's bar around its own open, and return it.
+
+    The multipliers are applied to the *open*, which is the price the buy
+    filled at, so a test can say "this name fell 5% from where we bought it"
+    without knowing anything about the synthetic price series underneath.
+    """
+    bars = env.market_data._bars[instrument_id]
+    index = next(i for i, bar in enumerate(bars) if bar.session_date == session_date)
+    open_price = float(bars[index].open)
+    reshaped = DailyBar(
+        instrument_id=instrument_id,
+        session_date=session_date,
+        open=Decimal(str(round(open_price, 4))),
+        high=Decimal(str(round(open_price * high_mult, 4))),
+        low=Decimal(str(round(open_price * low_mult, 4))),
+        close=Decimal(str(round(open_price * close_mult, 4))),
+        volume=bars[index].volume,
+    )
+    bars[index] = reshaped
+    return reshaped
+
+
+def test_a_hard_stop_exits_the_position_inside_the_execution_session(
+    tmp_path: Path,
+) -> None:
+    """Bought at the open, fell 5% below it the same day. The stop is a
+    resting order placed before the session, so it resolves within it rather
+    than waiting for the next open -- an exit that waits a day is not a stop.
+    """
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    signal_date = env.dates[80]
+    execution_date = env.calendar.next_trading_day(signal_date)
+    instrument_id = env.instrument_ids[0]
+    bar = _reshape_session(
+        env, instrument_id, execution_date, high_mult=1.002, low_mult=0.95, close_mult=0.96
+    )
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("hard_stop", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert len(result.stop_exits) == 1
+    exit_record = result.stop_exits[0]
+    assert exit_record.breach.reason is StopReason.HARD_STOP
+    assert exit_record.execution_date == execution_date
+    assert exit_record.breach.stop_level == pytest.approx(float(bar.open) * 0.97)
+    # Closed below the level, so the close is the fill -- the level was not
+    # on offer at the end of the session.
+    assert exit_record.breach.fill_price == pytest.approx(float(bar.close))
+    assert exit_record.realized_pnl < 0
+
+    sells = [fill for fill in result.fills if fill.side is TradeSide.SELL]
+    assert len(sells) == 1
+    assert sells[0].quantity == [f for f in result.fills if f.side is TradeSide.BUY][0].quantity
+    assert result.positions_history[execution_date] == {}
+
+
+def test_a_trailing_stop_banks_a_profitable_pullback(tmp_path: Path) -> None:
+    """Up 10% at the high, closed 7% up -- a fall of more than 2% from the
+    high, and the exit still clears 3% after costs."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    signal_date = env.dates[80]
+    execution_date = env.calendar.next_trading_day(signal_date)
+    instrument_id = env.instrument_ids[0]
+    bar = _reshape_session(
+        env, instrument_id, execution_date, high_mult=1.10, low_mult=1.06, close_mult=1.07
+    )
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("trail_stop", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert len(result.stop_exits) == 1
+    exit_record = result.stop_exits[0]
+    assert exit_record.breach.reason is StopReason.TRAILING_PROFIT_STOP
+    assert exit_record.breach.reference_price == pytest.approx(float(bar.high))
+    assert exit_record.breach.stop_level == pytest.approx(float(bar.high) * 0.98)
+    assert exit_record.realized_pnl > 0
+    assert exit_record.breach.net_profit_pct > STOP_POLICY.trail_arm_net_profit_pct
+    assert result.positions_history[execution_date] == {}
+
+
+def test_a_trailing_stop_does_not_fire_on_a_pullback_that_is_not_yet_profitable(
+    tmp_path: Path,
+) -> None:
+    """Same 2% fall from the high, but the high was only 2.5% up: selling
+    here books a loss after costs, which is not what a profit-protecting
+    rule is for. Only the hard stop may sell at a loss."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    signal_date = env.dates[80]
+    execution_date = env.calendar.next_trading_day(signal_date)
+    _reshape_session(
+        env,
+        env.instrument_ids[0],
+        execution_date,
+        high_mult=1.025,
+        low_mult=0.995,
+        close_mult=1.0,
+    )
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("no_trail", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert result.stop_exits == ()
+    assert result.positions_history[execution_date] != {}
+
+
+def test_no_policy_means_no_stops_and_an_empty_record(tmp_path: Path) -> None:
+    """The same crashing session, run without a policy, is left alone. An
+    empty ``stop_exits`` on a run with no policy is not the same claim as an
+    empty one on a run whose stops never fired, and the engine keeps both
+    readable by never inventing a policy of its own."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    signal_date = env.dates[80]
+    execution_date = env.calendar.next_trading_day(signal_date)
+    _reshape_session(
+        env,
+        env.instrument_ids[0],
+        execution_date,
+        high_mult=1.002,
+        low_mult=0.95,
+        close_mult=0.96,
+    )
+    target = full_exposure_target(signal_date, env.regime_policy)
+
+    result = engine.run("no_policy", {signal_date: target}, [signal_date], 1_000_000.0)
+
+    assert engine.stop_loss_policy is None
+    assert result.stop_exits == ()
+    assert result.positions_history[execution_date] != {}
+
+
+def test_a_stopped_position_leaves_the_target_so_it_is_not_sold_twice(
+    tmp_path: Path,
+) -> None:
+    """After a stop the name is gone from the book, so the next session must
+    diff against a portfolio that no longer holds it. Left in, the engine
+    would carry a weight for a position it does not own."""
+    env = Environment(n_days=120, n_stocks=2)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    first, second = env.dates[80], env.dates[81]
+    execution_date = env.calendar.next_trading_day(first)
+    stopped = env.instrument_ids[0]
+    _reshape_session(
+        env, stopped, execution_date, high_mult=1.002, low_mult=0.95, close_mult=0.96
+    )
+    targets = {
+        first: full_exposure_target(first, env.regime_policy),
+        second: full_exposure_target(second, env.regime_policy),
+    }
+
+    result = engine.run("target_cleanup", targets, [first, second], 1_000_000.0)
+
+    assert [exit_record.breach.instrument_id for exit_record in result.stop_exits] == [stopped]
+    stop_sells = [
+        fill
+        for fill in result.fills
+        if fill.side is TradeSide.SELL
+        and fill.order.execution_date == execution_date
+        and fill.order.instrument_id == stopped
+    ]
+    assert len(stop_sells) == 1
+    # No second sale of a position that is already gone.
+    later_sells = [
+        fill
+        for fill in result.fills
+        if fill.side is TradeSide.SELL and fill.order.instrument_id == stopped
+    ]
+    assert len(later_sells) == 1
+
+
+def test_a_holding_with_no_bar_is_recorded_as_unchecked_not_as_safe(
+    tmp_path: Path,
+) -> None:
+    """A session the stop could not see is an unprotected session, and the
+    run says so rather than passing over it silently. Inventing a breach from
+    a price that does not exist would be worse."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path, stop_loss_policy=STOP_POLICY)
+    first, second = env.dates[80], env.dates[81]
+    instrument_id = env.instrument_ids[0]
+    second_execution = env.calendar.next_trading_day(second)
+    bars = env.market_data._bars[instrument_id]
+    env.market_data._bars[instrument_id] = [
+        bar for bar in bars if bar.session_date != second_execution
+    ]
+    targets = {
+        first: full_exposure_target(first, env.regime_policy),
+        second: full_exposure_target(second, env.regime_policy),
+    }
+
+    result = engine.run("unchecked", targets, [first, second], 1_000_000.0)
+
+    assert result.stop_checks_skipped.get(instrument_id, 0) >= 1
+    assert result.stop_exits == ()
+
+
+# -- the ledger the stops read ---------------------------------------------
+
+
+def test_average_price_is_weighted_across_buys_and_basis_includes_costs() -> None:
+    """The hard stop is measured from ``avg_price`` and profitability from
+    ``cost_basis``, and the two are different numbers: one is a price per
+    share, the other is cash out of the door including charges. Conflating
+    them would put the stop level in the wrong place on any position built
+    in more than one go."""
+    holdings: dict[str, int] = {}
+    avg_price: dict[str, float] = {}
+    cost_basis: dict[str, float] = {}
+    cash = 100_000.0
+
+    for quantity, price in ((100, 100.0), (100, 120.0)):
+        fill = _buy_fill("NSE:ACME", quantity, price)
+        cash = BacktestEngine._apply_fill(fill, cash, holdings, avg_price, cost_basis)
+
+    assert holdings["NSE:ACME"] == 200
+    assert avg_price["NSE:ACME"] == pytest.approx(110.0)
+    # 22,000 of stock plus the buy leg's charges.
+    assert cost_basis["NSE:ACME"] > 22_000.0
+    assert cost_basis["NSE:ACME"] == pytest.approx(100_000.0 - cash)
+
+
+def test_a_partial_sale_retires_its_share_of_the_basis_and_keeps_the_price() -> None:
+    holdings: dict[str, int] = {}
+    avg_price: dict[str, float] = {}
+    cost_basis: dict[str, float] = {}
+    cash = BacktestEngine._apply_fill(
+        _buy_fill("NSE:ACME", 200, 110.0), 100_000.0, holdings, avg_price, cost_basis
+    )
+    full_basis = cost_basis["NSE:ACME"]
+
+    BacktestEngine._apply_fill(
+        _sell_fill("NSE:ACME", 50, 115.0), cash, holdings, avg_price, cost_basis
+    )
+
+    assert holdings["NSE:ACME"] == 150
+    assert avg_price["NSE:ACME"] == pytest.approx(110.0)
+    assert cost_basis["NSE:ACME"] == pytest.approx(full_basis * 0.75)

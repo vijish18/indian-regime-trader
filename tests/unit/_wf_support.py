@@ -358,6 +358,17 @@ def risk_config(**overrides: object) -> RiskConfig:
         "max_spread_bps": 300.0,
         "max_daily_turnover_pct": 2.0,
         "reduced_risk_exposure_multiplier": 0.5,
+        # Per-position stops are OFF in this fixture so every expectation
+        # below reads as it did before risk/stop_loss.py existed -- a stop
+        # firing mid-run would change trade counts and returns for reasons
+        # that have nothing to do with what these tests assert. Tests that
+        # want the stops enable them explicitly.
+        "stop_loss": {
+            "enabled": False,
+            "hard_stop_pct": 0.03,
+            "trail_drop_pct": 0.02,
+            "trail_arm_net_profit_pct": 0.03,
+        },
     }
     defaults.update(overrides)
     return RiskConfig.model_validate(defaults)
@@ -504,8 +515,8 @@ class Environment:
         )
         self.corporate_actions = InMemoryCorporateActionProvider(dividends or [])
 
-    def engine(self, tmp_path: Path) -> BacktestEngine:
-        return BacktestEngine(
+    def engine(self, tmp_path: Path, **overrides: object) -> BacktestEngine:
+        kwargs: dict[str, object] = dict(
             calendar=self.calendar,
             market_data=self.market_data,
             stock_selector=self.stock_selector,
@@ -516,6 +527,8 @@ class Environment:
             corporate_actions=self.corporate_actions,
             assumed_spread_bps=10.0,
         )
+        kwargs.update(overrides)
+        return BacktestEngine(**kwargs)  # type: ignore[arg-type]
 
     def validator(self, tmp_path: Path, **overrides: object) -> WalkForwardValidator:
         kwargs: dict[str, object] = dict(

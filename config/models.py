@@ -365,6 +365,32 @@ class PortfolioConfig(BaseModel):
         return self
 
 
+class StopLossConfig(BaseModel):
+    """Per-position stop thresholds (risk/stop_loss.py).
+
+    Nested under ``risk`` because these are risk limits, but structurally
+    separate from the book-level thresholds around them: those describe when
+    the *portfolio* stops trading, these describe when *one holding* is sold.
+    """
+
+    model_config = {"frozen": True}
+
+    enabled: bool
+    hard_stop_pct: Percent = Field(gt=0, lt=1)
+    """Exit when the price falls this far below the price the position was
+    bought at. A fixed level, not a trailing one."""
+
+    trail_drop_pct: Percent = Field(gt=0, lt=1)
+    """Exit when the price falls this far below the session's high -- but
+    only if ``trail_arm_net_profit_pct`` is also satisfied."""
+
+    trail_arm_net_profit_pct: Percent = Field(gt=0, lt=1)
+    """The trailing stop stays disarmed until selling would realise more than
+    this, **net of every sell-side charge including the DP charge**. Without
+    it the trailing rule would fire on positions that are flat or losing,
+    which is the hard stop's job at a much wider level."""
+
+
 class RiskConfig(BaseModel):
     model_config = {"frozen": True}
 
@@ -403,6 +429,7 @@ class RiskConfig(BaseModel):
     ``max_sector_pct`` while the circuit breaker is in REDUCED_RISK --
     strictly less than 1 so REDUCED_RISK is always actually tighter than
     NORMAL, never a no-op."""
+    stop_loss: StopLossConfig
 
     @model_validator(mode="after")
     def _thresholds_are_ordered(self) -> RiskConfig:
