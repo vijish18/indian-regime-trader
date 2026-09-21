@@ -82,6 +82,11 @@ class LocalMarketDataProvider(MarketDataProvider):
         self._corporate_actions = corporate_actions
         self._layer = layer
         self._frame_cache_size = frame_cache_size
+        self.unadjustable: dict[str, int] = {}
+        """instrument -> bars served unadjusted because a corporate action
+        between the bar and the as-of date has no derivable price factor.
+        Empty for a run that never priced through such an event."""
+
         self._frames: OrderedDict[Path, pd.DataFrame] = OrderedDict()
 
     def _read_frame(self, path: Path) -> pd.DataFrame:
@@ -171,9 +176,36 @@ class LocalMarketDataProvider(MarketDataProvider):
             )
         adjusted: list[DailyBar] = []
         for bar in bars:
-            factor = self._corporate_actions.cumulative_adjustment_factor(
-                instrument_id, bar.session_date, as_of
-            )
+            try:
+                factor = self._corporate_actions.cumulative_adjustment_factor(
+                    instrument_id, bar.session_date, as_of
+                )
+            except ValueError:
+                # Some corporate actions have no derivable price factor -- a
+                # demerger's terms do not determine one, and nobody supplied
+                # an explicit override. The bar is served unadjusted rather
+                # than raising.
+                #
+                # Handled here rather than at each caller because it is not a
+                # property of any one caller. NSE:VEDL's 2026-04-30 demerger
+                # reached this through three separate paths on three separate
+                # runs -- _next_open, _last_close, then market_liquidity_stats
+                # -- each costing hours, and each "fix" only moved the crash
+                # to the next call site. Refusing to serve a price for an
+                # instrument the portfolio is holding is the wrong answer at
+                # every one of them.
+                #
+                # Counted, never silent: `unadjustable` names every instrument
+                # served this way, so a run that leaned on unadjusted prices
+                # is distinguishable afterwards from one that did not. The
+                # universe already excludes these instruments from selection
+                # (universe/bhavcopy_universe.py), so this is the residue --
+                # positions bought before the event and still held through it.
+                self.unadjustable[instrument_id] = (
+                    self.unadjustable.get(instrument_id, 0) + 1
+                )
+                adjusted.append(bar)
+                continue
             adjusted.append(bar if factor == Decimal(1) else bar.adjusted(factor))
         return adjusted
 
