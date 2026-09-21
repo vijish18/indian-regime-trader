@@ -370,16 +370,103 @@ def _load_resume(
             continue
         equity = _read_checkpoint_series(series_dir / f"{name}.folds.csv", "equity", folds_done)
         cash = _read_checkpoint_series(series_dir / f"{name}.cash.partial.csv", "cash", folds_done)
-        trades_path = series_dir / f"{name}.trades.partial.csv"
-        trades = (
-            pd.read_csv(trades_path)
-            if trades_path.exists()
-            else pd.DataFrame(columns=list(TRADE_LOG_COLUMNS))
+        trades = _read_checkpoint_trades(
+            series_dir / f"{name}.trades.partial.csv", folds_done
         )
         resume[name] = CompletedFolds(
             folds_done=folds_done, equity=equity, trades=trades, cash=cash
         )
     return resume
+
+
+def _read_checkpoint_trades(path: Path, folds_done: int | None = None) -> pd.DataFrame:
+    """The checkpointed trade log, with its dates back as dates.
+
+    ``pd.read_csv`` hands back strings, and the engine produces
+    ``datetime.date``. Concatenating the two and asking
+    ``PerformanceCalculator`` for an average holding period then fails on
+    ``str - str`` -- which is exactly how the first resumed run died, after
+    correctly recomputing every fold it was missing.
+    """
+    if not path.exists():
+        return pd.DataFrame(columns=list(TRADE_LOG_COLUMNS))
+    frame = pd.read_csv(path)
+    if "fold" in frame.columns and folds_done is not None:
+        frame = _keep_last_run_per_fold(frame, folds_done).drop(columns=["fold"])
+    for column in ("signal_date", "execution_date"):
+        if column in frame.columns:
+            frame[column] = pd.to_datetime(frame[column]).dt.date
+    return frame
+
+
+def _keep_last_run_per_fold(frame: pd.DataFrame, folds_done: int) -> pd.DataFrame:
+    """Rows for folds 1..folds_done, keeping only the LAST copy of each fold.
+
+    Two distinct kinds of stale row live in a checkpoint after a crash:
+
+    *Beyond the manifest* -- a fold whose rows were appended before the
+    manifest was rewritten, so the resume does not count it as done. Dropped
+    by the fold number.
+
+    *Duplicated* -- that same fold, recomputed by the resumed run and
+    appended a second time, leaving 126 rows for a 63-session fold. Dropped
+    by the natural key, keeping the later copy.
+
+    The key is ``(fold, session_date)`` where there is one value per session,
+    and the whole row for the trade log, where a fold can hold many rows per
+    session. A recomputed fold is byte-identical -- the backtest is
+    deterministic -- and the engine emits at most one order per instrument
+    per signal date, so two identical trade rows inside one fold cannot
+    occur legitimately.
+
+    The obvious approach, marking a new block wherever the fold number
+    changes, does not work: the two copies of a fold are *contiguous*, so the
+    fold number never changes between them and they read as one block.
+    """
+    if "fold" not in frame.columns or frame.empty:
+        return frame
+    frame = frame[frame["fold"] <= folds_done]
+    if frame.empty:
+        return frame
+    if "session_date" in frame.columns:
+        return frame.drop_duplicates(subset=["fold", "session_date"], keep="last")
+    return frame.drop_duplicates(keep="last")
+
+
+def _truncate_checkpoints(series_dir: Path, name: str, folds_done: int) -> None:
+    """Rewrite this strategy's checkpoints to exactly folds 1..folds_done.
+
+    Run before a resumed pass appends anything. Reading is already guarded by
+    fold number, but the file itself accumulates duplicates otherwise -- and
+    the file is what a person opens.
+    """
+    for filename in (
+        f"{name}.folds.csv",
+        f"{name}.cash.partial.csv",
+        f"{name}.trades.partial.csv",
+    ):
+        path = series_dir / filename
+        if not path.exists():
+            continue
+        frame = pd.read_csv(path)
+        if "fold" not in frame.columns:
+            # Written by a version that did not tag trades with a fold. It
+            # cannot be truncated safely, so it is not trusted: a resumed run
+            # rebuilds the trade log from the folds it recomputes plus
+            # whatever this file holds, and a silent partial is worse than a
+            # loud restart.
+            raise SystemExit(
+                f"--resume: {path} has no 'fold' column, so the rows belonging to "
+                "completed folds cannot be identified. It was written by an older "
+                "build. Start the run over, or point --series-dir at a new directory."
+            )
+        kept = _keep_last_run_per_fold(frame, folds_done)
+        if len(kept) != len(frame):
+            print(
+                f"  checkpoint: {filename} {len(frame)} -> {len(kept)} rows "
+                f"(stale or duplicated folds removed)"
+            )
+            kept.to_csv(path, index=False)
 
 
 def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Series:
@@ -396,8 +483,9 @@ def _read_checkpoint_series(path: Path, column: str, folds_done: int) -> pd.Seri
             f"--resume: {path} is missing but the manifest says {folds_done} folds "
             "are complete. The checkpoint is incomplete; start over."
         )
-    frame = pd.read_csv(path, parse_dates=["session_date"])
-    frame = frame[frame["fold"] <= folds_done]
+    frame = _keep_last_run_per_fold(
+        pd.read_csv(path, parse_dates=["session_date"]), folds_done
+    )
     if frame.empty:
         raise SystemExit(f"--resume: {path} has no rows for folds 1..{folds_done}")
     series = pd.Series(
@@ -485,6 +573,8 @@ def main(argv: list[str]) -> int:
         resume_state = _load_resume(
             args.series_dir, selected_names, fingerprint, folds_total
         )
+        for name, state in resume_state.items():
+            _truncate_checkpoints(args.series_dir, name, state.folds_done)
         if resume_state:
             for name, state in sorted(resume_state.items()):
                 print(
@@ -562,7 +652,13 @@ def main(argv: list[str]) -> int:
 
         trades_checkpoint = args.series_dir / f"{name}.trades.partial.csv"
         if not result.trade_log.empty:
-            result.trade_log.to_csv(
+            # Tagged with the fold, like the other two checkpoints. Without it
+            # a resumed run cannot tell which trades belong to a fold it is
+            # about to recompute, and the only alternative -- truncating by
+            # date -- cannot distinguish a re-run fold from a duplicated one.
+            tagged = result.trade_log.copy()
+            tagged.insert(0, "fold", fold_index + 1)
+            tagged.to_csv(
                 trades_checkpoint,
                 mode="a",
                 header=not trades_checkpoint.exists(),
