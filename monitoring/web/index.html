@@ -9,12 +9,31 @@
 <section id="research" class="panel research-panel">
 <div class="section-head"><div><div class="eyebrow">AZURE / WALK-FORWARD BACKTEST</div><h3>Research results</h3></div><span id="research-status" class="badge">Awaiting results</span></div>
 <p id="research-meta" class="muted"></p>
+<p><a href="#hmm-history" class="history-link">Explore HMM trade history: entries, exits, costs and selling reasons &#8595;</a></p>
 <div id="results" class="research-results"></div>
 <div class="section-head research-chart-head"><div><h3>Capital through time</h3><p id="research-range" class="muted"></p></div><select id="research-strategy" aria-label="Backtest strategy"></select></div>
 <div class="chart-meta"><strong id="research-value">&mdash;</strong><span id="research-point">Select a completed strategy</span></div>
 <div id="research-chart" tabindex="0" role="group" aria-label="Backtest equity chart. Use left and right arrows to inspect sessions."></div>
 <p class="footnote">Historical simulation, after modelled costs. Starting capital &#8377;1,00,000 per strategy. The always-invested stock-selection baseline is not passive NIFTY buy-and-hold. Partial strategies are excluded from final metrics. Hover or use arrow keys to inspect a session.</p>
 <p id="research-sync" class="footnote"></p>
+</section>
+<section id="hmm-history" class="panel">
+<div class="section-head"><div><div class="eyebrow">HMM / HISTORICAL EXECUTION LEDGER</div><h3>Trade history <span id="history-total" class="muted"></span></h3></div><button id="history-export">Download filtered CSV</button></div>
+<p class="muted history-explainer">One row per sale, including partial sales. Entry price is the weighted average of the position's buys. P/L includes allocated buy costs and all sell costs; it excludes dividends and other account cash movements.</p>
+<p id="history-quotes" class="notice"></p>
+<div class="history-filters">
+<label>STOCK<input id="history-search" type="search" placeholder="Search stock symbol" aria-label="Search HMM stock"></label>
+<label>SELL REASON<select id="history-reason"><option value="">All reasons</option><option value="hard_stop">Hard stop</option><option value="trailing_profit_stop">Trailing profit stop</option><option value="portfolio_rebalance">Portfolio rebalance</option><option value="fold_end_liquidation">Fold-end liquidation</option><option value="take_profit">Take profit</option></select></label>
+<label>RESULT<select id="history-outcome"><option value="">All results</option><option value="loss">Losses</option><option value="profit">Profits</option></select></label>
+<label>EXIT FROM<input id="history-from" type="date"></label><label>EXIT THROUGH<input id="history-to" type="date"></label>
+<label>SORT<select id="history-sort"><option value="latest">Latest exit</option><option value="earliest">Earliest exit</option><option value="loss">Largest loss</option><option value="profit">Largest profit</option><option value="fees">Highest costs</option></select></label>
+</div>
+<p id="history-summary" class="history-summary"></p>
+<div class="table-wrap history-table"><table><thead><tr><th>Stock</th><th>Entry / exit date</th><th>Shares sold</th><th>Avg entry</th><th>Current quote</th><th>Last dataset price</th><th>Exit price</th><th>Net P/L</th><th>Return</th><th>Shares after exit</th><th>Shares at run end</th><th>Sell reason</th><th></th></tr></thead><tbody id="history-rows"></tbody></table></div>
+<div class="history-pagination"><button id="history-prev">Previous</button><span id="history-page"></span><button id="history-next">Next</button></div>
+<div id="history-detail" class="detail" hidden></div>
+<p id="history-reconcile" class="footnote"></p>
+<p class="footnote">Current quotes are timestamped observations, not backtest inputs. Last dataset price is a raw historical close with its own date; renamed or delisted stocks may have older dates. Share counts refer to this simulation, not your live broker account. Generic rebalance exits do not record whether ranking, allocation, or a risk restriction caused the target change.</p>
 </section>
 <section class="metrics" aria-label="Portfolio metrics">
 <article><label>ACCOUNT EQUITY</label><strong id="equity">—</strong><small id="equity-sub">Awaiting book</small></article>

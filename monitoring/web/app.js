@@ -69,7 +69,7 @@ function render() {
   $('symbol').innerHTML = symbols.map(s => `<option value="${esc(s)}">${esc(s.replace('NSE:', ''))}</option>`).join('');
   if (symbols.includes(current)) $('symbol').value = current;
   else if (symbols.includes('NSE:LAURUSLABS')) $('symbol').value = 'NSE:LAURUSLABS';
-  renderChart(); renderPositions(); renderActivity(); renderResearch();
+  renderChart(); renderPositions(); renderActivity(); renderResearch(); renderHMMHistory();
   $('snapshot-time').textContent = `SNAPSHOT ${data.generated_at || 'unavailable'} · polling every 2s`;
   freshness();
 }
@@ -183,6 +183,55 @@ function renderResearchChart() {
   inspect(researchIndex);
 }
 
+const sellReasons = {hard_stop:'Hard stop', trailing_profit_stop:'Trailing profit stop', portfolio_rebalance:'Portfolio rebalance', fold_end_liquidation:'Fold-end liquidation', take_profit:'Take profit'};
+let historyPage = 0, selectedHistoryId = null;
+const historyPageSize = 50;
+function filteredHistory() {
+  const search=$('history-search').value.trim().toUpperCase(), reason=$('history-reason').value;
+  const outcome=$('history-outcome').value, from=$('history-from').value, to=$('history-to').value;
+  const rows=(data.hmm_history?.rows || []).filter(r => (!search || r.symbol.includes(search)) && (!reason || r.reason===reason) && (!from || r.exit_date>=from) && (!to || r.exit_date<=to) && (!outcome || (outcome==='loss' ? r.net_pnl<0 : r.net_pnl>0)));
+  const sort=$('history-sort').value;
+  rows.sort((a,b)=>sort==='loss'?a.net_pnl-b.net_pnl:sort==='profit'?b.net_pnl-a.net_pnl:sort==='fees'?b.total_fees-a.total_fees:sort==='earliest'?a.id-b.id:b.id-a.id);
+  return rows;
+}
+function renderHMMHistory() {
+  const history=data.hmm_history || {}, rows=filteredHistory(), prices=history.current_quotes?.prices || {};
+  $('history-total').textContent=history.available ? `(${num(history.rows.length,0)} sell fills)` : '';
+  const quoteReason=history.current_quotes?.reason;
+  $('history-quotes').textContent=quoteReason ? `Current market prices unavailable: ${quoteReason}. ${/session|expired/i.test(quoteReason)?'A fresh Kite login is needed.':'The quote helper will retry.'} Dated historical closes are shown separately.` : history.available ? `Current quote check: ${history.current_quotes?.checked_at || 'not available'}. Quote timestamps are shown per stock. Backtest positions are as of ${history.as_of}.` : 'HMM trade history has not been imported.';
+  const totalPages=Math.max(1,Math.ceil(rows.length/historyPageSize));
+  historyPage=Math.min(historyPage,totalPages-1);
+  const start=historyPage*historyPageSize, page=rows.slice(start,start+historyPageSize);
+  const pnl=rows.reduce((s,r)=>s+r.net_pnl,0), fees=rows.reduce((s,r)=>s+r.total_fees,0);
+  $('history-summary').textContent=`${num(rows.length,0)} matching sales · Net P/L ${money(pnl)} · Buy + sell costs ${money(fees)}`;
+  $('history-rows').innerHTML=page.map(r=>{
+    const quote=prices[r.instrument_id], historical=history.historical_prices?.[r.instrument_id];
+    return `<tr><td>${esc(r.symbol)}<small>Fold ${r.fold} · ${r.holding_days} calendar days</small></td><td>${esc(r.entry_date)}<small>→ ${esc(r.exit_date)}</small></td><td>${num(r.quantity,0)}</td><td>${money(r.entry_price)}</td><td>${quote ? `${money(quote.price)}<small>${esc(quote.as_of || 'Timestamp unavailable')}</small>` : '<span class="muted">Unavailable</span>'}</td><td>${historical ? `${money(historical.price)}<small>${esc(historical.as_of)}</small>` : '—'}</td><td>${money(r.exit_price)}</td><td class="${sign(r.net_pnl)}">${money(r.net_pnl)}</td><td class="${sign(r.return_pct)}">${pct(r.return_pct)}</td><td>${num(r.shares_after_exit,0)}</td><td>${num(r.shares_at_end,0)}</td><td>${esc(sellReasons[r.reason] || r.reason)}</td><td><button data-history-id="${r.id}" aria-label="Details for ${esc(r.symbol)} sale ${r.id}">Details</button></td></tr>`;
+  }).join('') || '<tr><td colspan="13" class="empty">No matching HMM sales.</td></tr>';
+  document.querySelectorAll('[data-history-id]').forEach(button=>{button.onclick=()=>{selectedHistoryId=Number(button.dataset.historyId);renderHistoryDetail();};});
+  $('history-page').textContent=`${rows.length ? start+1 : 0}–${Math.min(start+historyPageSize,rows.length)} of ${num(rows.length,0)} · Page ${historyPage+1}/${totalPages}`;
+  $('history-prev').disabled=historyPage===0; $('history-next').disabled=historyPage+1>=totalPages;
+  const summary=history.summary, report=data.strategies?.reports?.hmm;
+  $('history-reconcile').textContent=summary && report ? `Whole-run reconciliation: starting ${money(report.starting_equity)} + realised trade P/L ${money(summary.realized_net_pnl)} + other cash movements ${money(summary.other_cash_movements)} = ending ${money(report.ending_equity)}. Other cash movements include dividends and are not allocated to individual sale rows.` : '';
+  renderHistoryDetail();
+}
+function renderHistoryDetail() {
+  const row=(data.hmm_history?.rows || []).find(r=>r.id===selectedHistoryId), box=$('history-detail');
+  box.hidden=!row;
+  if (!row) return;
+  box.innerHTML=`<div class="section-head"><strong>${esc(row.symbol)} · Sale #${row.id} · ${esc(row.exit_date)}</strong><button id="history-close">Close</button></div><div class="history-detail-grid"><div><b>Entry and position</b><p>First entry ${esc(row.entry_date)}; last buy ${esc(row.last_entry_date)}<br>${row.entry_fill_count} acquisition fills in this position cycle<br>Weighted entry ${money(row.entry_price)} · sold ${num(row.quantity,0)} shares<br>${num(row.shares_after_exit,0)} shares remained after this sale; ${num(row.shares_at_end,0)} at run end.</p></div><div><b>P/L after costs</b><p>Allocated acquisition cost ${money(row.entry_cost)}<br>Net sale proceeds ${money(row.net_proceeds)}<br>Gross P/L ${money(row.gross_pnl)}<br>Buy costs ${money(row.entry_fees)} + sell costs ${money(row.exit_fees)}<br><strong class="${sign(row.net_pnl)}">Net P/L ${money(row.net_pnl)} (${pct(row.return_pct)})</strong></p></div><div><b>Why it sold</b><p>${esc(sellReasons[row.reason] || row.reason)}<br>Evidence: ${esc(row.reason_source)}<br>${finite(row.stop_level)?`Recorded stop level ${money(row.stop_level)}<br>`:''}Signal ${esc(row.signal_date)} · execution ${esc(row.exit_date)}<br>HMM ${esc(row.regime || 'unavailable')} · confidence ${pct(row.confidence)}<br>Target weight ${pct(row.target_weight_before)} → ${pct(row.target_weight_after)}</p></div></div>`;
+  $('history-close').onclick=()=>{selectedHistoryId=null;renderHistoryDetail();};
+}
+function exportHistoryCSV() {
+  const rows=filteredHistory(), history=data.hmm_history || {};
+  const fields=['id','symbol','fold','entry_date','last_entry_date','signal_date','exit_date','quantity','entry_price','exit_price','net_pnl','return_pct','gross_pnl','entry_fees','exit_fees','entry_cost','net_proceeds','shares_after_exit','shares_at_end','holding_days','reason','reason_source','stop_level','regime','confidence'];
+  const columns=[...fields,'current_quote','current_quote_time','last_dataset_price','last_dataset_price_date'];
+  const cell=value=>{let text=String(value??'');if(typeof value==='string' && /^[=+@-]/.test(text))text="'"+text;return '"'+text.replaceAll('"','""')+'"';};
+  const lines=[columns.map(cell).join(','),...rows.map(r=>{const q=history.current_quotes?.prices?.[r.instrument_id],p=history.historical_prices?.[r.instrument_id];return [...fields.map(k=>r[k]),q?.price,q?.as_of,p?.price,p?.as_of].map(cell).join(',');})];
+  const url=URL.createObjectURL(new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'})), link=document.createElement('a');
+  link.href=url;link.download='hmm-backtest-sales.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
 async function poll() {
   if (!document.hidden) {
     try {
@@ -198,6 +247,10 @@ async function poll() {
   setTimeout(poll, 2000);
 }
 $('research-strategy').onchange = renderResearchChart;
+['history-search','history-reason','history-outcome','history-from','history-to','history-sort'].forEach(id=>{$(id).oninput=()=>{historyPage=0;selectedHistoryId=null;renderHMMHistory();};});
+$('history-prev').onclick=()=>{historyPage=Math.max(0,historyPage-1);renderHMMHistory();};
+$('history-next').onclick=()=>{historyPage++;renderHMMHistory();};
+$('history-export').onclick=exportHistoryCSV;
 $('symbol').onchange = renderChart;
 $('range').onclick = () => { shortRange = !shortRange; $('range').setAttribute('aria-pressed', shortRange); $('range').textContent = shortRange ? 'Full session' : 'Last 30'; renderChart(); };
 $('search').oninput = renderPositions; $('sort').onchange = renderPositions;

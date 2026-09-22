@@ -93,3 +93,15 @@ def test_azure_research_overrides_legacy_results_without_refreshing_paper_book(t
     assert result["live_book"]["fetched_at"] == "old"
     assert result["backtest_run"]["complete"] is False
     assert "api_key" not in result
+
+
+def test_trade_history_is_only_shown_for_the_selected_run(tmp_path: Path) -> None:
+    (tmp_path / "dashboard_data.json").write_text("{}")
+    (tmp_path / "backtest_dashboard.json").write_text(json.dumps({
+        "strategies": {}, "equity_curves": {}, "backtest_run": {"run_id": "current"},
+    }))
+    path = tmp_path / "hmm_backtest_trades.json"
+    path.write_text(json.dumps({"run_id": "old", "rows": []}))
+    assert "hmm_history" not in json.loads(read_snapshot(tmp_path))
+    path.write_text(json.dumps({"run_id": "current", "rows": [{"id": 1}]}))
+    assert json.loads(read_snapshot(tmp_path))["hmm_history"]["rows"] == [{"id": 1}]

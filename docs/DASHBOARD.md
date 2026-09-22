@@ -32,6 +32,36 @@ legacy paper refreshes cannot overwrite this run. Mixed-run fingerprints are
 rejected, and undefined report metrics display as unavailable. A failed sync
 retains the previous snapshot and its original timestamp.
 
+## HMM trade history
+
+Open http://127.0.0.1:8765/#hmm-history. The table contains one row per sell
+fill, including partial exits, with the engine's weighted-average entry price
+and proportionally allocated acquisition costs. Realised trade P/L uses net
+sale proceeds minus that acquisition basis. Dividends and other cash movements
+are shown in the account reconciliation, not attributed to individual sales.
+
+Sell reasons come from checkpoint stop events or explicit fold liquidations.
+Other sales are labelled portfolio rebalances; the precise ranking/allocation/
+risk motivation was not saved, so the dashboard does not invent it. Expand a
+row to see its stop level, signal date, regime, confidence, and target weights.
+Search, date/reason/outcome filters, sorting, pagination, and filtered CSV
+download are available. Shares after the sale differ from shares at run end;
+neither is a live broker position.
+
+The separate helper reads completed HMM checkpoints without modifying Azure:
+
+```powershell
+.\.venv\Scripts\python.exe -u -m monitoring.backtest_trades --run-root /home/irt/backtest_runs/fresh_20260921_series_v2 --data-root /home/irt/data_runs/2026-09-21-series-v2 --ssh-host irt@20.219.11.26 --ssh-key C:/Users/Vijish/.ssh/irt_azure --watch 60
+```
+
+It verifies the checkpoint fills against the published CSV, imports history
+once, and refreshes current quotes locally every 60 seconds. No Kite credentials
+are sent to Azure. Expired login/missing quotes remain unavailable; the separately
+labelled last dataset close includes its actual date. After renewing the Kite
+session, the running helper can pick up quotes without rebuilding the history.
+The server reads its atomic `state/hmm_backtest_trades.json` snapshot only for
+the selected research run.
+
 The dashboard reads `state/dashboard_data.json` every two seconds while the
 tab is visible. It also reads newer observations from `state/live_ticks.json`.
 It does not call Zerodha, start quote collectors, change a paper book, or place

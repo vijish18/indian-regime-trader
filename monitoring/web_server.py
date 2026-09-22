@@ -46,6 +46,17 @@ def read_snapshot(state_dir: Path) -> bytes:
             data[key] = research[key]
     except FileNotFoundError:
         pass
+    try:
+        history = json.loads(
+            (state_dir / "hmm_backtest_trades.json").read_text(encoding="utf-8"),
+            parse_constant=invalid,
+        )
+        if not isinstance(history, dict):
+            raise ValueError("HMM history must be an object")
+        if history.get("run_id") == data.get("backtest_run", {}).get("run_id"):
+            data["hmm_history"] = history
+    except FileNotFoundError:
+        pass
     # The independent quote recorder can update more frequently than the book.
     # Preserve separate timestamps: newer ticks do not make an old book fresh.
     try:
