@@ -171,7 +171,8 @@ risk:
   # fires for a single name bleeding out inside an otherwise flat portfolio.
   # THE MASTER STOP RULE. A position leaves the book when either holds:
   #
-  #   1. it trades more than hard_stop_pct below the price it was BOUGHT at
+  #   1. average buy price is above INR 100 and it falls 3% from that price
+  #      At INR 100 or below, losses are left to rank-based rebalancing.
   #   2. it is more than trail_arm_net_profit_pct in profit AFTER every
   #      sell-side charge (DP charge included) AND has fallen trail_drop_pct
   #      below today's running high
@@ -184,6 +185,7 @@ risk:
   stop_loss:
     enabled: true
     hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
+    hard_stop_min_entry_price: 100.0 # strict >; uses corporate-action-adjusted average buy price
     trail_arm_net_profit_pct: 0.05   # the trail stays disarmed until the sale would net
                                       # >5% after every sell-side charge, DP included
     trail_drop_pct: 0.02             # once armed, exit on a 2% fall from today's high

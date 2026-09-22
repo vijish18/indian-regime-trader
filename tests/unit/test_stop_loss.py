@@ -9,6 +9,8 @@ the market offered.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from risk.stop_loss import (
@@ -23,9 +25,7 @@ from risk.stop_loss import (
     trailing_stop_level,
 )
 
-POLICY = StopLossPolicy(
-    hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03
-)
+POLICY = StopLossPolicy(hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03)
 """The shipped setting: reaching +3% net closes the position outright."""
 
 TRAIL_POLICY = StopLossPolicy(
@@ -44,6 +44,54 @@ SELL_COST_PCT = 0.0012
 DP_CHARGE = 15.93
 """Flat per-scrip sell charge. On a small position this alone is ~15bps, which
 is the whole reason the arming test is computed net rather than gross."""
+
+
+@pytest.mark.parametrize(
+    "entry,expected", [(50.0, False), (99.99, False), (100.0, False), (100.01, True), (200.0, True)]
+)
+def test_hard_stop_purchase_price_exemption(entry: float, expected: bool) -> None:
+    policy = replace(TRAIL_POLICY, hard_stop_min_entry_price=100.0)
+    breach = evaluate(
+        "NSE:TEST",
+        entry_price=entry,
+        cost_basis=entry * 10,
+        session_high=entry,
+        session_low=entry * 0.90,
+        reference_price=entry * 0.95,
+        net_sale_value=lambda p: p * 10,
+        policy=policy,
+    )
+    assert (breach is not None) is expected
+    if breach:
+        assert breach.reason is StopReason.HARD_STOP
+
+
+def test_low_purchase_price_remains_eligible_for_profit_exit() -> None:
+    breach = evaluate(
+        "NSE:TEST",
+        entry_price=50,
+        cost_basis=500,
+        session_high=60,
+        session_low=45,
+        reference_price=58,
+        net_sale_value=lambda p: p * 10,
+        policy=replace(TRAIL_POLICY, hard_stop_min_entry_price=100),
+    )
+    assert breach is not None
+    assert breach.reason is StopReason.TRAILING_PROFIT_STOP
+
+
+@pytest.mark.parametrize("threshold", [-1, float("nan"), float("inf")])
+def test_invalid_entry_price_threshold(threshold: float) -> None:
+    with pytest.raises(StopLossError):
+        replace(POLICY, hard_stop_min_entry_price=threshold)
+
+
+def test_shipped_policy_uses_purchase_price_threshold() -> None:
+    from config.loader import load_settings
+
+    policy = StopLossPolicy.from_mapping(load_settings().risk.stop_loss.model_dump())
+    assert policy.hard_stop_min_entry_price == 100
 
 
 def net_sale(price: float, quantity: int = QUANTITY) -> float:
@@ -303,10 +351,7 @@ def test_unusable_inputs_produce_no_breach_rather_than_a_guess() -> None:
             "reference_price": 91.0,
         }
         base.update(kwargs)
-        assert (
-            evaluate("ACME", net_sale_value=net_sale, policy=POLICY, **base)
-            is None
-        )
+        assert evaluate("ACME", net_sale_value=net_sale, policy=POLICY, **base) is None
 
 
 def test_an_impossible_bar_fails_loudly() -> None:
@@ -419,9 +464,9 @@ def test_take_profit_is_measured_net_so_a_3_pct_move_is_not_enough() -> None:
         policy=POLICY,
     )
     assert breach is None
-    assert net_profit_pct(
-        basis_for(100.0, quantity), large_sale, 103.2
-    ) == pytest.approx(0.0294, abs=5e-4)
+    assert net_profit_pct(basis_for(100.0, quantity), large_sale, 103.2) == pytest.approx(
+        0.0294, abs=5e-4
+    )
 
 
 def test_take_profit_does_not_fire_on_a_high_the_sale_missed() -> None:
@@ -462,6 +507,7 @@ def test_the_hard_stop_still_wins_over_a_take_profit_on_the_same_session() -> No
 def test_the_two_profit_policies_disagree_on_the_same_session() -> None:
     """The reason this is configuration. Up 4% and still at its high: the
     take profit banks it, the trailing stop holds on for more."""
+
     def at(policy: StopLossPolicy) -> StopBreach | None:
         return evaluate(
             "ACME",
@@ -544,8 +590,7 @@ def test_the_master_rule_needs_five_percent_not_three() -> None:
     )
 
 
-def test_the_master_rule_banks_a_five_percent_winner_on_a_two_percent_pullback(
-) -> None:
+def test_the_master_rule_banks_a_five_percent_winner_on_a_two_percent_pullback() -> None:
     quantity = 5_000
 
     def large_sale(price: float) -> float:

@@ -306,6 +306,7 @@ properties:
           enabled: { type: boolean }
           close_on_arm: { type: boolean }
           hard_stop_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
+          hard_stop_min_entry_price: { type: number, minimum: 0 }
           trail_drop_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
           trail_arm_net_profit_pct: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
 

@@ -137,9 +137,7 @@ class HMMConfig(BaseModel):
                 "docs/SPECIFICATION.md section 6.3's stability check is performed"
             )
         if len(set(self.random_seeds)) != len(self.random_seeds):
-            raise ValueError(
-                "random_seeds must be distinct; a repeated seed refits the same model"
-            )
+            raise ValueError("random_seeds must be distinct; a repeated seed refits the same model")
         if self.covariance_type not in ("diag", "full"):
             raise ValueError(
                 f"covariance_type must be 'diag' or 'full', got {self.covariance_type!r}"
@@ -380,6 +378,10 @@ class StopLossConfig(BaseModel):
     """Exit when the price falls this far below the price the position was
     bought at. A fixed level, not a trailing one."""
 
+    hard_stop_min_entry_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    """Hard stop requires average entry strictly above this INR price.
+    Zero retains legacy config behavior; the shipped policy sets 100."""
+
     close_on_arm: bool
     """True: sell as soon as the exit would net ``trail_arm_net_profit_pct``.
     False: arm a trailing stop at that point and wait for a
@@ -441,9 +443,7 @@ class RiskConfig(BaseModel):
     @model_validator(mode="after")
     def _thresholds_are_ordered(self) -> RiskConfig:
         if not (
-            self.daily_loss_warning_pct
-            < self.daily_loss_reduce_pct
-            < self.daily_loss_halt_pct
+            self.daily_loss_warning_pct < self.daily_loss_reduce_pct < self.daily_loss_halt_pct
         ):
             raise ValueError(
                 "daily_loss_warning_pct < daily_loss_reduce_pct < daily_loss_halt_pct must hold"

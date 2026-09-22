@@ -3,7 +3,7 @@
 The master rule, as configured (``risk.stop_loss`` in settings.yaml). A
 position leaves the book when either holds:
 
-1. it trades more than 3% below the price it was **bought** at, or
+1. its average buy price is above INR 100 and it trades 3% below that price, or
 2. it is more than 5% in profit **after every sell-side charge, DP charge
    included**, and has fallen 2% below **today's running high**.
 
@@ -24,8 +24,8 @@ Two independent rules, either of which exits the whole position:
 
 ``HARD_STOP``
     The price falls ``hard_stop_pct`` below **the price it was bought at**.
-    A loss limiter: it does not move, it does not care about the day, and it
-    is the only thing standing between a position and an unbounded loss.
+    Applies only when average entry exceeds ``hard_stop_min_entry_price``.
+    Lower-priced positions remain eligible for rank-based replacement.
 
 ``TRAILING_PROFIT_STOP`` (while ``close_on_arm`` is off -- the shipped setting)
     The price falls ``trail_drop_pct`` below **the session's high**, but only
@@ -99,6 +99,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 from typing import Any
 
 NetSaleValue = Callable[[float], float]
@@ -157,8 +158,17 @@ class StopLossPolicy:
     having to rediscover the number."""
 
     enabled: bool = True
+    hard_stop_min_entry_price: float = 0.0
+    """Apply the hard stop only above this average purchase price, strictly.
+
+    Uses the same corporate-action-adjusted entry price as the stop level.
+    Zero preserves historical policies; settings.yaml selects INR 100.
+    Profit exits and rank-based rebalancing remain independent.
+    """
 
     def __post_init__(self) -> None:
+        if not isfinite(self.hard_stop_min_entry_price) or self.hard_stop_min_entry_price < 0:
+            raise StopLossError("hard_stop_min_entry_price must be finite and non-negative")
         for name in ("hard_stop_pct", "trail_drop_pct", "trail_arm_net_profit_pct"):
             value = getattr(self, name)
             if not 0.0 < value < 1.0:
@@ -168,7 +178,9 @@ class StopLossPolicy:
     def from_mapping(cls, raw: Mapping[str, Any]) -> StopLossPolicy:
         """Build from the ``risk.stop_loss`` block of settings.yaml.
 
-        Every key is required. A stop policy with a silently defaulted
+        The original keys are required. The optional minimum entry price
+        defaults to zero for compatibility with historical configurations.
+        A stop policy with a silently defaulted
         threshold is worse than no stop policy: it would report protection
         at a level nobody chose.
         """
@@ -188,6 +200,7 @@ class StopLossPolicy:
             trail_arm_net_profit_pct=float(raw["trail_arm_net_profit_pct"]),
             close_on_arm=bool(raw["close_on_arm"]),
             enabled=bool(raw["enabled"]),
+            hard_stop_min_entry_price=float(raw.get("hard_stop_min_entry_price", 0.0)),
         )
 
 
@@ -290,12 +303,11 @@ def evaluate(
         return None
     if session_high < session_low:
         raise StopLossError(
-            f"{instrument_id}: session_high ({session_high}) is below "
-            f"session_low ({session_low})"
+            f"{instrument_id}: session_high ({session_high}) is below session_low ({session_low})"
         )
 
     hard_level = hard_stop_level(entry_price, policy.hard_stop_pct)
-    if session_low <= hard_level:
+    if entry_price > policy.hard_stop_min_entry_price and session_low <= hard_level:
         fill = stop_fill_price(hard_level, reference_price)
         return StopBreach(
             instrument_id=instrument_id,
