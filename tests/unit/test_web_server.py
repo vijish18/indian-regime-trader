@@ -80,7 +80,9 @@ def test_http_routes_do_not_expose_state_or_accept_writes(tmp_path: Path) -> Non
         thread.join(timeout=3)
 
 
-def test_azure_research_overrides_legacy_results_without_refreshing_paper_book(tmp_path: Path) -> None:
+def test_azure_research_overrides_legacy_results_without_refreshing_paper_book(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "dashboard_data.json").write_text(json.dumps({
         "live_book": {"fetched_at": "old"}, "strategies": {"reports": {"stale": {}}},
     }))
