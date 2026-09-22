@@ -157,6 +157,7 @@ class DailyBar:
     price_basis: PriceBasis = PriceBasis.RAW
     adjustment_factor: Decimal = Decimal(1)
     data_source: str = "unknown"
+    trading_series: str | None = None
 
     def has_valid_ohlc(self) -> bool:
         """True if the OHLC relationships are internally consistent."""
@@ -187,6 +188,7 @@ class DailyBar:
             price_basis=PriceBasis.ADJUSTED,
             adjustment_factor=self.adjustment_factor * factor,
             data_source=self.data_source,
+            trading_series=self.trading_series,
         )
 
 

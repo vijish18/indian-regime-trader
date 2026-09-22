@@ -395,6 +395,36 @@ def check_output(series_dir: Path | None, json_out: Path | None) -> Check:
     return check
 
 
+def check_series_history() -> Check:
+    """Reject old EQ-only exports and ambiguous per-session price records."""
+    from collections import Counter
+
+    import pandas as pd
+
+    from data.nse_bhavcopy import VALUATION_SERIES
+
+    check = Check("equity series history")
+    paths = sorted((DATA_CACHE / "raw" / "equity_bars").glob("*.csv"))
+    counts: Counter[str] = Counter()
+    if not paths:
+        check.fail("No equity bar files")
+        return check
+    for path in paths:
+        try:
+            frame = pd.read_csv(path, usecols=["instrument_id", "session_date", "trading_series"])
+            if frame.duplicated(["instrument_id", "session_date"]).any():
+                raise ValueError("duplicate instrument/session prices")
+            if not frame.trading_series.isin(VALUATION_SERIES).all():
+                raise ValueError("missing or unsupported trading series")
+            counts.update(frame.trading_series.value_counts().to_dict())
+        except (OSError, ValueError) as exc:
+            check.fail(f"{path.name}: {exc}; rebuild with scripts/build_equity_bars.py")
+            return check
+    check.note(f"{len(paths):,} instruments; observed series counts {dict(sorted(counts.items()))}")
+    check.note("BE/BZ retained for held-position pricing/exits; new entries remain EQ-only")
+    return check
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--from", dest="start", type=dt.date.fromisoformat,
@@ -413,6 +443,7 @@ def main(argv: list[str]) -> int:
     checks.append(check_cost_schedule(args.start, args.end))
     checks.append(check_index_history(args.start, args.end))
     checks.append(check_universe(args.start, args.end))
+    checks.append(check_series_history())
     checks.append(check_unadjustable_actions())
     checks.append(check_output(args.series_dir, args.json_out))
 

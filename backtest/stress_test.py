@@ -28,7 +28,7 @@ failure) exercise the specific mechanism that already exists for each:
 ``PortfolioRiskState.broker_connected`` for an outage,
 ``BacktestEngine._apply_fill``'s ledger arithmetic for a partial fill,
 ``BacktestEngine._execute`` returning ``None`` for a rejected/undeliverable
-order, ``BacktestEngine.max_fill_search_days`` for a delayed fill,
+order, a later-session retry for a delayed fill,
 ``BacktestEngine.run``'s duplicate-signal-date rejection for a duplicate
 order, and ``CircuitBreaker``'s on-disk persistence for a restart or a
 corrupted state file. There is no live broker or order-management system
@@ -961,13 +961,15 @@ class StressTestSuite:
                 )
             ],
         )
-        engine = self.context.engine(market_data=shocked, max_fill_search_days=10)
-        fill_price = engine._next_open(instrument_id, nominal_execution_date)
+        engine = self.context.engine(market_data=shocked)
+        missing_price = engine._next_open(instrument_id, nominal_execution_date)
+        actual_execution_date = self.context.calendar.next_trading_day(gap_end)
+        fill_price = engine._next_open(instrument_id, actual_execution_date)
         delayed_bars = self.context.market_data.get_equity_bars(
             instrument_id, gap_end, self.context.calendar.sessions_offset(gap_end, 1)
         )
         expected_price = float(delayed_bars[-1].open) if delayed_bars else None
-        delayed_correctly = fill_price is not None and (
+        delayed_correctly = missing_price is None and fill_price is not None and (
             expected_price is None or math.isclose(fill_price, expected_price, rel_tol=1e-6)
         )
         return StressTestResult(

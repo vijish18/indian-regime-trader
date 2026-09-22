@@ -48,8 +48,7 @@ from decimal import Decimal
 from pathlib import Path
 
 NEW_URL = (
-    "https://nsearchives.nseindia.com/content/cm/"
-    "BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv.zip"
+    "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv.zip"
 )
 OLD_URL = (
     "https://nsearchives.nseindia.com/content/historical/EQUITIES/"
@@ -67,6 +66,11 @@ trade), SM/ST (SME platform) and debt series, which have different
 settlement, different liquidity and, for SME, a different lot size. A
 universe that swept them in would propose trades this system cannot
 execute the way it believes it can."""
+
+VALUATION_SERIES = frozenset({"EQ", "BE", "BZ"})
+"""Full-paid equity prices needed when an existing holding moves series.
+This is a price-history allowlist, not permission to enter trade-for-trade names.
+"""
 
 # Column mappings, verified against real files of each vintage.
 _NEW_COLUMNS = {
@@ -126,6 +130,7 @@ class BhavcopyRow:
     a Rs 3 stock is not liquidity in any sense this system can use."""
 
     trades: int
+    series: str = EQUITY_SERIES
 
     @property
     def instrument_id(self) -> str:
@@ -138,9 +143,7 @@ def bhavcopy_urls(day: dt.date) -> tuple[str, ...]:
     return (NEW_URL.format(day=day), OLD_URL.format(day=day, month=month))
 
 
-def fetch_bhavcopy(
-    day: dt.date, *, cache_dir: Path | None = None, timeout: int = 60
-) -> bytes:
+def fetch_bhavcopy(day: dt.date, *, cache_dir: Path | None = None, timeout: int = 60) -> bytes:
     """The raw zip for one day, from cache when available.
 
     Caching is not an optimisation here, it is the difference between a
@@ -174,7 +177,10 @@ def fetch_bhavcopy(
 
 
 def parse_bhavcopy(
-    payload: bytes, *, expected_date: dt.date | None = None
+    payload: bytes,
+    *,
+    expected_date: dt.date | None = None,
+    allowed_series: frozenset[str] = frozenset({EQUITY_SERIES}),
 ) -> tuple[BhavcopyRow, ...]:
     """Parse either format into one row shape.
 
@@ -218,12 +224,11 @@ def parse_bhavcopy(
 
     rows: list[BhavcopyRow] = []
     for line_number, record in enumerate(reader, start=2):
-        if str(record.get(columns["series"], "")).strip().upper() != EQUITY_SERIES:
+        series = str(record.get(columns["series"], "")).strip().upper()
+        if series not in allowed_series:
             continue
         try:
-            session_date = _parse_session_date(
-                str(record[date_column]).strip(), date_formats
-            )
+            session_date = _parse_session_date(str(record[date_column]).strip(), date_formats)
             rows.append(
                 BhavcopyRow(
                     symbol=str(record[columns["symbol"]]).strip(),
@@ -236,13 +241,14 @@ def parse_bhavcopy(
                     volume=int(float(str(record[columns["volume"]]).strip())),
                     traded_value=Decimal(str(record[columns["traded_value"]]).strip()),
                     trades=int(float(str(record[columns["trades"]]).strip() or 0)),
+                    series=series,
                 )
             )
         except (KeyError, ValueError, ArithmeticError) as exc:
             raise BhavcopyError(f"bhavcopy line {line_number}: {exc}") from exc
 
     if not rows:
-        raise BhavcopyError("bhavcopy contained no EQ-series rows")
+        raise BhavcopyError(f"bhavcopy contained no {'/'.join(sorted(allowed_series))}-series rows")
 
     if expected_date is not None:
         actual = {row.session_date for row in rows}
@@ -250,9 +256,7 @@ def parse_bhavcopy(
             # NSE has served a file under the wrong date before. Trusting
             # the filename over the contents would silently shift a whole
             # day of prices, which no downstream check would catch.
-            raise BhavcopyError(
-                f"bhavcopy requested for {expected_date} contains {sorted(actual)}"
-            )
+            raise BhavcopyError(f"bhavcopy requested for {expected_date} contains {sorted(actual)}")
 
     return tuple(rows)
 
@@ -267,9 +271,15 @@ def _parse_session_date(raw: str, formats: tuple[str, ...]) -> dt.date:
 
 
 def load_bhavcopy(
-    day: dt.date, *, cache_dir: Path | None = None, timeout: int = 60
+    day: dt.date,
+    *,
+    cache_dir: Path | None = None,
+    timeout: int = 60,
+    allowed_series: frozenset[str] = frozenset({EQUITY_SERIES}),
 ) -> tuple[BhavcopyRow, ...]:
     """Fetch and parse one day, verifying the file is for the day asked for."""
     return parse_bhavcopy(
-        fetch_bhavcopy(day, cache_dir=cache_dir, timeout=timeout), expected_date=day
+        fetch_bhavcopy(day, cache_dir=cache_dir, timeout=timeout),
+        expected_date=day,
+        allowed_series=allowed_series,
     )

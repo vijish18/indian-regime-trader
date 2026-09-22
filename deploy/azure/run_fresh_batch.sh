@@ -35,7 +35,12 @@ run_one() {
 }
 
 # Four workers on the existing four-vCPU machine; the fifth queues behind HMM.
-(run_one hmm; run_one shuffled_regime_control) & p1=$!
+(
+    first_status=0
+    run_one hmm || first_status=$?
+    run_one shuffled_regime_control || first_status=$?
+    exit "$first_status"
+) & p1=$!
 run_one buy_and_hold & p2=$!
 run_one rolling_volatility & p3=$!
 run_one moving_average_trend & p4=$!

@@ -26,14 +26,31 @@ their terminal close with execution costs, then carry cash into the next fold.
 
 Remote paths:
 
-- Checkout: `/home/irt/backtest_20260921_full`
-- Dataset: `/home/irt/data_runs/2026-09-21`
-- Results: `/home/irt/backtest_runs/fresh_20260921_full`
+- Checkout: `/home/irt/backtest_20260921_series_v2`
+- Dataset: `/home/irt/data_runs/2026-09-21-series-v2`
+- Results: `/home/irt/backtest_runs/fresh_20260921_series_v2`
 - Service: `irt-backtest-20260921`
 
 The initial 33-fold run was stopped and retained at
 `/home/irt/backtest_runs/fresh_20260921`. The corrected run starts independently:
 its changed coverage/code fingerprint intentionally cannot resume old state.
+
+The subsequent full-window run stopped during window 14 because the EQ-only
+price export omitted ADANITRANS's BE-series bar on 2021-08-23. Its results remain
+at `/home/irt/backtest_runs/fresh_20260921_full`. Series-v2 rebuilds all 2,081
+equity histories with EQ/BE/BZ observations (one price bar per symbol/day,
+preferring EQ when multiple series print). The entry universe remains EQ-only;
+execution also rejects new buys on BE/BZ days. Existing holdings can be valued
+and sold using the observed prices. No missing price is fabricated. Genuinely
+missing fold-end liquidation prices still stop the run for investigation.
+
+The engine also no longer records a future session's open as a fill on a day
+with no bar. These data and execution corrections can affect prior windows,
+so series-v2 starts fresh rather than importing the earlier equity/checkpoints.
+Preflight verifies series metadata and uniqueness across the entire bar store.
+The repaired dataset has 3,755,854 bars: 3,561,770 EQ, 166,726 BE, and 27,358 BZ.
+NSE classifies BE/BZ as trade-for-trade equity series:
+https://www.nseindia.com/static/market-data/legend-of-series
 
 Inspect with `systemctl status irt-backtest-20260921`, and read each strategy's
 `run.log` and `series/run.manifest.json` under the results directory. The

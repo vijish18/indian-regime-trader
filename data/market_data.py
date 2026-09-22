@@ -237,6 +237,7 @@ def parse_bar_rows(frame: pd.DataFrame, source: str) -> list[DailyBar]:
                     )
                     or Decimal(1),
                     data_source=parse_optional_str(row.get("data_source")) or "unknown",
+                    trading_series=parse_optional_str(row.get("trading_series")),
                 )
             )
         except (ValueError, KeyError) as exc:

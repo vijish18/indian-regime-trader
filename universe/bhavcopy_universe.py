@@ -170,9 +170,7 @@ def build_snapshots(
     already hold every session in memory. A full 2015-2026 backfill does
     not -- roughly 5.4 million rows -- and should stream instead.
     """
-    return list(
-        stream_snapshots(((day, rows_by_date[day]) for day in sorted(rows_by_date)), rules)
-    )
+    return list(stream_snapshots(((day, rows_by_date[day]) for day in sorted(rows_by_date)), rules))
 
 
 def stream_snapshots(
@@ -203,13 +201,9 @@ def stream_snapshots(
         )
 
     # isin -> trailing turnover observations, one per session traded.
-    history: dict[str, deque[Decimal]] = defaultdict(
-        lambda: deque(maxlen=rules.lookback_sessions)
-    )
+    history: dict[str, deque[Decimal]] = defaultdict(lambda: deque(maxlen=rules.lookback_sessions))
     # isin -> which of the last N sessions it traded on, as a rolling flag.
-    presence: dict[str, deque[int]] = defaultdict(
-        lambda: deque(maxlen=rules.lookback_sessions)
-    )
+    presence: dict[str, deque[int]] = defaultdict(lambda: deque(maxlen=rules.lookback_sessions))
 
     previous_date: dt.date | None = None
     for session_date, rows in sessions:
@@ -221,7 +215,9 @@ def stream_snapshots(
             )
         previous_date = session_date
         traded_today = {
-            row.isin: row for row in rows if row.isin and is_company_equity(row.isin)
+            row.isin: row
+            for row in rows
+            if row.series == "EQ" and row.isin and is_company_equity(row.isin)
         }
 
         # Advance every instrument seen so far, not only today's, so that

@@ -43,7 +43,12 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT))
 
 from data.calendar import NSETradingCalendar  # noqa: E402
-from data.nse_bhavcopy import BhavcopyError, load_bhavcopy  # noqa: E402
+from data.nse_bhavcopy import (  # noqa: E402
+    VALUATION_SERIES,
+    BhavcopyError,
+    BhavcopyRow,
+    load_bhavcopy,
+)
 
 HOLIDAY_FILE = REPO_ROOT / "config" / "nse_holidays.csv"
 DATA_CACHE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache"))
@@ -86,13 +91,39 @@ BAR_HEADER = (
     "volume",
     "price_basis",
     "data_source",
+    "trading_series",
 )
 
 # One row is a tuple of plain strings rather than a DailyBar: a decade of
 # NSE is several million rows, and dataclass instances with Decimal fields
 # cost an order of magnitude more memory than the strings that will be
 # written out anyway.
-_Row = tuple[str, str, str, str, str, str]
+_Row = tuple[str, str, str, str, str, str, str]
+
+
+def price_rows(rows: tuple[BhavcopyRow, ...]) -> tuple[BhavcopyRow, ...]:
+    """One observed bar per symbol/day: prefer EQ, then BE, then BZ.
+
+    Series prices are never averaged and volumes never combined. Ambiguous
+    identities or duplicate rows in the same series must be investigated.
+    """
+    priority = {"EQ": 0, "BE": 1, "BZ": 2}
+    chosen: dict[tuple[str, dt.date], BhavcopyRow] = {}
+    seen: set[tuple[str, dt.date, str]] = set()
+    for row in rows:
+        if row.series not in priority:
+            continue
+        key = (row.instrument_id, row.session_date)
+        identity = (*key, row.series)
+        if identity in seen:
+            raise BhavcopyError(f"Duplicate bar: {identity}")
+        seen.add(identity)
+        previous = chosen.get(key)
+        if previous is not None and previous.isin != row.isin:
+            raise BhavcopyError(f"Conflicting ISINs for {key}")
+        if previous is None or priority[row.series] < priority[previous.series]:
+            chosen[key] = row
+    return tuple(chosen.values())
 
 
 def universe_instruments(path: Path) -> set[str]:
@@ -105,9 +136,7 @@ def universe_instruments(path: Path) -> set[str]:
     changing the eligibility rules on purpose.
     """
     if not path.is_file():
-        raise SystemExit(
-            f"no membership file at {path}. Run: python scripts/backfill_bhavcopy.py"
-        )
+        raise SystemExit(f"no membership file at {path}. Run: python scripts/backfill_bhavcopy.py")
     with path.open(encoding="utf-8", newline="") as handle:
         return {row["instrument_id"] for row in csv.DictReader(handle)}
 
@@ -141,11 +170,15 @@ def _safe_name(instrument_id: str) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from", dest="start", type=dt.date.fromisoformat,
-                        default=dt.date(2015, 1, 1))
+    parser.add_argument(
+        "--from", dest="start", type=dt.date.fromisoformat, default=dt.date(2015, 1, 1)
+    )
     parser.add_argument("--to", dest="end", type=dt.date.fromisoformat, default=None)
-    parser.add_argument("--all-instruments", action="store_true",
-                        help="write every EQ instrument, not only universe names")
+    parser.add_argument(
+        "--all-instruments",
+        action="store_true",
+        help="write every EQ/BE/BZ instrument, not only universe names",
+    )
     parser.add_argument("--out", type=Path, default=BARS_OUT)
     args = parser.parse_args(argv[1:])
 
@@ -173,13 +206,13 @@ def main(argv: list[str]) -> int:
             skipped += 1
             continue
         try:
-            rows = load_bhavcopy(day, cache_dir=BHAVCOPY_CACHE)
+            rows = load_bhavcopy(day, cache_dir=BHAVCOPY_CACHE, allowed_series=VALUATION_SERIES)
         except BhavcopyError as exc:
             print(f"  skipping {day}: {exc}", file=sys.stderr)
             skipped += 1
             continue
         sessions += 1
-        for row in rows:
+        for row in price_rows(rows):
             instrument_id = row.instrument_id
             if wanted is not None and instrument_id not in wanted:
                 continue
@@ -199,6 +232,7 @@ def main(argv: list[str]) -> int:
                     str(row.low),
                     str(row.close),
                     str(row.volume),
+                    row.series,
                 )
             )
         if index % 250 == 0:
@@ -222,9 +256,20 @@ def main(argv: list[str]) -> int:
         with target.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, lineterminator="\n")
             writer.writerow(BAR_HEADER)
-            for session_date, o, h, low, close, volume in rows_out:
+            for session_date, o, h, low, close, volume, series in rows_out:
                 writer.writerow(
-                    [instrument_id, session_date, o, h, low, close, volume, "raw", "nse_bhavcopy"]
+                    [
+                        instrument_id,
+                        session_date,
+                        o,
+                        h,
+                        low,
+                        close,
+                        volume,
+                        "raw",
+                        "nse_bhavcopy",
+                        series,
+                    ]
                 )
         total += len(rows_out)
 
@@ -235,15 +280,10 @@ def main(argv: list[str]) -> int:
     # a current one to anyone looking, which is how a later change comes
     # to read data nobody meant to keep.
     written = {_safe_name(i) for i in bars}
-    orphans = sorted(
-        path for path in args.out.glob("*.csv") if path.stem not in written
-    )
+    orphans = sorted(path for path in args.out.glob("*.csv") if path.stem not in written)
     if orphans:
         print()
-        print(
-            f"{len(orphans)} stale file(s) from an earlier run, "
-            "not written by this one:"
-        )
+        print(f"{len(orphans)} stale file(s) from an earlier run, not written by this one:")
         for path in orphans[:10]:
             print(f"  {path.name}")
         if len(orphans) > 10:

@@ -312,6 +312,7 @@ class BacktestEngine:
         self.correlation_lookback_days = correlation_lookback_days
         self.min_correlation_observations = min_correlation_observations
         self.rolling_drawdown_window_days = rolling_drawdown_window_days
+        # Kept for caller compatibility; execution no longer searches future bars.
         self.max_fill_search_days = max_fill_search_days
         self.stale_mark_lookback_days = stale_mark_lookback_days
         """How far back :meth:`_last_close` will look for a traded price when
@@ -868,36 +869,13 @@ class BacktestEngine:
         raise BacktestEngineError(f"no price data for {instrument_id} on or before {as_of}")
 
     def _next_open(self, instrument_id: str, execution_date: dt.date) -> float | None:
-        """The execution-date open, or the first available session's open
-        within ``max_fill_search_days`` after it -- a "resting order"
-        assumption for a session where the instrument didn't trade, not a
-        look-ahead: the order's terms were already fixed before this price
-        is read, only *when* it fills is being resolved.
+        """Use only this session's observed open; never book a future price today.
+
+        An unfilled order can be reconsidered on a later signal. Searching
+        ahead without moving the fill's accounting date creates look-ahead.
         """
-        end = execution_date + dt.timedelta(days=self.max_fill_search_days * 2)
-        try:
-            # RAW, not ADJUSTED, because this is a transaction price: what one
-            # share actually cost on the day cash changed hands. ADJUSTED
-            # restates a bar into the terms of the window's *end* -- ten days
-            # later here -- which is right for comparing prices across time
-            # (see _last_close) and wrong for a fill, since nobody pays a
-            # split-restated price.
-            #
-            # It also crashed. A TATACHEM exit filling 2020-03-03 was being
-            # adjusted forward across a 2020-03-04 demerger whose factor
-            # cannot be derived from the action terms, killing all five
-            # strategies at fold 9. The universe had already stopped
-            # *selecting* the name on 2020-03-03; what it could not do is stop
-            # the backtest *holding* it, and a held position still has to be
-            # sold through the event.
-            bars = self.market_data.get_equity_bars(
-                instrument_id, execution_date, end, price_basis=PriceBasis.RAW
-            )
-        except DataNotAvailableError:
-            return None
-        if not bars:
-            return None
-        return float(bars[0].open)
+        bar = self._session_bar(instrument_id, execution_date)
+        return float(bar.open) if bar is not None else None
 
     def _market_stats(
         self, instrument_id: str, as_of: dt.date, lookback_days: int = 20
@@ -1012,7 +990,15 @@ class BacktestEngine:
         holdings: dict[str, int],
         equity_at_signal: float,
     ) -> FillRecord | None:
-        fill_price = self._next_open(order.instrument_id, order.execution_date)
+        bar = self._session_bar(order.instrument_id, order.execution_date)
+        if bar is None:
+            return None
+        # Existing holdings can exit a trade-for-trade series. Do not create
+        # new exposure there, even if yesterday's EQ signal requested a buy.
+        if order.action is not TradeAction.EXIT and order.delta_weight > 0:
+            if bar.trading_series is not None and bar.trading_series != "EQ":
+                return None
+        fill_price = float(bar.open)
         if fill_price is None or fill_price <= 0:
             return None
 
