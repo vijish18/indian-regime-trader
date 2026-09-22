@@ -9,6 +9,29 @@ From the repository root on Windows:
 Open http://127.0.0.1:8765. Change the port with `--port 8766` and the input
 directory with `--state-dir PATH`. Stop the server with Ctrl+C.
 
+## Azure research results
+
+Open http://127.0.0.1:8765/#research for the current backtest comparison,
+ending equity, returns, drawdowns, costs, and selectable equity curves.
+Hover over a chart or use the arrow keys to inspect individual sessions.
+Only strategies with a completed manifest, final report, curve, and completion
+marker are shown as final results. Pending strategies show saved fold counts.
+
+Run the separate read-only sync helper locally:
+
+```powershell
+.\.venv\Scripts\python.exe -u -m monitoring.backtest_results --run-root /home/irt/backtest_runs/fresh_20260921_series_v2 --ssh-host irt@20.219.11.26 --ssh-key C:/Users/Vijish/.ssh/irt_azure --watch 60
+```
+
+It polls over SSH every 60 seconds and exits after all five reports are
+complete. The local computer must remain running for synchronization; the
+Azure backtest itself is independent. Last-sync time is displayed separately
+from paper-account timestamps. The helper atomically writes
+`state/backtest_dashboard.json`; the server overlays only research fields so
+legacy paper refreshes cannot overwrite this run. Mixed-run fingerprints are
+rejected, and undefined report metrics display as unavailable. A failed sync
+retains the previous snapshot and its original timestamp.
+
 The dashboard reads `state/dashboard_data.json` every two seconds while the
 tab is visible. It also reads newer observations from `state/live_ticks.json`.
 It does not call Zerodha, start quote collectors, change a paper book, or place

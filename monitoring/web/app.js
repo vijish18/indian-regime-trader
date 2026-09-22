@@ -131,9 +131,56 @@ function renderActivity() {
   $('activity').innerHTML = history.slice(-6).reverse().map(t => `<div class="event"><div>${esc(t.symbol)}<small>${esc(t.exit_reason?.replaceAll('_',' '))} · ${esc(t.exit_date)} · ${num(t.shares,0)} shares</small></div><div class="${sign(t.net_pnl)}">${money(t.net_pnl)}<small>net of ${money(t.costs)} costs</small></div></div>`).join('') || '<p class="empty">No closed trades recorded.</p>';
 }
 
+const researchNames = {hmm:'HMM regime strategy', buy_and_hold:'Always-invested selection', rolling_volatility:'Rolling volatility', moving_average_trend:'Moving-average trend', shuffled_regime_control:'Shuffled regime control'};
+let researchPoints = [], researchIndex = -1;
 function renderResearch() {
-  const reports = data.strategies?.reports || {};
-  $('results').innerHTML = Object.entries(reports).map(([name, report]) => `<div class="result"><div>${esc(name.replaceAll('_',' '))}<small>Sharpe ${num(report.sharpe_ratio ?? report.sharpe)} · max drawdown ${pct(report.max_drawdown)}</small></div><strong class="${sign(report.cagr)}">${pct(report.cagr)}<small>CAGR after costs</small></strong></div>`).join('') || '<p class="empty">No completed strategy reports in this snapshot.</p>';
+  const reports = data.strategies?.reports || {}, run = data.backtest_run || {};
+  const completed = Object.keys(reports);
+  $('research-status').textContent = run.complete ? '5 / 5 COMPLETE' : `${completed.length} / 5 COMPLETE \u00b7 COMPARISON INCOMPLETE`;
+  $('research-meta').textContent = run.run_id ? `${run.run_id} \u00b7 Data through ${run.end} \u00b7 ${run.folds_total} test windows \u00b7 Starting capital ${money(run.initial_equity)}` : 'No current Azure research snapshot.';
+  $('results').innerHTML = Object.entries(researchNames).map(([name,label]) => {
+    const report = reports[name], progress = run.progress?.[name];
+    if (!report) return `<article class="research-card pending"><span class="eyebrow">${esc(label)}</span><strong>Pending</strong><p>${progress ? `${progress.completed} / ${progress.total} windows saved` : 'Awaiting report'}</p><div class="track"><div class="fill" data-width="${progress?.total ? 100*progress.completed/progress.total : 0}"></div></div><small>No final performance reported yet</small></article>`;
+    return `<article class="research-card"><span class="eyebrow">${esc(label)}</span><strong class="${sign(report.return_from_capital)}">${money(report.ending_equity)}</strong><small>Ending equity \u00b7 ${pct(report.return_from_capital)} total return</small><dl><div><dt>Annualised return</dt><dd class="${sign(report.cagr)}">${pct(report.cagr)}</dd></div><div><dt>Max drawdown</dt><dd class="negative">${pct(report.max_drawdown)}</dd></div><div><dt>Sharpe</dt><dd>${num(report.sharpe)}</dd></div><div><dt>Fills / total costs</dt><dd>${num(report.trade_count,0)} / ${money(report.total_costs)}</dd></div></dl><small>COMPLETE \u00b7 ${esc(report.last_execution)}</small></article>`;
+  }).join('');
+  const selected = $('research-strategy').value;
+  $('research-strategy').innerHTML = completed.map(name => `<option value="${esc(name)}">${esc(researchNames[name] || name)}</option>`).join('');
+  if (completed.includes(selected)) $('research-strategy').value = selected;
+  renderResearchChart();
+  researchFreshness();
+}
+function researchFreshness() {
+  const timestamp = data.backtest_run?.synced_at;
+  $('research-sync').textContent = timestamp ? `Azure snapshot synced ${new Date(timestamp).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} IST \u00b7 ${ageText(timestamp)}. ${data.backtest_run.complete ? 'All strategy reports complete.' : 'Research sync checks every 60s while the local helper is running.'}` : 'Azure results have not been synced.';
+  $('research-sync').classList.toggle('negative', Boolean(timestamp) && !data.backtest_run?.complete && age(timestamp) > 180);
+}
+function renderResearchChart() {
+  const name = $('research-strategy').value, report = data.strategies?.reports?.[name];
+  researchPoints = (data.equity_curves?.[name] || []).filter(p => finite(p.equity));
+  const box = $('research-chart');
+  if (!researchPoints.length) { box.innerHTML = '<p class="empty">No completed equity curve available.</p>'; return; }
+  const W=1000,H=245,left=68,right=18,top=16,bottom=28;
+  const max = Math.max(report?.starting_equity || 0, ...researchPoints.map(p=>p.equity))*1.05;
+  const x = i => left + i / Math.max(1,researchPoints.length-1)*(W-left-right);
+  const y = v => H-bottom-v/Math.max(1,max)*(H-top-bottom);
+  const path = researchPoints.map((p,i)=>`${i?'L':'M'}${x(i).toFixed(2)},${y(p.equity).toFixed(2)}`).join(' ');
+  const grid = [0,.25,.5,.75,1].map(r=>`<line class="chart-grid" x1="${left}" x2="${W-right}" y1="${y(max*r)}" y2="${y(max*r)}"/><text class="chart-text" x="${left-8}" y="${y(max*r)+4}" text-anchor="end">${num(max*r/1000,0)}k</text>`).join('');
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(researchNames[name])} equity in rupees"><title>${esc(researchNames[name])}: ${esc(money(report?.starting_equity))} initial capital to ${esc(money(report?.ending_equity))}</title>${grid}<path class="chart-line" style="stroke:${report?.return_from_capital>=0?'var(--green)':'var(--red)'}" d="${path}"/><line id="research-crosshair" y1="${top}" y2="${H-bottom}" stroke="var(--amber)" stroke-dasharray="3 3"/><circle id="research-dot" r="4" fill="var(--amber)"/><text class="chart-text" x="${left}" y="${H-5}">${esc(researchPoints[0].date)}</text><text class="chart-text" x="${W-right}" y="${H-5}" text-anchor="end">${esc(researchPoints.at(-1).date)}</text></svg>`;
+  $('research-range').textContent = `${report.first_execution} \u00b7 ${report.last_execution} \u00b7 ${researchPoints.length.toLocaleString()} simulated sessions`;
+  researchIndex = researchPoints.length-1;
+  const inspect = i => {
+    researchIndex = Math.max(0,Math.min(researchPoints.length-1,i));
+    const p=researchPoints[researchIndex], px=x(researchIndex);
+    $('research-value').textContent=money(p.equity);
+    $('research-value').className=sign(p.equity-report.starting_equity);
+    $('research-point').textContent=`${p.date} \u00b7 ${pct(p.equity/report.starting_equity-1)} from starting capital`;
+    $('research-crosshair').setAttribute('x1',px); $('research-crosshair').setAttribute('x2',px);
+    $('research-dot').setAttribute('cx',px); $('research-dot').setAttribute('cy',y(p.equity));
+  };
+  box.onpointermove = event => { const rect=box.getBoundingClientRect(); inspect(Math.round(((event.clientX-rect.left)/rect.width*W-left)/(W-left-right)*(researchPoints.length-1))); };
+  box.onpointerleave = () => inspect(researchPoints.length-1);
+  box.onkeydown = event => { if (['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) { event.preventDefault(); inspect(event.key==='Home'?0:event.key==='End'?researchPoints.length-1:researchIndex+(event.key==='ArrowRight'?1:-1)); } };
+  inspect(researchIndex);
 }
 
 async function poll() {
@@ -150,9 +197,10 @@ async function poll() {
   }
   setTimeout(poll, 2000);
 }
+$('research-strategy').onchange = renderResearchChart;
 $('symbol').onchange = renderChart;
 $('range').onclick = () => { shortRange = !shortRange; $('range').setAttribute('aria-pressed', shortRange); $('range').textContent = shortRange ? 'Full session' : 'Last 30'; renderChart(); };
 $('search').oninput = renderPositions; $('sort').onchange = renderPositions;
 function motionState() { document.documentElement.classList.toggle('motion-off', paused); $('motion').setAttribute('aria-pressed', paused); $('motion').textContent = paused ? 'Enable motion' : 'Pause motion'; }
 $('motion').onclick = () => { paused = !paused; motionState(); };
-motionState(); setInterval(freshness, 1000); poll();
+motionState(); setInterval(() => { freshness(); researchFreshness(); }, 1000); poll();

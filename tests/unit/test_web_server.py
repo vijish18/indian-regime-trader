@@ -78,3 +78,18 @@ def test_http_routes_do_not_expose_state_or_accept_writes(tmp_path: Path) -> Non
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_azure_research_overrides_legacy_results_without_refreshing_paper_book(tmp_path: Path) -> None:
+    (tmp_path / "dashboard_data.json").write_text(json.dumps({
+        "live_book": {"fetched_at": "old"}, "strategies": {"reports": {"stale": {}}},
+    }))
+    (tmp_path / "backtest_dashboard.json").write_text(json.dumps({
+        "strategies": {"reports": {"hmm": {"ending_equity": 4334.62}}},
+        "equity_curves": {}, "backtest_run": {"complete": False}, "api_key": "secret",
+    }))
+    result = json.loads(read_snapshot(tmp_path))
+    assert set(result["strategies"]["reports"]) == {"hmm"}
+    assert result["live_book"]["fetched_at"] == "old"
+    assert result["backtest_run"]["complete"] is False
+    assert "api_key" not in result

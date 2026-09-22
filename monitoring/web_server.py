@@ -31,6 +31,21 @@ def read_snapshot(state_dir: Path) -> bytes:
     if not isinstance(raw, dict):
         raise ValueError("Snapshot must be an object")
     data = {key: value for key, value in raw.items() if key in PUBLIC_FIELDS}
+    # Research has its own publisher; legacy paper-book refreshes must not
+    # overwrite the current Azure run with old local research results.
+    try:
+        research = json.loads(
+            (state_dir / "backtest_dashboard.json").read_text(encoding="utf-8"),
+            parse_constant=invalid,
+        )
+        if not isinstance(research, dict):
+            raise ValueError("Research snapshot must be an object")
+        if not all(key in research for key in ("strategies", "equity_curves", "backtest_run")):
+            raise ValueError("Research snapshot is incomplete")
+        for key in ("strategies", "equity_curves", "backtest_run"):
+            data[key] = research[key]
+    except FileNotFoundError:
+        pass
     # The independent quote recorder can update more frequently than the book.
     # Preserve separate timestamps: newer ticks do not make an old book fresh.
     try:
