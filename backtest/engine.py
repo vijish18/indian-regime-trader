@@ -82,6 +82,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -212,6 +213,25 @@ class StopExit:
 
 
 @dataclass(frozen=True, slots=True)
+class ShareAdjustment:
+    """One split or bonus restating a held position's share count.
+
+    The share count and the price move inversely and by exactly the same
+    factor, so the position's *value* is unchanged across the event. That is
+    the whole content of a split or a bonus: it is not a return.
+    """
+
+    instrument_id: str
+    ex_date: dt.date
+    action_type: str
+    quantity_before: int
+    quantity_after: int
+    price_factor: float
+    """What prices before ``ex_date`` must be multiplied by to compare with
+    prices after it. Shares are multiplied by its reciprocal."""
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestResult:
     strategy_name: str
     equity_curve: pd.Series
@@ -262,6 +282,16 @@ class BacktestResult:
     because it had no bar that day (suspension, halt, missing data). Recorded
     rather than silently passed over: an unprotected session is a fact about
     the run, and a stop that cannot see a price must not invent a breach."""
+
+    share_adjustments: tuple[ShareAdjustment, ...] = ()
+    """Every split and bonus applied to a held position, in order. Empty when
+    the engine ran without a corporate-action provider."""
+
+    share_adjustments_skipped: dict[str, int] = field(default_factory=dict)
+    """instrument -> corporate actions on a held position whose share factor
+    could not be derived (a rights issue carries no implicit one). Recorded,
+    never guessed: the alternative is a position whose share count is quietly
+    wrong for the rest of the run."""
 
 
 class BacktestEngine:
@@ -414,6 +444,8 @@ class BacktestEngine:
         risk_decision_records: list[DailyRiskDecisions] = []
         stop_exits: list[StopExit] = []
         stop_checks_skipped: dict[str, int] = {}
+        share_adjustments: list[ShareAdjustment] = []
+        share_adjustments_skipped: dict[str, int] = {}
 
         current_target = empty_portfolio(signal_dates[0], AllocationRegime.NORMAL_RISK)
 
@@ -436,6 +468,8 @@ class BacktestEngine:
             risk_decision_records = restored["risk_decision_records"]
             stop_exits = restored["stop_exits"]
             stop_checks_skipped = restored["stop_checks_skipped"]
+            share_adjustments = restored["share_adjustments"]
+            share_adjustments_skipped = restored["share_adjustments_skipped"]
             current_target = restored["current_target"]
             completed_sessions = restored["completed_sessions"]
             self.stale_marks = restored["stale_marks"]
@@ -483,6 +517,21 @@ class BacktestEngine:
             turnover_points[signal_date] = sum(abs(trade.delta_weight) for trade in trades)
 
             execution_date = self.calendar.next_trading_day(signal_date)
+
+            # Before this session's fills. A split or bonus is effective at
+            # the open of its ex-date, so the rebalance below must transact
+            # against the restated share count -- not the count from
+            # yesterday, at today's already-restated price.
+            share_adjustments.extend(
+                self.apply_share_adjustments(
+                    holdings,
+                    avg_price,
+                    cost_basis,
+                    execution_date,
+                    share_adjustments_skipped,
+                )
+            )
+
             for trade in trades:
                 if trade.action is TradeAction.HOLD:
                     continue
@@ -604,6 +653,8 @@ class BacktestEngine:
                         "risk_decision_records": risk_decision_records,
                         "stop_exits": stop_exits,
                         "stop_checks_skipped": stop_checks_skipped,
+                        "share_adjustments": share_adjustments,
+                        "share_adjustments_skipped": share_adjustments_skipped,
                         "current_target": current_target,
                         "breaker": state_path.read_text(encoding="utf-8")
                         if state_path.exists()
@@ -646,6 +697,8 @@ class BacktestEngine:
             risk_decisions=tuple(risk_decision_records),
             stop_exits=tuple(stop_exits),
             stop_checks_skipped=dict(stop_checks_skipped),
+            share_adjustments=tuple(share_adjustments),
+            share_adjustments_skipped=dict(share_adjustments_skipped),
         )
 
     # -- stops --------------------------------------------------------------
@@ -1103,6 +1156,96 @@ class BacktestEngine:
         for instrument_id, quantity in holdings.items():
             equity += quantity * self._last_close(instrument_id, as_of)
         return equity
+
+    def apply_share_adjustments(
+        self,
+        holdings: dict[str, int],
+        avg_price: dict[str, float],
+        cost_basis: dict[str, float],
+        execution_date: dt.date,
+        skipped: dict[str, int],
+    ) -> list[ShareAdjustment]:
+        """Restate held share counts for splits and bonuses going ex today.
+
+        Without this a bonus or a split is recorded as a catastrophic loss.
+        IEX issued a 2:1 bonus with ex-date 2021-12-03: the price went from
+        729.55 to 255.75 and every holder's share count tripled. An engine
+        that adjusts neither sells the *old* share count at the *new* price
+        and books a 67.8% loss on a position that was economically flat.
+        Across one 33-fold run that fabricated 4.0 crore of losses over 50
+        events -- an order of magnitude larger than the strategy's entire
+        reported P&L, and the single largest error in the backtest.
+
+        Three ledgers move together, and they do not move the same way:
+
+        ``holdings``
+            multiplied by the share factor. More shares.
+        ``avg_price``
+            multiplied by the *price* factor. Each share cost proportionally
+            less, because the same money now buys more of them.
+        ``cost_basis``
+            **unchanged.** A split costs nothing and earns nothing; the cash
+            that left the account to open the position did not move. This is
+            why the two are kept as separate ledgers rather than one derived
+            from the other.
+
+        The share factor is the reciprocal of
+        :meth:`CorporateAction.price_adjustment_factor`, deliberately rather
+        than a second reading of ``ratio_new``/``ratio_old``. That method
+        already encodes the difference between a split (10-for-2 restates
+        price by 2/10) and a bonus (2-for-1 restates by 1/3), and honours an
+        ``explicit_price_factor`` where one is given. Deriving shares from it
+        means the two can never disagree, and a dividend -- factor 1 -- falls
+        through as a no-op without being special-cased.
+
+        Applied at the *open* of the ex-date, before the session's fills: the
+        adjusted share count is what a rebalance on that day transacts
+        against. Fills on the ex-date already price at the adjusted level.
+
+        Fractional entitlements are floored. An exchange pays cash in lieu of
+        a fraction; crediting nothing is a small understatement in the
+        account's favour, which is the right direction for a backtest.
+        """
+        if self.corporate_actions is None:
+            return []
+
+        applied: list[ShareAdjustment] = []
+        for instrument_id in sorted(holdings):
+            quantity = holdings.get(instrument_id, 0)
+            if quantity <= 0:
+                continue
+            for action in self.corporate_actions.actions_for(
+                instrument_id, execution_date, execution_date
+            ):
+                try:
+                    factor = action.price_adjustment_factor()
+                except ValueError:
+                    # A rights issue has no implicit factor -- subscribing is
+                    # a funded decision this engine does not model. Counted
+                    # so the run can say how many it passed over.
+                    skipped[instrument_id] = skipped.get(instrument_id, 0) + 1
+                    continue
+                if factor == 1 or factor <= 0:
+                    continue
+
+                adjusted = int(Decimal(quantity) / factor)
+                if adjusted == quantity:
+                    continue
+                holdings[instrument_id] = adjusted
+                if instrument_id in avg_price:
+                    avg_price[instrument_id] = avg_price[instrument_id] * float(factor)
+                applied.append(
+                    ShareAdjustment(
+                        instrument_id=instrument_id,
+                        ex_date=execution_date,
+                        action_type=str(action.action_type.value),
+                        quantity_before=quantity,
+                        quantity_after=adjusted,
+                        price_factor=float(factor),
+                    )
+                )
+                quantity = adjusted
+        return applied
 
     def dividend_cash_credit(self, holdings: dict[str, int], execution_date: dt.date) -> float:
         """Total cash to credit for dividends going ex on ``execution_date``

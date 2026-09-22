@@ -20,12 +20,14 @@ from backtest.engine import (
     BacktestEngineError,
     FillRecord,
     OrderRecord,
+    ShareAdjustment,
     _apply_rebalance_threshold,
     _apply_risk_decisions,
 )
 from core.regime.allocation import AllocationRegime, AllocationTarget
 from core.regime.regime_policy import RegimePolicy
-from data.models import DailyBar
+from data.corporate_actions import InMemoryCorporateActionProvider
+from data.models import CorporateAction, CorporateActionType, DailyBar
 from portfolio.portfolio_constructor import TargetPortfolio, TargetPosition, TradeAction
 from risk.circuit_breaker import CircuitState
 from risk.risk_manager import RiskCheck, RiskDecision, RiskViolation
@@ -993,3 +995,233 @@ def test_a_take_profit_banks_the_gain_without_waiting_for_a_pullback(
     assert exit_record.breach.fill_price == pytest.approx(float(bar.close))
     assert exit_record.realized_pnl > 0
     assert result.positions_history[execution_date] == {}
+
+
+# --------------------------------------------------------------------------
+# Splits and bonuses restating a held share count
+# --------------------------------------------------------------------------
+
+
+def _action(
+    instrument_id: str,
+    kind: CorporateActionType,
+    ex_date: dt.date,
+    ratio_new: float | None = None,
+    ratio_old: float | None = None,
+    cash: float | None = None,
+) -> CorporateAction:
+    return CorporateAction(
+        instrument_id=instrument_id,
+        action_type=kind,
+        ex_date=ex_date,
+        ratio_new=Decimal(str(ratio_new)) if ratio_new is not None else None,
+        ratio_old=Decimal(str(ratio_old)) if ratio_old is not None else None,
+        cash_amount=Decimal(str(cash)) if cash is not None else None,
+    )
+
+
+def _apply(
+    engine: BacktestEngine,
+    actions: list[CorporateAction],
+    holdings: dict[str, int],
+    avg_price: dict[str, float],
+    cost_basis: dict[str, float],
+    ex_date: dt.date,
+) -> tuple[list[ShareAdjustment], dict[str, int]]:
+    engine.corporate_actions = InMemoryCorporateActionProvider(actions)
+    skipped: dict[str, int] = {}
+    applied = engine.apply_share_adjustments(
+        holdings, avg_price, cost_basis, ex_date, skipped
+    )
+    return applied, skipped
+
+
+def test_a_bonus_multiplies_the_share_count_and_leaves_the_position_value_flat(
+    tmp_path: Path,
+) -> None:
+    """The IEX case, which the engine used to record as a 67.8% loss.
+
+    2:1 bonus, ex 2021-12-03: 524 shares at 729.55 became 1,572 at 255.75.
+    The holder gained nothing and lost nothing. An engine that does not
+    restate the share count sells 524 shares at the new price.
+    """
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 524}
+    avg_price = {iid: 769.90}
+    cost_basis = {iid: 402_134.0}
+
+    applied, skipped = _apply(
+        engine,
+        [_action(iid, CorporateActionType.BONUS, ex, ratio_new=2, ratio_old=1)],
+        holdings,
+        avg_price,
+        cost_basis,
+        ex,
+    )
+
+    assert holdings[iid] == 1_572
+    assert avg_price[iid] == pytest.approx(769.90 / 3)
+    # Cash paid to open the position did not move. A bonus costs nothing.
+    assert cost_basis[iid] == pytest.approx(402_134.0)
+    assert skipped == {}
+    (adj,) = applied
+    assert adj.action_type == "bonus"
+    assert (adj.quantity_before, adj.quantity_after) == (524, 1_572)
+    # Value across the event: 524 x 729.55 == 1572 x 243.18
+    assert 524 * 729.55 == pytest.approx(1_572 * (729.55 / 3))
+
+
+def test_a_split_uses_the_face_value_ratio_not_a_share_ratio(tmp_path: Path) -> None:
+    """TFCILTD, ex 2025-09-19: face value 10 -> 2, price 363.80 -> 72.40.
+
+    A split ratio is quoted as face values and a bonus ratio as shares.
+    Reading one as the other gives a silently wrong factor, which is why the
+    share count is derived from price_adjustment_factor rather than re-read.
+    """
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 200}
+    avg_price = {iid: 363.80}
+
+    _apply(
+        engine,
+        [_action(iid, CorporateActionType.SPLIT, ex, ratio_new=10, ratio_old=2)],
+        holdings,
+        avg_price,
+        {iid: 72_760.0},
+        ex,
+    )
+
+    assert holdings[iid] == 1_000
+    assert avg_price[iid] == pytest.approx(72.76)
+
+
+def test_a_dividend_does_not_touch_the_share_count(tmp_path: Path) -> None:
+    """Its price factor is 1, so it falls through without being
+    special-cased. Dividends are cash, handled by dividend_cash_credit."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 500}
+
+    applied, skipped = _apply(
+        engine,
+        [_action(iid, CorporateActionType.DIVIDEND, ex, cash=2.5)],
+        holdings,
+        {iid: 100.0},
+        {iid: 50_000.0},
+        ex,
+    )
+
+    assert holdings[iid] == 500
+    assert applied == []
+    assert skipped == {}
+
+
+def test_a_rights_issue_is_counted_not_guessed(tmp_path: Path) -> None:
+    """Subscribing to rights is a funded decision this engine does not model,
+    and a rights issue carries no implicit price factor. Recorded so the run
+    can say how many it passed over, rather than silently leaving a position
+    whose share count is wrong for the rest of the run."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 300}
+
+    applied, skipped = _apply(
+        engine,
+        [_action(iid, CorporateActionType.RIGHTS, ex, ratio_new=3, ratio_old=2)],
+        holdings,
+        {iid: 100.0},
+        {iid: 30_000.0},
+        ex,
+    )
+
+    assert holdings[iid] == 300
+    assert applied == []
+    assert skipped == {iid: 1}
+
+
+def test_two_actions_on_one_ex_date_compound(tmp_path: Path) -> None:
+    """CGCL ran a 1:1 bonus and a 1:1 split on the same ex-date, 2024-03-05,
+    and CUPID did the same on 2024-04-04. Applying only the first would
+    leave the position half the size it should be."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 1_000}
+
+    applied, _ = _apply(
+        engine,
+        [
+            _action(iid, CorporateActionType.BONUS, ex, ratio_new=1, ratio_old=1),
+            _action(iid, CorporateActionType.SPLIT, ex, ratio_new=10, ratio_old=5),
+        ],
+        holdings,
+        {iid: 400.0},
+        {iid: 400_000.0},
+        ex,
+    )
+
+    assert holdings[iid] == 4_000
+    assert len(applied) == 2
+    assert applied[1].quantity_before == 2_000
+
+
+def test_a_fractional_entitlement_is_floored(tmp_path: Path) -> None:
+    """An exchange pays cash in lieu of a fraction. Crediting nothing
+    understates the account slightly, which is the safe direction."""
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 100}
+
+    _apply(
+        engine,
+        [_action(iid, CorporateActionType.BONUS, ex, ratio_new=1, ratio_old=3)],
+        holdings,
+        {iid: 300.0},
+        {iid: 30_000.0},
+        ex,
+    )
+
+    assert holdings[iid] == 133
+
+
+def test_an_unheld_instrument_is_not_adjusted(tmp_path: Path) -> None:
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 0}
+
+    applied, _ = _apply(
+        engine,
+        [_action(iid, CorporateActionType.SPLIT, ex, ratio_new=10, ratio_old=1)],
+        holdings,
+        {},
+        {},
+        ex,
+    )
+
+    assert applied == []
+    assert holdings[iid] == 0
+
+
+def test_no_corporate_action_provider_means_no_adjustment(tmp_path: Path) -> None:
+    env = Environment(n_days=120, n_stocks=1)
+    engine = env.engine(tmp_path)
+    engine.corporate_actions = None
+    holdings = {"NSE:S00": 100}
+
+    assert engine.apply_share_adjustments(holdings, {}, {}, env.dates[60], {}) == []
+    assert holdings["NSE:S00"] == 100
