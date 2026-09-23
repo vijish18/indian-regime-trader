@@ -771,9 +771,8 @@ def test_a_hard_stop_exits_the_position_inside_the_execution_session(
     assert exit_record.breach.reason is StopReason.HARD_STOP
     assert exit_record.execution_date == execution_date
     assert exit_record.breach.stop_level == pytest.approx(float(bar.open) * 0.97)
-    # Closed below the level, so the close is the fill -- the level was not
-    # on offer at the end of the session.
-    assert exit_record.breach.fill_price == pytest.approx(float(bar.close))
+    # Opening above the stop models an intraday trigger fill, not the later close.
+    assert exit_record.breach.fill_price == pytest.approx(float(bar.open) * 0.97)
     assert exit_record.realized_pnl < 0
 
     sells = [fill for fill in result.fills if fill.side is TradeSide.SELL]
@@ -791,7 +790,7 @@ def test_a_trailing_stop_banks_a_profitable_pullback(tmp_path: Path) -> None:
     execution_date = env.calendar.next_trading_day(signal_date)
     instrument_id = env.instrument_ids[0]
     bar = _reshape_session(
-        env, instrument_id, execution_date, high_mult=1.10, low_mult=1.06, close_mult=1.07
+        env, instrument_id, execution_date, high_mult=1.10, low_mult=1.0, close_mult=1.07
     )
     target = full_exposure_target(signal_date, env.regime_policy)
 

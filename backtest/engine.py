@@ -799,6 +799,7 @@ class BacktestEngine:
                 cost_basis=basis,
                 session_high=float(bar.high),
                 session_low=float(bar.low),
+                session_open=float(bar.open),
                 reference_price=float(bar.close),
                 net_sale_value=net_sale_value,
                 policy=policy,

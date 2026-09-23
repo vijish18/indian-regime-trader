@@ -60,13 +60,12 @@ stop, always, and the trailing stop when ``close_on_arm`` is off. The
 take-profit reads neither -- it tests the price on the screen and sells
 there, so there is nothing to infer.
 
-``low <= level`` proves the level *traded*: the hard stop's breach is a
-fact, not an estimate. What the bar cannot give is the fill -- the stop may
-have been hit on the way down and filled at the level, or the stock may have
-gapped straight through it. :func:`stop_fill_price` takes the worse of the
-level and the session's close, which is pessimistic by construction; a
-backtest that assumes every stop filled exactly at its trigger reports
-protection the market does not sell.
+``low <= level`` establishes a breach, but does not prove the trigger price
+itself traded or was executable. With a daily bar, a hard stop is modelled at
+the opening price when it opens below the trigger, otherwise at the trigger.
+The caller charges execution costs separately. This cannot resolve intraday
+gaps, queue position or circuit-limit liquidity. The closing price is not a
+substitute for the price at which the earlier hard stop would have executed.
 
 The trailing rule cannot use ``low`` at all, and this is the subtle one. A
 daily bar records the high and the low but **not which came first**. If the
@@ -244,13 +243,10 @@ def trailing_stop_level(session_high: float, trail_drop_pct: float) -> float:
 
 
 def stop_fill_price(level: float, reference_price: float) -> float:
-    """What the exit is assumed to fill at: the worse of the level and the
-    price the session ended at (or, live, the last traded price).
+    """Worse of trigger and supplied executable-price proxy.
 
-    A session that gapped below the level never offered it, so filling there
-    would credit the book with a price nobody could have got; a session that
-    dipped and recovered did offer it. Taking the minimum covers both without
-    needing intraday data to tell them apart.
+    Hard-stop backtests supply the open; paper/live supply last observed
+    price. Trailing-profit evaluation uses the close as described above.
     """
     return min(level, reference_price) if reference_price > 0 else level
 
@@ -281,6 +277,7 @@ def evaluate(
     reference_price: float,
     net_sale_value: NetSaleValue,
     policy: StopLossPolicy,
+    session_open: float | None = None,
 ) -> StopBreach | None:
     """Whether either stop takes this holding out on this session.
 
@@ -294,6 +291,12 @@ def evaluate(
     Returns ``None`` when nothing fires, when the policy is disabled, or when
     the inputs are not usable -- a stop is never inferred from a price this
     function cannot verify.
+
+    Backtests supply ``session_open``: a hard stop fills at the open if it
+    gaps below the trigger, otherwise at the trigger after a low breach.
+    Execution costs are applied by the caller. Without an open, retain the
+    last-observed-price convention for live/paper callers. Daily bars cannot
+    establish liquidity or intraday gaps; these are modelled fills.
     """
     if not policy.enabled:
         return None
@@ -305,10 +308,16 @@ def evaluate(
         raise StopLossError(
             f"{instrument_id}: session_high ({session_high}) is below session_low ({session_low})"
         )
+    if session_open is not None and (
+        not isfinite(session_open) or not session_low <= session_open <= session_high
+    ):
+        raise StopLossError("session_open must be finite and within the session range")
 
     hard_level = hard_stop_level(entry_price, policy.hard_stop_pct)
     if entry_price > policy.hard_stop_min_entry_price and session_low <= hard_level:
-        fill = stop_fill_price(hard_level, reference_price)
+        fill = stop_fill_price(
+            hard_level, session_open if session_open is not None else reference_price
+        )
         return StopBreach(
             instrument_id=instrument_id,
             reason=StopReason.HARD_STOP,

@@ -137,6 +137,30 @@ def test_fill_is_the_close_when_the_session_gapped_through_the_level() -> None:
 # -- the hard stop ----------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "opening,closing,expected",
+    [(200.0, 182.0, 194.0), (190.0, 198.0, 190.0), (194.0, 200.0, 194.0)],
+)
+def test_daily_hard_stop_uses_open_not_later_close(
+    opening: float, closing: float, expected: float
+) -> None:
+    breach = evaluate(
+        "NSE:TEST",
+        entry_price=200,
+        cost_basis=2000,
+        session_open=opening,
+        session_high=205,
+        session_low=180,
+        reference_price=closing,
+        net_sale_value=lambda p: p * 10 - 20,
+        policy=replace(TRAIL_POLICY, hard_stop_min_entry_price=100),
+    )
+    assert breach is not None
+    assert breach.reason is StopReason.HARD_STOP
+    assert breach.fill_price == expected
+    assert breach.net_profit_pct == pytest.approx((expected * 10 - 20) / 2000 - 1)
+
+
 def test_hard_stop_fires_on_an_intraday_low_even_if_the_close_recovers() -> None:
     """A stop is not a close-only rule: 96 traded, so the stop was hit."""
     breach = evaluate(
