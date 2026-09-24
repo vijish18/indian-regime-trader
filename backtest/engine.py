@@ -92,11 +92,13 @@ from backtest import checkpoint
 from backtest.costs import CostModel, ExecutionCostEstimate, TradeSide
 from config.models import RiskConfig
 from core.regime.allocation import AllocationRegime, AllocationTarget
+from data.delisting import DelistingNotice
 from data.errors import DataNotAvailableError
 from data.interfaces import CorporateActionProvider, MarketDataProvider, TradingCalendar
 from data.models import CorporateActionType, DailyBar, PriceBasis
 from portfolio.portfolio_constructor import (
     PortfolioConstructor,
+    RequiredTrade,
     TargetPortfolio,
     TargetPosition,
     TradeAction,
@@ -323,12 +325,14 @@ class BacktestEngine:
         run_identity: str = "",
         checkpoint_sessions: int = 1,
         liquidate_at_end: bool = False,
+        delisting_notices: tuple[DelistingNotice, ...] = (),
     ) -> None:
         self.calendar = calendar
         self.checkpoint_dir = checkpoint_dir
         self.run_identity = run_identity
         self.checkpoint_sessions = checkpoint_sessions
         self.liquidate_at_end = liquidate_at_end
+        self.delisting_notices = delisting_notices
         if checkpoint_sessions < 1:
             raise ValueError("checkpoint_sessions must be positive")
         self.market_data = market_data
@@ -410,6 +414,7 @@ class BacktestEngine:
                     "equity": initial_equity,
                     "targets": checkpoint.encode(exposure_targets),
                     "liquidate": self.liquidate_at_end,
+                    "delisting_notices": checkpoint.encode(self.delisting_notices),
                 },
                 sort_keys=True,
             ).encode()
@@ -513,7 +518,27 @@ class BacktestEngine:
                     executed_target, current_target, self.min_rebalance_weight_delta
                 )
 
-            trades = required_trades(executed_target, current_target)
+            notices = {n.instrument_id: n for n in self.delisting_notices if n.active(signal_date)}
+            if notices:
+                positions = tuple(
+                    p for p in executed_target.positions if p.instrument_id not in notices
+                )
+                gross = sum(p.target_weight for p in positions)
+                executed_target = TargetPortfolio(
+                    as_of=executed_target.as_of,
+                    positions=positions,
+                    cash_weight=round(1 - gross, 12),
+                    regime=executed_target.regime,
+                    gross_exposure=round(gross, 12),
+                )
+            trades = list(required_trades(executed_target, current_target))
+            # Retry against actual holdings even if a previous unfilled exit
+            # already removed the name from the target portfolio.
+            traded_ids = {t.instrument_id for t in trades if t.action is TradeAction.EXIT}
+            for iid in sorted(notices):
+                if holdings.get(iid, 0) > 0 and iid not in traded_ids:
+                    weight = current_target.weight_for(iid) if current_target else 0.0
+                    trades.append(RequiredTrade(iid, weight, 0.0, -weight, TradeAction.EXIT))
             turnover_points[signal_date] = sum(abs(trade.delta_weight) for trade in trades)
 
             execution_date = self.calendar.next_trading_day(signal_date)
@@ -558,7 +583,15 @@ class BacktestEngine:
                     continue
                 fills.append(fill)
                 cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
-                trade_log_rows.append(_trade_log_row(fill))
+                row = _trade_log_row(fill)
+                if trade.instrument_id in notices and fill.side is TradeSide.SELL:
+                    notice = notices[trade.instrument_id]
+                    row.update(
+                        exit_reason="announced_delisting_exit",
+                        event_known_on=notice.known_on.isoformat(),
+                        event_source_url=notice.source_url,
+                    )
+                trade_log_rows.append(row)
 
             cash += dividend_credit
 

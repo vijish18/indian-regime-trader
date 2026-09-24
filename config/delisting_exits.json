@@ -1,0 +1,12 @@
+{
+  "policy": "Exit at next observed opening after the sourced notice is known; prohibit re-entry while restriction applies. No assumed tender proceeds.",
+  "notices": [
+    {
+      "instrument_id": "NSE:HEXAWARE",
+      "known_on": "2020-10-21",
+      "suspension_date": "2020-11-02",
+      "source_url": "https://nsearchives.nseindia.com/corporate/HEXAWARE_21102020193702_Newspaperclipping.pdf",
+      "notes": "Conservatively use the exchange filing date, not the earlier date printed in the notice. Known at the 21 October close; first eligible execution is 22 October. Applies to historical HEXAWARE identifier; relisting under a different identifier is unaffected."
+    }
+  ]
+}

@@ -167,7 +167,7 @@ def build_validator(
         impact_coefficient=settings.backtest.slippage_impact_coefficient,
     )
 
-    return WalkForwardValidator(
+    validator = WalkForwardValidator(
         config=settings.backtest,
         calendar=calendar,
         market_data=market_data,
@@ -184,6 +184,10 @@ def build_validator(
         vix_symbol=VIX_SYMBOL,
         corporate_actions=corporate_actions,
     )
+    from data.delisting import load_notices
+
+    validator.engine.delisting_notices = load_notices(REPO_ROOT / "config/delisting_exits.json")
+    return validator
 
 
 def render(reports: dict[str, PerformanceReport], start: dt.date, end: dt.date) -> str:
@@ -295,6 +299,7 @@ def _input_digest() -> str:
     digest = hashlib.sha256()
     paths = list(DATA_CACHE.rglob("*.csv"))
     paths += [HOLIDAY_FILE, COST_SCHEDULE]
+    paths += [REPO_ROOT / "config/delisting_exits.json"]
     for folder in ("backtest", "core", "data", "universe", "portfolio", "risk", "config"):
         paths += list((REPO_ROOT / folder).rglob("*.py"))
     paths += [Path(__file__)]

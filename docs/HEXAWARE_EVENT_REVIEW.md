@@ -20,5 +20,16 @@ a pre-suspension market exit must be a strategy rule based on information
 already announced, executed against an actual tradable bar. Either choice
 must be recorded as a simulation assumption and tested before a rerun.
 
-Status: event identified; entitlement/tender lifecycle is not implemented.
-The missing-bar failure remains intentional until that accounting exists.
+Implemented simulation policy: use the exchange filing date, 2020-10-21,
+as the conservative knowledge date. Remove the stock from new targets and
+exit existing shares at the next available opening price. The observed
+2020-10-22 open is INR 470.45. Normal execution costs apply. An unfilled
+exit is retried against actual holdings; no tender proceeds are invented.
+
+The policy is recorded in config/delisting_exits.json and included in the
+checkpoint identity. scripts/replay_hexaware_exit.py reproduces the old
+failure with the policy disabled and checks the real-bar exit with it
+enabled. This is an isolated execution regression, not a strategy backtest.
+
+Tender accounting and other corporate-action lifecycle gaps remain
+unimplemented. Fixing this exit does not validate overall strategy returns.
