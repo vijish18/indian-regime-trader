@@ -1,0 +1,93 @@
+{
+  "scope": "Reviewed dividend reference corrections; entitlement timing still unverified",
+  "corrections": [
+    {
+      "instrument_id": "NSE:INFY",
+      "ex_date": "2018-06-14",
+      "action_type": "dividend",
+      "cash_amount": "30.50",
+      "expected_cash_amount": "20.50",
+      "record_date": null,
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040518.zip",
+      "source_sha256": "3314d681e6bf1f206d82a5478f5146c29b494a51c40422d2ebf1f0fc7b3a2103",
+      "source_purpose": "AGM/DIV-RS30.50 PER SHARE"
+    },
+    {
+      "instrument_id": "NSE:ITC",
+      "ex_date": "2023-05-30",
+      "action_type": "dividend",
+      "cash_amount": "9.50",
+      "expected_cash_amount": "6.75",
+      "record_date": "2023-05-30",
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR220523.zip",
+      "source_sha256": "1d3834b1cd3b376f112243620b35b10828dcdcbecda259d000cd35ec7a98c78f",
+      "source_purpose": "DIV- 6.75 SPLDV- 2.75"
+    },
+    {
+      "instrument_id": "NSE:MPHASIS",
+      "ex_date": "2021-09-13",
+      "action_type": "dividend",
+      "cash_amount": "65",
+      "expected_cash_amount": "38",
+      "record_date": null,
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR030921.zip",
+      "source_sha256": "14dc6db5c5716172874a28399a8184f02abb4d4ce60bc784839e54bc7f4ba60f",
+      "source_purpose": "AGM/DIV-RS38/SPLDIV-RS27"
+    },
+    {
+      "instrument_id": "NSE:TATAELXSI",
+      "ex_date": "2021-06-17",
+      "action_type": "dividend",
+      "cash_amount": "48",
+      "expected_cash_amount": "24",
+      "record_date": null,
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR020621.zip",
+      "source_sha256": "c45ad9562437bfaa6364a55502a04a0cff9d12ea0cc759428c7e52895b498265",
+      "source_purpose": "AGM/DIV-RS24/SPLDIV-RS24"
+    },
+    {
+      "instrument_id": "NSE:HEG",
+      "ex_date": "2018-02-15",
+      "action_type": "dividend",
+      "cash_amount": "30",
+      "expected_cash_amount": null,
+      "record_date": "2018-02-19",
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR090218.zip",
+      "source_sha256": "7746c85172493a558208fbaf87ae35ddeb2410b65fed6578a984efbd3d3cfa10",
+      "source_purpose": "INT DIV RS 30/- PER SHARE"
+    },
+    {
+      "instrument_id": "NSE:INFIBEAM",
+      "ex_date": "2018-09-19",
+      "action_type": "dividend",
+      "cash_amount": "0.10",
+      "expected_cash_amount": null,
+      "record_date": null,
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR060918.zip",
+      "source_sha256": "07c168e0654b7bbbb1fd55a3caa3fd488eb14c4f7945801a553ae468bca11890",
+      "source_purpose": "AGM/DIV-RE 0.10 PER SH"
+    },
+    {
+      "instrument_id": "NSE:TATAMOTORS",
+      "ex_date": "2023-07-28",
+      "action_type": "dividend",
+      "cash_amount": "2",
+      "expected_cash_amount": null,
+      "record_date": null,
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR240723.zip",
+      "source_sha256": "89900a7dbbd88c66ac3dba3038ebb169ded2b52abba2ac3f86bf805c5171bfe0",
+      "source_purpose": "DIV - RS 2 PER SH"
+    },
+    {
+      "instrument_id": "NSE:TCS",
+      "ex_date": "2018-05-31",
+      "action_type": "dividend",
+      "cash_amount": "29",
+      "expected_cash_amount": null,
+      "record_date": "2018-06-02",
+      "source_url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR220518.zip",
+      "source_sha256": "27366ae8d0bde9d4930e12b25111aa3a7dd77d944fe08e41870dec8142654a9f",
+      "source_purpose": "BONUS 1:1/DIV-RS 29"
+    }
+  ]
+}

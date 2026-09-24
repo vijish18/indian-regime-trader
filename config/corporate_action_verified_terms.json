@@ -1,0 +1,57 @@
+{
+  "scope": "Verified event terms, not certification of entitlement lifecycle or the full dataset",
+  "coverage_fallbacks": [
+    {
+      "archive_date": "2022-01-10",
+      "reason": "BC member in PR100122.zip is empty",
+      "source_url": "https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date=10-01-2022&to_date=10-01-2022",
+      "retrieved_date": "2026-09-24",
+      "records": [
+        {
+          "instrument_id": "NSE:IPCALAB",
+          "action_type": "split",
+          "ex_date": "2022-01-10",
+          "record_date": "2022-01-11",
+          "ratio_new": "2",
+          "ratio_old": "1"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "instrument_id": "NSE:SBGLP",
+      "ex_date": "2024-04-18",
+      "action_type": "split",
+      "ratio_new": "10",
+      "ratio_old": "1",
+      "source_url": "https://nsearchives.nseindia.com/content/circulars/CML61526.pdf",
+      "announcement_date": "2024-04-08",
+      "notes": "NSE circular 61526 confirms old face value 10, new face value 1; absent from sampled PR BC records."
+    },
+    {
+      "instrument_id": "NSE:TATACHEM",
+      "ex_date": "2020-03-04",
+      "action_type": "demerger",
+      "successor_instrument_id": "NSE:TATACONSUM",
+      "successor_ratio_new": "114",
+      "successor_ratio_old": "100",
+      "record_date": "2020-03-05",
+      "allotment_date": "2020-03-11",
+      "source_url": "https://www.tataconsumer.com/news/tata-global-beverages-and-tata-chemicals-announce-transaction-combine-consumer-businesses",
+      "allotment_source_url": "https://www.tataconsumer.com/sites/g/files/gfwrlq316/files/2021-05/reg_30_allotment3224bd881a2368caa65dff00001c5be1.pdf",
+      "notes": "Allotment is not proof of the date shares became available for sale. Tradability, fractions and basis allocation remain unresolved."
+    },
+    {
+      "instrument_id": "NSE:HEXAWARE",
+      "action_type": "delisting",
+      "announcement_date": "2020-10-20",
+      "suspension_date": "2020-11-02",
+      "ex_date": "2020-11-09",
+      "tender_price": "475",
+      "exit_window_end": "2021-11-08",
+      "source_url": "https://nsearchives.nseindia.com/corporate/HEXAWARE_21102020193702_Newspaperclipping.pdf",
+      "notes": "Voluntary tender, not automatic redemption. Submission, acceptance and cash settlement are not modelled."
+    }
+  ]
+}

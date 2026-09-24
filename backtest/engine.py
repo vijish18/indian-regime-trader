@@ -518,6 +518,13 @@ class BacktestEngine:
 
             execution_date = self.calendar.next_trading_day(signal_date)
 
+            # Entitlement belongs to holders entering the ex-date, not to
+            # buyers at its open. Snapshot before both share restatements and
+            # rebalance fills; an ex-date seller keeps the entitlement.
+            # Cash timing remains the explicit ex-date approximation until
+            # payment-date entitlement accounting is supplied and verified.
+            dividend_credit = self.dividend_cash_credit(holdings, execution_date)
+
             # Before this session's fills. A split or bonus is effective at
             # the open of its ex-date, so the rebalance below must transact
             # against the restated share count -- not the count from
@@ -553,7 +560,7 @@ class BacktestEngine:
                 cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
                 trade_log_rows.append(_trade_log_row(fill))
 
-            cash += self.dividend_cash_credit(holdings, execution_date)
+            cash += dividend_credit
 
             # Stops resolve within the execution session, after the
             # rebalance and before the close is marked. They are resting
@@ -1218,6 +1225,14 @@ class BacktestEngine:
             for action in self.corporate_actions.actions_for(
                 instrument_id, execution_date, execution_date
             ):
+                if action.action_type is CorporateActionType.DIVIDEND:
+                    continue
+                if action.action_type not in (CorporateActionType.SPLIT, CorporateActionType.BONUS):
+                    # A price factor never specifies replacement shares,
+                    # rights subscription or cash consideration. Do not turn
+                    # a demerger factor into extra shares of the parent.
+                    skipped[instrument_id] = skipped.get(instrument_id, 0) + 1
+                    continue
                 try:
                     factor = action.price_adjustment_factor()
                 except ValueError:

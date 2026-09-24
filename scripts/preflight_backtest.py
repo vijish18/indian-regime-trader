@@ -36,14 +36,10 @@ What each one is for:
     Membership spans covering the range, or the selector has nothing to rank.
 
 ``unadjustable actions``
-    The historic killer. A demerger has no derivable price factor, so
-    adjusting a bar across one raises -- and a held position still has to be
-    marked and sold through the event even after the universe stops selecting
-    it. Four separate runs died this way at four different call sites
-    (ADANITRANS, TATACHEM, VEDL twice). The fix was to catch it at the
-    source, in ``data.market_data._adjust``; this check proves the fix is
-    still in place by adjusting a real bar across a real demerger and
-    requiring that it returns rather than raises.
+    Missing entitlement accounting fails validation. Merely avoiding an
+    exception by returning unadjusted prices cannot validate a demerger.
+    Payment dates, bonus availability and complex event handling must also
+    be accounted for before a clean preflight can be reported.
 
 ``output``
     The directories are writable and say whether a resumable checkpoint is
@@ -257,9 +253,7 @@ def check_universe(start: dt.date, end: dt.date) -> Check:
     training_days = int(load_settings().backtest.training_window_sessions * 365 / 252)
     first_trade = min(start + dt.timedelta(days=training_days), end)
     if min(starts) > first_trade:
-        check.fail(
-            f"membership starts {min(starts)}, after the first test date {first_trade}"
-        )
+        check.fail(f"membership starts {min(starts)}, after the first test date {first_trade}")
         return check
     check.note(f"first test date is about {first_trade} (after the training window)")
     for probe_date in (first_trade, first_trade + (end - first_trade) / 2, end):
@@ -276,88 +270,36 @@ def check_universe(start: dt.date, end: dt.date) -> Check:
 
 
 def check_unadjustable_actions() -> Check:
-    """The crash that killed four runs, proven handled rather than assumed."""
-    check = Check("unadjustable actions")
+    """Missing event accounting fails preflight; a fallback is not validation."""
+    import csv
+
+    check = Check("corporate-action lifecycle")
     try:
-        import csv
-
-        from data.corporate_actions import InMemoryCorporateActionProvider
-        from data.errors import DataNotAvailableError
-        from data.market_data import LocalMarketDataProvider
-        from data.models import PriceBasis
-        from data.storage import LocalDataStore, StorageFormat
-
-        actions = InMemoryCorporateActionProvider.from_file(REFERENCE / "corporate_actions.csv")
-        store = LocalDataStore(
-            raw_root=DATA_CACHE / "raw",
-            normalized_root=DATA_CACHE / "normalized",
-            reference_root=REFERENCE,
-            storage_format=StorageFormat.CSV,
-        )
-        market = LocalMarketDataProvider(store, corporate_actions=actions)
-    except Exception as exc:  # noqa: BLE001
-        check.fail(f"{type(exc).__name__}: {exc}")
+        with (REFERENCE / "corporate_actions.csv").open(encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+    except (OSError, ValueError) as exc:
+        check.fail(str(exc))
         return check
-
-    rows = list((REFERENCE / "corporate_actions.csv").open(encoding="utf-8"))
-    reader = csv.DictReader(rows)
-    risky = [
-        r
-        for r in reader
-        if r["action_type"] in {"demerger", "merger"}
-        and not r.get("explicit_price_factor")
+    complex_events = [
+        r for r in rows if r["action_type"] in {"merger", "demerger", "rights", "delisting"}
     ]
-    if not risky:
-        check.note("no demergers or mergers without an explicit factor in the reference data")
-        return check
-    check.note(f"{len(risky)} demerger/merger events with no derivable price factor")
-
-    tested = crashed = survived = no_data = 0
-    for row in risky[:40]:
-        instrument_id = row["instrument_id"]
-        ex_date = dt.date.fromisoformat(row["ex_date"])
-        try:
-            market.get_equity_bars(
-                instrument_id,
-                ex_date - dt.timedelta(days=20),
-                ex_date + dt.timedelta(days=5),
-                price_basis=PriceBasis.ADJUSTED,
-            )
-        except DataNotAvailableError:
-            # A different failure class, and not the one this checks. These
-            # are names with no local bar file at all -- long delisted, or
-            # never liquid enough to be stored. Every caller in the engine
-            # already treats "no data" as "no price" and moves on; it is the
-            # *adjustment* raising on data that exists that killed the runs.
-            no_data += 1
-            continue
-        except Exception as exc:  # noqa: BLE001 - this is the regression being checked
-            tested += 1
-            crashed += 1
-            if crashed <= 3:
-                check.fail(
-                    f"{instrument_id} ex {ex_date}: adjusting across the event raised "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            continue
-        tested += 1
-        survived += 1
-    if no_data:
-        check.note(f"{no_data} sampled events are on names with no local bars (not applicable)")
-    if not tested:
-        check.warn("no sampled event had local bars to adjust; the fallback was not exercised")
-        return check
-    if crashed:
+    if complex_events:
         check.fail(
-            f"{crashed} of {tested} sampled events still raise. This is the failure that "
-            "killed folds 9, 20 and 32 of earlier runs; data/market_data._adjust is "
-            "supposed to count them and fall back to unadjusted prices."
+            f"{len(complex_events)} complex events require entitlement accounting; "
+            "a price factor alone does not settle shares or cash"
         )
-    else:
-        check.note(
-            f"adjusted real bars across {survived} of them without raising "
-            "(the fallback in data/market_data._adjust is doing its job)"
+    dividends = [r for r in rows if r["action_type"] == "dividend"]
+    if dividends:
+        check.fail(
+            "Dividend entitlement quantity is fixed, but the engine still credits "
+            "cash on ex-date: payment-date receivables must be implemented"
         )
+    if any(r["action_type"] == "bonus" for r in rows):
+        check.fail("Bonus share availability and fractional entitlements remain unverified")
+    check.note(
+        "This check is not an exhaustive source-coverage certificate. "
+        "Run the PR reconciliation and held-event audit as well."
+    )
     return check
 
 
@@ -427,10 +369,10 @@ def check_series_history() -> Check:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from", dest="start", type=dt.date.fromisoformat,
-                        default=dt.date(2015, 1, 1))
-    parser.add_argument("--to", dest="end", type=dt.date.fromisoformat,
-                        default=dt.date(2026, 9, 1))
+    parser.add_argument(
+        "--from", dest="start", type=dt.date.fromisoformat, default=dt.date(2015, 1, 1)
+    )
+    parser.add_argument("--to", dest="end", type=dt.date.fromisoformat, default=dt.date(2026, 9, 1))
     parser.add_argument("--series-dir", type=Path, default=None)
     parser.add_argument("--json-out", type=Path, default=None)
     args = parser.parse_args(argv[1:])
@@ -456,8 +398,10 @@ def main(argv: list[str]) -> int:
     print()
     if failed:
         print(f"{len(failed)} check(s) FAILED: " + ", ".join(c.name for c in failed))
-        print("Do not start the run. Fixing these now costs minutes; finding them at "
-              "fold 30 costs the whole night.")
+        print(
+            "Do not start the run. Fixing these now costs minutes; finding them at "
+            "fold 30 costs the whole night."
+        )
         return 1
     print("all checks passed" + (f" ({len(warned)} warning(s))" if warned else ""))
     return 0

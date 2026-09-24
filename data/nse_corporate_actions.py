@@ -237,13 +237,9 @@ def classify_subject(subject: str) -> ParsedSubject | None:
 # -- fetching ---------------------------------------------------------------
 
 
-def fetch_raw(
-    start: dt.date, end: dt.date, *, timeout: int = 60
-) -> list[dict[str, str]]:
+def fetch_raw(start: dt.date, end: dt.date, *, timeout: int = 60) -> list[dict[str, str]]:
     """Fetch the feed for a date range. NSE wants a browser-shaped request."""
-    params = (
-        f"?index=equities&from_date={start:%d-%m-%Y}&to_date={end:%d-%m-%Y}"
-    )
+    params = f"?index=equities&from_date={start:%d-%m-%Y}&to_date={end:%d-%m-%Y}"
     request = urllib.request.Request(
         API_URL + params,
         headers={"User-Agent": USER_AGENT, "Referer": REFERER, "Accept": "application/json"},
@@ -258,13 +254,52 @@ def fetch_raw(
 
     if not isinstance(payload, list):
         raise CorporateActionFeedError(
-            f"expected a JSON list from the corporate-actions feed, "
-            f"got {type(payload).__name__}"
+            f"expected a JSON list from the corporate-actions feed, got {type(payload).__name__}"
         )
     return [record for record in payload if isinstance(record, dict)]
 
 
 # -- conversion -------------------------------------------------------------
+
+
+def classify_subjects(subject: str) -> list[ParsedSubject] | None:
+    """Preserve every component of compound feed subjects.
+
+    Slash before an action label separates events; the slash in ``Rs 10/-``
+    does not. Multiple dividend components become one cash entitlement so
+    the consumer cannot lose a special dividend or double-count one row.
+    Unknown components keep the complete subject in the review queue.
+    """
+    parts = re.split(
+        r"/\s*(?=(?:special\s+|interim\s+|final\s+)?"
+        r"(?:dividend|divdend|div\b)|bonus\b|face\s+value|annual\s+general)",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    parsed = [classify_subject(part) for part in parts]
+    if any(part is None for part in parsed):
+        return None
+    result = [
+        part
+        for part in parsed
+        if part is not None and part.action_type not in (None, CorporateActionType.DIVIDEND)
+    ]
+    dividends = [
+        part
+        for part in parsed
+        if part is not None and part.action_type is CorporateActionType.DIVIDEND
+    ]
+    if dividends:
+        result.append(
+            ParsedSubject(
+                CorporateActionType.DIVIDEND,
+                cash_amount=sum(
+                    (part.cash_amount for part in dividends if part.cash_amount is not None),
+                    Decimal(0),
+                ),
+            )
+        )
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,26 +362,28 @@ def to_corporate_actions(
             unparsed.append((symbol, f"{subject} (unusable exDate={record.get('exDate')!r})"))
             continue
 
-        parsed = classify_subject(subject)
-        if parsed is None:
+        components = classify_subjects(subject)
+        if components is None:
             unparsed.append((symbol, subject))
             continue
-        if parsed.action_type is None:
+        if not components:
             skipped += 1
             continue
 
-        actions.append(
-            CorporateAction(
-                instrument_id=f"{exchange}:{symbol}",
-                action_type=parsed.action_type,
-                ex_date=ex_date,
-                ratio_new=parsed.ratio_new,
-                ratio_old=parsed.ratio_old,
-                cash_amount=parsed.cash_amount,
-                explicit_price_factor=None,
-                record_date=_parse_feed_date(record.get("recDate")),
+        for parsed in components:
+            assert parsed.action_type is not None
+            actions.append(
+                CorporateAction(
+                    instrument_id=f"{exchange}:{symbol}",
+                    action_type=parsed.action_type,
+                    ex_date=ex_date,
+                    ratio_new=parsed.ratio_new,
+                    ratio_old=parsed.ratio_old,
+                    cash_amount=parsed.cash_amount,
+                    explicit_price_factor=None,
+                    record_date=_parse_feed_date(record.get("recDate")),
+                )
             )
-        )
 
     return ConversionResult(
         actions=tuple(actions),

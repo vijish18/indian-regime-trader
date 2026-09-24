@@ -136,8 +136,8 @@ let researchPoints = [], researchIndex = -1;
 function renderResearch() {
   const reports = data.strategies?.reports || {}, run = data.backtest_run || {};
   const completed = Object.keys(reports);
-  $('research-status').textContent = run.complete ? '5 / 5 COMPLETE' : `${completed.length} / 5 COMPLETE \u00b7 COMPARISON INCOMPLETE`;
-  $('research-meta').textContent = run.run_id ? `${run.run_id} \u00b7 Data through ${run.end} \u00b7 ${run.folds_total} test windows \u00b7 Starting capital ${money(run.initial_equity)}` : 'No current Azure research snapshot.';
+  $('research-status').textContent = `UNVALIDATED \u00b7 ${completed.length} / 5 RUNS COMPLETE`;
+  $('research-meta').textContent = run.run_id ? `Corporate-action accounting has unresolved errors. These figures cannot establish strategy profitability. ${run.run_id} \u00b7 Data through ${run.end} \u00b7 ${run.folds_total} test windows \u00b7 Starting capital ${money(run.initial_equity)}` : 'No current Azure research snapshot.';
   $('results').innerHTML = Object.entries(researchNames).map(([name,label]) => {
     const report = reports[name], progress = run.progress?.[name];
     if (!report) return `<article class="research-card pending"><span class="eyebrow">${esc(label)}</span><strong>Pending</strong><p>${progress ? `${progress.completed} / ${progress.total} windows saved` : 'Awaiting report'}</p><div class="track"><div class="fill" data-width="${progress?.total ? 100*progress.completed/progress.total : 0}"></div></div><small>No final performance reported yet</small></article>`;

@@ -180,9 +180,7 @@ def test_exit_sells_the_entire_position_not_a_weight_derived_approximation(
     for instrument_id, quantity in held_quantities.items():
         assert exit_fills[instrument_id].order.action is TradeAction.EXIT
         assert exit_fills[instrument_id].quantity == quantity
-    assert result.positions_history[
-        engine.calendar.next_trading_day(exit_date)
-    ] == {}
+    assert result.positions_history[engine.calendar.next_trading_day(exit_date)] == {}
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +212,59 @@ def test_dividend_cash_credit_is_zero_without_a_corporate_action_provider(
     engine = env.engine(tmp_path)
     engine.corporate_actions = None
     assert engine.dividend_cash_credit({"NSE:S00": 100}, env.dates[50]) == 0.0
+
+
+def test_ex_date_buyer_does_not_receive_dividend(tmp_path: Path) -> None:
+    env = Environment(n_days=140, n_stocks=1)
+    signal = env.dates[80]
+    ex_date = env.calendar.next_trading_day(signal)
+    env.corporate_actions = InMemoryCorporateActionProvider(
+        [dividend(env.instrument_ids[0], ex_date, cash_amount=25)]
+    )
+    result = env.engine(tmp_path).run(
+        "ex_buyer",
+        {signal: full_exposure_target(signal, env.regime_policy)},
+        [signal],
+        1_000_000,
+    )
+    spent = sum(f.execution_cost.net_value for f in result.fills)
+    assert result.cash_history.iloc[-1] == pytest.approx(1_000_000 - spent)
+
+
+def test_ex_date_seller_keeps_full_prior_holding_dividend(tmp_path: Path) -> None:
+    env = Environment(n_days=140, n_stocks=1)
+    buy_signal, sell_signal = env.dates[80:82]
+    ex_date = env.calendar.next_trading_day(sell_signal)
+    env.corporate_actions = InMemoryCorporateActionProvider(
+        [dividend(env.instrument_ids[0], ex_date, cash_amount=25)]
+    )
+    sell = AllocationTarget(
+        as_of=sell_signal,
+        regime=AllocationRegime.UNCERTAIN,
+        target_gross_exposure=0,
+        min_gross_exposure=0,
+        max_gross_exposure=0,
+        allow_new_positions=False,
+        confidence=1,
+        expected_volatility=0.3,
+        reason="test dividend entitlement on exit",
+    )
+    result = env.engine(tmp_path).run(
+        "ex_seller",
+        {buy_signal: full_exposure_target(buy_signal, env.regime_policy), sell_signal: sell},
+        [buy_signal, sell_signal],
+        1_000_000,
+    )
+    bought = [f for f in result.fills if f.side is TradeSide.BUY]
+    sold = [f for f in result.fills if f.side is TradeSide.SELL]
+    assert result.positions_history[ex_date] == {}
+    expected = (
+        1_000_000
+        - sum(f.execution_cost.net_value for f in bought)
+        + sum(f.execution_cost.net_value for f in sold)
+        + 25 * sum(f.quantity for f in bought)
+    )
+    assert result.cash_history.iloc[-1] == pytest.approx(expected)
 
 
 # --------------------------------------------------------------------------
@@ -285,9 +336,7 @@ def _portfolio(positions: list[TargetPosition]) -> TargetPortfolio:
 
 def _decision(instrument_id: str, approved: bool, weight: float) -> RiskDecision:
     violations = (
-        ()
-        if approved
-        else (RiskViolation(RiskCheck.SINGLE_NAME_EXPOSURE, "test", None, None),)
+        () if approved else (RiskViolation(RiskCheck.SINGLE_NAME_EXPOSURE, "test", None, None),)
     )
     return RiskDecision(
         instrument_id=instrument_id,
@@ -697,15 +746,12 @@ def _sell_fill(instrument_id: str, quantity: int, price: float) -> FillRecord:
     return _ledger_fill(instrument_id, quantity, price, TradeSide.SELL)
 
 
-
 # --------------------------------------------------------------------------
 # Per-position stops
 # --------------------------------------------------------------------------
 
 
-STOP_POLICY = StopLossPolicy(
-    hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03
-)
+STOP_POLICY = StopLossPolicy(hard_stop_pct=0.03, trail_drop_pct=0.02, trail_arm_net_profit_pct=0.03)
 """The shipped setting: +3% net closes the position outright."""
 
 TRAIL_STOP_POLICY = StopLossPolicy(
@@ -869,9 +915,7 @@ def test_a_stopped_position_leaves_the_target_so_it_is_not_sold_twice(
     first, second = env.dates[80], env.dates[81]
     execution_date = env.calendar.next_trading_day(first)
     stopped = env.instrument_ids[0]
-    _reshape_session(
-        env, stopped, execution_date, high_mult=1.002, low_mult=0.95, close_mult=0.96
-    )
+    _reshape_session(env, stopped, execution_date, high_mult=1.002, low_mult=0.95, close_mult=0.96)
     targets = {
         first: full_exposure_target(first, env.regime_policy),
         second: full_exposure_target(second, env.regime_policy),
@@ -1029,9 +1073,7 @@ def _apply(
 ) -> tuple[list[ShareAdjustment], dict[str, int]]:
     engine.corporate_actions = InMemoryCorporateActionProvider(actions)
     skipped: dict[str, int] = {}
-    applied = engine.apply_share_adjustments(
-        holdings, avg_price, cost_basis, ex_date, skipped
-    )
+    applied = engine.apply_share_adjustments(holdings, avg_price, cost_basis, ex_date, skipped)
     return applied, skipped
 
 
@@ -1144,6 +1186,22 @@ def test_a_rights_issue_is_counted_not_guessed(tmp_path: Path) -> None:
     )
 
     assert holdings[iid] == 300
+    assert applied == []
+    assert skipped == {iid: 1}
+
+
+def test_demerger_price_factor_does_not_multiply_parent_shares(tmp_path: Path) -> None:
+    env = Environment(n_days=120, n_stocks=1)
+    iid = env.instrument_ids[0]
+    ex = env.dates[60]
+    holdings = {iid: 100}
+    action = CorporateAction(
+        iid, CorporateActionType.DEMERGER, ex, explicit_price_factor=Decimal("0.5")
+    )
+    applied, skipped = _apply(
+        env.engine(tmp_path), [action], holdings, {iid: 200}, {iid: 20_000}, ex
+    )
+    assert holdings == {iid: 100}
     assert applied == []
     assert skipped == {iid: 1}
 
