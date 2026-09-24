@@ -90,6 +90,16 @@ def main(argv: list[str]) -> int:
 
     moved: list[tuple[str, str, str, str]] = []
     unresolved: list[tuple[str, str, str]] = []
+    dropped: list[tuple[str, str, str, str]] = []
+
+    def identity(row: dict[str, str]) -> tuple[str, ...]:
+        return tuple((row.get(f) or "").strip() for f in fieldnames)
+
+    # Rows already under the right ticker. A reviewed correction may have
+    # added the event there by hand precisely because the feed filed it
+    # under the wrong one; moving the feed's copy on top of it would credit
+    # the same dividend twice.
+    existing = {identity(r) for r in actions}
     renamed_isins = {k for k, v in spans.items() if len({i for i, _, _ in v}) > 1}
 
     for action in actions:
@@ -117,14 +127,25 @@ def main(argv: list[str]) -> int:
 
         correct = candidates[0]
         if correct != iid:
+            relocated = dict(action, instrument_id=correct)
+            if identity(relocated) in existing:
+                dropped.append((iid, correct, action["ex_date"], action["action_type"]))
+                action["__drop__"] = "1"
+                continue
             moved.append((iid, correct, action["ex_date"], action["action_type"]))
             action["instrument_id"] = correct
+            existing.add(identity(action))
+
+    actions = [a for a in actions if not a.pop("__drop__", None)]
 
     print(f"instruments      : {len(isin_of):,}")
     print(f"ISINs renamed    : {len(renamed_isins):,}")
     print(f"actions read     : {len(actions):,}")
     print(f"actions moved    : {len(moved):,}")
     print(f"unresolved       : {len(unresolved):,}")
+    print(f"dropped as dupes : {len(dropped):,}")
+    for was, now, when, kind in dropped:
+        print(f"  {when}  {kind:<10} {was} already present under {now}; not duplicated")
 
     if moved:
         print("\nlargest moves by action type:")

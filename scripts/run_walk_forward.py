@@ -49,6 +49,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 
@@ -98,7 +99,10 @@ def _require(path: Path, how: str) -> Path:
 
 
 def build_validator(
-    snapshot_date: dt.date, circuit_breaker_dir: Path, frame_cache: int = 1000
+    snapshot_date: dt.date,
+    circuit_breaker_dir: Path,
+    frame_cache: int = 1000,
+    selection_cache: Path | None = None,
 ) -> WalkForwardValidator:
     settings = load_settings()
 
@@ -158,6 +162,23 @@ def build_validator(
     stock_selector = StockSelector(
         settings.selection, settings.universe, universe_provider, market_data
     )
+    if selection_cache is not None:
+        # Rankings are identical across strategies and independent across
+        # dates, so they are computed once and shared. The cache directory is
+        # named by a fingerprint of everything a ranking depends on; a change
+        # to any of it misses rather than reading a stale ranking.
+        from universe.selection_cache import CachingStockSelector, selection_fingerprint
+
+        stock_selector = cast(
+            StockSelector,
+            CachingStockSelector(
+                stock_selector,
+                selection_cache,
+                selection_fingerprint(
+                    settings, snapshot_date, REFERENCE, DATA_CACHE / "raw" / "equity_bars"
+                ),
+            ),
+        )
     portfolio_constructor = PortfolioConstructor(
         settings.portfolio, settings.selection, settings.execution, market_data
     )
@@ -552,6 +573,15 @@ def main(argv: list[str]) -> int:
         help="parsed bar frames to memoise; speed/memory only, never the result",
     )
     parser.add_argument(
+        "--selection-cache",
+        type=Path,
+        default=None,
+        help=(
+            "directory of precomputed rankings (scripts/precompute_selections.py). "
+            "Speed only: a miss computes and stores, a stale entry is never read."
+        ),
+    )
+    parser.add_argument(
         "--strategy",
         action="append",
         default=None,
@@ -598,6 +628,7 @@ def main(argv: list[str]) -> int:
         snapshot_date=args.end,
         circuit_breaker_dir=args.state_dir,
         frame_cache=args.frame_cache,
+        selection_cache=args.selection_cache,
     )
 
     if not math.isfinite(args.initial_equity) or args.initial_equity <= 0:
