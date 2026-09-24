@@ -64,6 +64,18 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="report what would change, write nothing"
     )
+    parser.add_argument(
+        "--isin-source",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "another instruments file, used ONLY to learn the ISIN of tickers the "
+            "primary master does not list. A master frozen before a rename has no "
+            "row for the new ticker, so actions filed under it would otherwise be "
+            "stranded where no bars exist. Spans still come from --instruments."
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
     for path in (args.instruments, args.actions):
@@ -83,6 +95,16 @@ def main(argv: list[str]) -> int:
             spans[isin].append((iid, start, _date(row.get("effective_to", ""))))
             isin_of[iid] = isin
 
+    learned = 0
+    for extra in args.isin_source:
+        with extra.open(encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                isin = (row.get("isin") or "").strip()
+                iid = row["instrument_id"]
+                if isin and iid not in isin_of and isin in spans:
+                    isin_of[iid] = isin
+                    learned += 1
+
     with args.actions.open(encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         fieldnames = reader.fieldnames or []
@@ -100,7 +122,13 @@ def main(argv: list[str]) -> int:
     # under the wrong one; moving the feed's copy on top of it would credit
     # the same dividend twice.
     existing = {identity(r) for r in actions}
+    # A ticker is misfiled if its ISIN has more than one ticker in the master,
+    # or if the ticker is missing from the master altogether but its ISIN is
+    # known (learned from --isin-source) -- the frozen-master rename case.
     renamed_isins = {k for k, v in spans.items() if len({i for i, _, _ in v}) > 1}
+    renamed_isins |= {
+        isin_of[i] for i in isin_of if i not in {t for v in spans.values() for t, _, _ in v}
+    }
 
     for action in actions:
         iid = action["instrument_id"]
@@ -140,6 +168,7 @@ def main(argv: list[str]) -> int:
 
     print(f"instruments      : {len(isin_of):,}")
     print(f"ISINs renamed    : {len(renamed_isins):,}")
+    print(f"tickers learned  : {learned:,}  (from --isin-source)")
     print(f"actions read     : {len(actions):,}")
     print(f"actions moved    : {len(moved):,}")
     print(f"unresolved       : {len(unresolved):,}")
