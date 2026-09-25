@@ -319,6 +319,7 @@ class BacktestEngine:
         max_fill_search_days: int = 5,
         min_rebalance_weight_delta: float = 0.0,
         stale_mark_lookback_days: int = 400,
+        stopped_trading_sessions: int = 5,
         stale_mark_warn_days: int = 30,
         stop_loss_policy: StopLossPolicy | None = None,
         checkpoint_dir: Path | None = None,
@@ -349,6 +350,12 @@ class BacktestEngine:
         # Kept for caller compatibility; execution no longer searches future bars.
         self.max_fill_search_days = max_fill_search_days
         self.stale_mark_lookback_days = stale_mark_lookback_days
+        if stopped_trading_sessions < 1:
+            raise BacktestEngineError("stopped_trading_sessions must be >= 1")
+        self.stopped_trading_sessions = stopped_trading_sessions
+        """Consecutive sessions without a bar after which a held stock is
+        treated as having stopped trading and is exited at its last real
+        trade. Point-in-time: it is known on the day, with no look-ahead."""
         """How far back :meth:`_last_close` will look for a traded price when
         the ordinary window finds none. Covers a suspension, which in Indian
         cash equity routinely runs to months. Valuation only."""
@@ -595,6 +602,26 @@ class BacktestEngine:
 
             cash += dividend_credit
 
+            # A held stock that has stopped trading -- a merger, a scheme, a
+            # delisting -- can never be sold at a new price, and holding it
+            # to the fold end used to abort the whole run. After
+            # stopped_trading_sessions sessions without a bar it is exited at
+            # its last real trade. After the fills, so the day's own order for
+            # it (which found no bar) cannot collide with the exit.
+            cash, executed_target = self._exit_stopped_trading(
+                signal_date=signal_date,
+                execution_date=execution_date,
+                cash=cash,
+                holdings=holdings,
+                avg_price=avg_price,
+                cost_basis=cost_basis,
+                current_target=executed_target,
+                orders=orders,
+                fills=fills,
+                trade_log_rows=trade_log_rows,
+                force=False,
+            )
+
             # Stops resolve within the execution session, after the
             # rebalance and before the close is marked. They are resting
             # orders: the decision to protect every holding at -3% was made
@@ -625,10 +652,24 @@ class BacktestEngine:
                         continue
                     bar = self._session_bar(instrument_id, execution_date)
                     if bar is None:
-                        raise BacktestEngineError(
-                            f"Cannot liquidate {instrument_id} at fold end {execution_date}: "
-                            "no tradable bar; refusing a fabricated liquidation"
+                        # Stopped trading inside the last few sessions of the
+                        # fold, before the in-session pass would have caught
+                        # it. Same rule: its last real trade.
+                        cash, executed_target = self._exit_stopped_trading(
+                            signal_date=signal_date,
+                            execution_date=execution_date,
+                            cash=cash,
+                            holdings=holdings,
+                            avg_price=avg_price,
+                            cost_basis=cost_basis,
+                            current_target=executed_target,
+                            orders=orders,
+                            fills=fills,
+                            trade_log_rows=trade_log_rows,
+                            force=True,
+                            only=instrument_id,
                         )
+                        continue
                     price = float(bar.close)
                     adv, vol = self._market_stats(instrument_id, signal_date)
                     cost = self.cost_model.estimate_execution_cost(
@@ -897,6 +938,104 @@ class BacktestEngine:
         return cash, current_target
 
     # -- pricing / market facts --------------------------------------------
+
+    def _last_raw_bar(self, instrument_id: str, as_of: dt.date) -> DailyBar | None:
+        """The last bar that actually printed on or before ``as_of``, RAW.
+
+        RAW because it is used as an exit price: the price a trade really
+        happened at, not one restated into later terms.
+        """
+        start = as_of - dt.timedelta(days=self.stale_mark_lookback_days)
+        try:
+            bars = self.market_data.get_equity_bars(
+                instrument_id, start, as_of, price_basis=PriceBasis.RAW
+            )
+        except DataNotAvailableError:
+            return None
+        return bars[-1] if bars else None
+
+    def _exit_stopped_trading(
+        self,
+        *,
+        signal_date: dt.date,
+        execution_date: dt.date,
+        cash: float,
+        holdings: dict[str, int],
+        avg_price: dict[str, float],
+        cost_basis: dict[str, float],
+        current_target: TargetPortfolio,
+        orders: list[OrderRecord],
+        fills: list[FillRecord],
+        trade_log_rows: list[dict[str, object]],
+        force: bool,
+        only: str | None = None,
+    ) -> tuple[float, TargetPortfolio]:
+        """Exit held stocks that have stopped trading, at their last real trade.
+
+        A merger, a scheme of arrangement or a delisting ends a stock's
+        trading. JSLHISAR last traded on 2023-03-08 before merging into JSL;
+        every strategy still held it at the fold end on 2023-06-05, with no
+        bar to sell into, and all ten runs aborted. 142 names in the liquid
+        universe stop trading inside the backtest window.
+
+        The policy, chosen deliberately as an approximation: sell at the last
+        price that actually traded, tagged ``stopped_trading_last_close`` so
+        every instance can be audited. For a merger that is close to what a
+        holder had -- acquirer shares worth about that much at the time. For
+        an insolvency it is generous, because holders there typically
+        received nearly nothing; those names rarely stay liquid enough to be
+        held, since the ranking drops them long before.
+
+        A stock counts as stopped after ``stopped_trading_sessions``
+        consecutive sessions with no bar, which is knowable on the day. A
+        short suspension that ends sooner resumes normally. ``force`` skips
+        that test at a fold end, where the position must be closed today.
+        """
+        ids = [only] if only is not None else sorted(holdings)
+        for instrument_id in ids:
+            quantity = holdings.get(instrument_id, 0)
+            if quantity <= 0:
+                continue
+            if self._session_bar(instrument_id, execution_date) is not None:
+                continue
+            last = self._last_raw_bar(instrument_id, execution_date)
+            if last is None:
+                if force:
+                    raise BacktestEngineError(
+                        f"Cannot liquidate {instrument_id} at fold end {execution_date}: "
+                        "it has never traded within the lookback; no price exists"
+                    )
+                continue
+            silent = len(self.calendar.trading_days_between(last.session_date, execution_date)) - 1
+            if not force and silent < self.stopped_trading_sessions:
+                continue
+
+            price = float(last.close)
+            adv, vol = self._market_stats(instrument_id, signal_date)
+            cost = self.cost_model.estimate_execution_cost(
+                instrument_id,
+                TradeSide.SELL,
+                quantity,
+                price,
+                execution_date,
+                spread_bps=self.assumed_spread_bps,
+                avg_daily_value=adv,
+                volatility=vol,
+            )
+            weight = current_target.weight_for(instrument_id) if current_target else 0.0
+            order = OrderRecord(
+                signal_date, execution_date, instrument_id, TradeAction.EXIT, weight, 0.0, -weight
+            )
+            fill = FillRecord(order, TradeSide.SELL, quantity, price, cost)
+            orders.append(order)
+            fills.append(fill)
+            cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
+            row = _trade_log_row(fill)
+            row["exit_reason"] = "stopped_trading_last_close"
+            row["last_trade_date"] = last.session_date.isoformat()
+            trade_log_rows.append(row)
+            current_target = _without_position(current_target, instrument_id)
+        return cash, current_target
 
     def _last_close(self, instrument_id: str, as_of: dt.date, lookback_days: int = 15) -> float:
         """The most recent traded close, for marking a holding to market.
