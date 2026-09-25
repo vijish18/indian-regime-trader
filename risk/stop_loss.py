@@ -158,6 +158,11 @@ class StopLossPolicy:
 
     enabled: bool = True
     hard_stop_min_entry_price: float = 0.0
+    profit_exit_enabled: bool = True
+    """False leaves the hard stop as the only exit rule: no trailing stop and
+    no take-profit. A switch rather than an unreachable threshold, so the
+    config says what the rule is instead of hiding it in a number."""
+
     """Apply the hard stop only above this average purchase price, strictly.
 
     Uses the same corporate-action-adjusted entry price as the stop level.
@@ -200,6 +205,7 @@ class StopLossPolicy:
             close_on_arm=bool(raw["close_on_arm"]),
             enabled=bool(raw["enabled"]),
             hard_stop_min_entry_price=float(raw.get("hard_stop_min_entry_price", 0.0)),
+            profit_exit_enabled=bool(raw.get("profit_exit_enabled", True)),
         )
 
 
@@ -327,6 +333,9 @@ def evaluate(
             fill_price=fill,
             net_profit_pct=net_profit_pct(cost_basis, net_sale_value, fill),
         )
+
+    if not policy.profit_exit_enabled:
+        return None
 
     if policy.close_on_arm:
         # The take-profit sells at the price on the screen, so the threshold

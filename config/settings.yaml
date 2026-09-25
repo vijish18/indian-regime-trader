@@ -185,11 +185,13 @@ risk:
   stop_loss:
     enabled: true
     hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
-    hard_stop_min_entry_price: 100.0 # strict >; uses corporate-action-adjusted average buy price
-    trail_arm_net_profit_pct: 0.05   # the trail stays disarmed until the sale would net
+    profit_exit_enabled: false       # THE ONLY RULE: the 3% hard stop. No trailing
+                                      # stop, no take-profit; winners leave only by rank
+    hard_stop_min_entry_price: 0.0   # every position, whatever its price
+    trail_arm_net_profit_pct: 0.05   # UNUSED while profit_exit_enabled is false. Would net
                                       # >5% after every sell-side charge, DP included
     trail_drop_pct: 0.02             # once armed, exit on a 2% fall from today's high
-    close_on_arm: false              # false: arm and trail (the master rule above).
+    close_on_arm: false              # UNUSED while profit_exit_enabled is false.
                                       # true: sell at the threshold instead, capping every
                                       # winner there. Kept switchable so the backtest can
                                       # measure the difference rather than argue about it.

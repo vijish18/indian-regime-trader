@@ -87,11 +87,12 @@ def test_invalid_entry_price_threshold(threshold: float) -> None:
         replace(POLICY, hard_stop_min_entry_price=threshold)
 
 
-def test_shipped_policy_uses_purchase_price_threshold() -> None:
+def test_shipped_policy_stops_every_position_whatever_its_price() -> None:
+    """The one rule applies to a Rs 22 stock exactly as to a Rs 2,200 one."""
     from config.loader import load_settings
 
     policy = StopLossPolicy.from_mapping(load_settings().risk.stop_loss.model_dump())
-    assert policy.hard_stop_min_entry_price == 100
+    assert policy.hard_stop_min_entry_price == 0
 
 
 def net_sale(price: float, quantity: int = QUANTITY) -> float:
@@ -421,16 +422,15 @@ def test_policy_from_mapping_requires_every_key() -> None:
         StopLossPolicy.from_mapping({"enabled": True, "hard_stop_pct": 0.03})
 
 
-def test_the_shipped_settings_are_the_master_rule() -> None:
-    """A position leaves the book when either holds:
+def test_the_shipped_settings_are_the_one_rule() -> None:
+    """A position leaves the book on one rule only: it trades more than 3%
+    below the price it was BOUGHT at. Every position, whatever its price. No
+    trailing stop and no take-profit -- a winner leaves only when the ranking
+    drops it.
 
-      1. it trades more than 3% below the price it was BOUGHT at
-      2. it is more than 5% in profit after every sell-side charge, DP
-         charge included, AND has fallen 2% below today's running high
-
-    Pinned here because changing any of it is a decision about the strategy,
-    not a tweak. If this test fails, the master rule was edited -- which is
-    allowed, but it should be on purpose.
+    Pinned here because changing it is a decision about the strategy, not a
+    tweak. If this test fails, the rule was edited -- which is allowed, but it
+    should be on purpose.
     """
     from config.loader import load_settings
 
@@ -438,14 +438,8 @@ def test_the_shipped_settings_are_the_master_rule() -> None:
 
     assert policy.enabled is True
     assert policy.hard_stop_pct == pytest.approx(0.03)
-    assert policy.trail_arm_net_profit_pct == pytest.approx(0.05)
-    assert policy.trail_drop_pct == pytest.approx(0.02)
-    # Arm and trail, not sell at the threshold: a winner is not capped at 5%.
-    assert policy.close_on_arm is False
-
-
-# -- the take profit (close_on_arm) ----------------------------------------
-
+    assert policy.hard_stop_min_entry_price == 0
+    assert policy.profit_exit_enabled is False
 
 def test_take_profit_closes_as_soon_as_the_sale_clears_the_threshold() -> None:
     """No pullback required and no session extreme involved: the price on the
@@ -641,3 +635,71 @@ def test_the_master_rule_banks_a_five_percent_winner_on_a_two_percent_pullback()
     assert breach is not None
     assert breach.reason is StopReason.TRAILING_PROFIT_STOP
     assert breach.net_profit_pct > 0.05
+
+
+def test_with_profit_exits_off_a_pullback_from_a_big_gain_does_nothing() -> None:
+    """Up 12% and pulled back 2.3% off the high -- the trailing rule would
+    sell. With profit exits off, nothing fires: the hard stop is the only
+    rule, and this position is nowhere near it."""
+    policy = replace(TRAIL_POLICY, profit_exit_enabled=False)
+    assert (
+        evaluate(
+            "ACME",
+            entry_price=100.0,
+            cost_basis=basis_for(100.0),
+            session_high=112.0,
+            session_low=109.0,
+            reference_price=109.4,
+            net_sale_value=net_sale,
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_with_profit_exits_off_the_hard_stop_still_fires() -> None:
+    """Switching off the profit exit must not switch off the loss exit."""
+    policy = replace(TRAIL_POLICY, profit_exit_enabled=False)
+    breach = evaluate(
+        "ACME",
+        entry_price=100.0,
+        cost_basis=basis_for(100.0),
+        session_high=100.5,
+        session_low=96.0,
+        reference_price=96.5,
+        net_sale_value=net_sale,
+        policy=policy,
+    )
+    assert breach is not None
+    assert breach.reason is StopReason.HARD_STOP
+
+
+def test_the_hard_stop_protects_a_cheap_stock_when_the_floor_is_zero() -> None:
+    """SBC traded near Rs 22. Under the old Rs 100 floor it had no stop."""
+    policy = replace(TRAIL_POLICY, profit_exit_enabled=False, hard_stop_min_entry_price=0.0)
+    breach = evaluate(
+        "SBC",
+        entry_price=22.0,
+        cost_basis=basis_for(22.0),
+        session_high=22.1,
+        session_low=21.3,
+        reference_price=21.5,
+        net_sale_value=net_sale,
+        policy=policy,
+    )
+    assert breach is not None
+    assert breach.reason is StopReason.HARD_STOP
+
+
+def test_profit_exit_enabled_defaults_on_for_older_configs() -> None:
+    """A config written before the switch existed keeps its old behaviour."""
+    policy = StopLossPolicy.from_mapping(
+        {
+            "enabled": True,
+            "hard_stop_pct": 0.03,
+            "trail_drop_pct": 0.02,
+            "trail_arm_net_profit_pct": 0.05,
+            "close_on_arm": False,
+        }
+    )
+    assert policy.profit_exit_enabled is True

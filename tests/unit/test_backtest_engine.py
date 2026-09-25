@@ -825,6 +825,9 @@ def test_a_hard_stop_exits_the_position_inside_the_execution_session(
     assert len(sells) == 1
     assert sells[0].quantity == [f for f in result.fills if f.side is TradeSide.BUY][0].quantity
     assert result.positions_history[execution_date] == {}
+    # The trade log names the stop, so a run can count how often it fired.
+    sold = result.trade_log[result.trade_log["side"] == "sell"]
+    assert list(sold["exit_reason"]) == ["hard_stop"]
 
 
 def test_a_trailing_stop_banks_a_profitable_pullback(tmp_path: Path) -> None:

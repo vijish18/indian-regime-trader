@@ -379,6 +379,8 @@ class StopLossConfig(BaseModel):
     bought at. A fixed level, not a trailing one."""
 
     hard_stop_min_entry_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    profit_exit_enabled: bool = True
+    """False: the hard stop is the only per-position exit rule."""
     """Hard stop requires average entry strictly above this INR price.
     Zero retains legacy config behavior; the shipped policy sets 100."""
 

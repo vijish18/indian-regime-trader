@@ -886,7 +886,12 @@ class BacktestEngine:
                 )
             )
             cash = self._apply_fill(fill, cash, holdings, avg_price, cost_basis)
-            trade_log_rows.append(_trade_log_row(fill))
+            row = _trade_log_row(fill)
+            # Tagged like fold-end and delisting exits. Untagged, a stop is
+            # indistinguishable from a rebalance sell and nobody can count
+            # how often the rule actually fired.
+            row["exit_reason"] = breach.reason.value
+            trade_log_rows.append(row)
             current_target = _without_position(current_target, instrument_id)
 
         return cash, current_target
