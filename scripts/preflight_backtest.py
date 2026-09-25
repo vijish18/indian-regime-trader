@@ -125,7 +125,11 @@ def check_stop_policy() -> Check:
             f"+{policy.trail_arm_net_profit_pct:.1%} net ahead"
         )
     )
-    check.note(f"hard stop at -{policy.hard_stop_pct:.1%} from the buy price")
+    if not policy.profit_exit_enabled:
+        profit = "profit exits OFF: no trailing stop, no take-profit"
+    floor = policy.hard_stop_min_entry_price
+    scope = f", only above Rs {floor:,.0f} entry" if floor > 0 else ", every position"
+    check.note(f"hard stop at -{policy.hard_stop_pct:.1%} from the buy price{scope}")
     check.note(profit)
     return check
 
