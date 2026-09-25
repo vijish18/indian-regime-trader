@@ -183,7 +183,8 @@ risk:
   # which made every win the same size as a loss and put the entire result on
   # the win rate.
   stop_loss:
-    enabled: true
+    enabled: false                   # NO per-position stop (2026-09-26). The 3% hard stop
+                                      # below is kept but inactive; set true to restore it.
     hard_stop_pct: 0.03              # exit if price falls 3% below the BUY price
     profit_exit_enabled: false       # THE ONLY RULE: the 3% hard stop. No trailing
                                       # stop, no take-profit; winners leave only by rank

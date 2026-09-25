@@ -422,23 +422,24 @@ def test_policy_from_mapping_requires_every_key() -> None:
         StopLossPolicy.from_mapping({"enabled": True, "hard_stop_pct": 0.03})
 
 
-def test_the_shipped_settings_are_the_one_rule() -> None:
-    """A position leaves the book on one rule only: it trades more than 3%
-    below the price it was BOUGHT at. Every position, whatever its price. No
-    trailing stop and no take-profit -- a winner leaves only when the ranking
-    drops it.
+def test_the_shipped_settings_have_no_per_position_stop() -> None:
+    """No per-position exit rule at all (2026-09-26): no hard stop, no trailing
+    stop, no take-profit. A position leaves only when the ranking drops it, at
+    a fold end, or when the stock stops trading.
 
-    Pinned here because changing it is a decision about the strategy, not a
-    tweak. If this test fails, the rule was edited -- which is allowed, but it
-    should be on purpose.
+    The one-rule run showed the 3% hard stop firing 1,791 times for HMM at
+    Rs 1 crore -- 45% on the day of purchase -- and losing Rs 380 lakh on
+    those exits while everything else made Rs 343 lakh.
+
+    Pinned because changing it is a decision about the strategy, not a tweak.
+    The 3% level stays configured so re-enabling is one line.
     """
     from config.loader import load_settings
 
     policy = StopLossPolicy.from_mapping(load_settings().risk.stop_loss.model_dump())
 
-    assert policy.enabled is True
+    assert policy.enabled is False
     assert policy.hard_stop_pct == pytest.approx(0.03)
-    assert policy.hard_stop_min_entry_price == 0
     assert policy.profit_exit_enabled is False
 
 def test_take_profit_closes_as_soon_as_the_sale_clears_the_threshold() -> None:
