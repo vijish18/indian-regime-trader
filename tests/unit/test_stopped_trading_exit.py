@@ -32,7 +32,7 @@ class _GoesSilent:
 
     def get_equity_bars(self, instrument_id: str, start: dt.date, end: dt.date,
                         *args: Any, **kwargs: Any) -> list[Any]:
-        bars = self._inner.get_equity_bars(instrument_id, start, end, *args, **kwargs)
+        bars: list[Any] = self._inner.get_equity_bars(instrument_id, start, end, *args, **kwargs)
         if instrument_id != self._id:
             return bars
         return [
@@ -51,7 +51,7 @@ def _run(tmp_path: Path, last_index: int, resume_index: int | None = None,
     dates = env.dates[80:80 + n]
     iid = env.instrument_ids[0]
     engine = env.engine(tmp_path, liquidate_at_end=liquidate)
-    engine.market_data = _GoesSilent(
+    engine.market_data = _GoesSilent(  # type: ignore[assignment]
         env.market_data, iid, dates[last_index],
         dates[resume_index] if resume_index is not None else None,
     )
