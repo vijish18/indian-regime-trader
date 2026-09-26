@@ -716,3 +716,17 @@ def test_default_settings_selection_config_runs_end_to_end() -> None:
     ranked = env.selector.select(as_of)
     assert len(ranked) <= settings.selection.max_holdings
     assert len(ranked) > 0
+
+
+def test_a_single_momentum_horizon_is_accepted() -> None:
+    config = selection_config(momentum_lookback_months=[2])
+    assert config.momentum_lookback_months == [2]
+
+
+def test_momentum_horizons_must_still_ascend_or_number_one_or_two() -> None:
+    with pytest.raises(ValueError):
+        selection_config(momentum_lookback_months=[2, 1])
+    with pytest.raises(ValueError):
+        selection_config(momentum_lookback_months=[1, 2, 3])
+    with pytest.raises(ValueError):
+        selection_config(momentum_lookback_months=[])

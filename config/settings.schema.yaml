@@ -223,7 +223,7 @@ properties:
       momentum_lookback_months:
         type: array
         items: { type: integer, minimum: 1 }
-        minItems: 2
+        minItems: 1
         maxItems: 2
       momentum_skip_days: { type: integer, minimum: 0 }
       trend_ma_window_days: { type: integer, minimum: 2 }
@@ -409,6 +409,7 @@ properties:
       point_in_time_universe: { type: boolean, const: true }
       slippage_min_bps: { type: number, minimum: 0 }
       slippage_impact_coefficient: { type: number, minimum: 0 }
+      rebalance_every_sessions: { type: integer, minimum: 1 }
 
   costs:
     type: object

@@ -236,6 +236,7 @@ class WalkForwardValidator:
             circuit_breaker_state_dir=circuit_breaker_state_dir,
             corporate_actions=corporate_actions,
             stop_loss_policy=StopLossPolicy.from_mapping(risk_config.stop_loss.model_dump()),
+            rebalance_every_sessions=config.rebalance_every_sessions,
         )
 
     # -- fold generation ----------------------------------------------------

@@ -320,6 +320,7 @@ class BacktestEngine:
         min_rebalance_weight_delta: float = 0.0,
         stale_mark_lookback_days: int = 400,
         stopped_trading_sessions: int = 5,
+        rebalance_every_sessions: int = 1,
         stale_mark_warn_days: int = 30,
         stop_loss_policy: StopLossPolicy | None = None,
         checkpoint_dir: Path | None = None,
@@ -353,6 +354,12 @@ class BacktestEngine:
         if stopped_trading_sessions < 1:
             raise BacktestEngineError("stopped_trading_sessions must be >= 1")
         self.stopped_trading_sessions = stopped_trading_sessions
+        if rebalance_every_sessions < 1:
+            raise BacktestEngineError("rebalance_every_sessions must be >= 1")
+        self.rebalance_every_sessions = rebalance_every_sessions
+        """Trade toward the model's target only on every Nth session of a run
+        (the first always trades); hold unchanged in between. Forced exits
+        are not affected."""
         """Consecutive sessions without a bar after which a held stock is
         treated as having stopped trading and is exited at its last real
         trade. Point-in-time: it is known on the day, with no look-ahead."""
@@ -501,29 +508,33 @@ class BacktestEngine:
             regime_points[signal_date] = exposure_target.regime.value
             confidence_points[signal_date] = exposure_target.confidence
 
-            candidates = self.stock_selector.select(signal_date)
             equity_at_signal = self._mark_to_market(cash, holdings, signal_date)
             equity_history.append(equity_at_signal)
 
-            proposed = self.portfolio_constructor.construct(
-                candidates,
-                exposure_target,
-                signal_date,
-                equity_at_signal,
-                current_portfolio=current_target,
-            )
-
-            risk_state = self._build_risk_state(
-                proposed, equity_at_signal, signal_date, equity_history
-            )
-            decisions = risk_manager.evaluate(proposed, risk_state, current=current_target)
-            risk_decision_records.append(DailyRiskDecisions(signal_date, tuple(decisions)))
-
-            executed_target = _apply_risk_decisions(proposed, decisions, current_target)
-            if self.min_rebalance_weight_delta > 0:
-                executed_target = _apply_rebalance_threshold(
-                    executed_target, current_target, self.min_rebalance_weight_delta
+            if current_target is not None and session_index % self.rebalance_every_sessions:
+                # Hold day: keep what is held; required_trades(x, x) is empty.
+                executed_target = current_target
+            else:
+                candidates = self.stock_selector.select(signal_date)
+                proposed = self.portfolio_constructor.construct(
+                    candidates,
+                    exposure_target,
+                    signal_date,
+                    equity_at_signal,
+                    current_portfolio=current_target,
                 )
+
+                risk_state = self._build_risk_state(
+                    proposed, equity_at_signal, signal_date, equity_history
+                )
+                decisions = risk_manager.evaluate(proposed, risk_state, current=current_target)
+                risk_decision_records.append(DailyRiskDecisions(signal_date, tuple(decisions)))
+
+                executed_target = _apply_risk_decisions(proposed, decisions, current_target)
+                if self.min_rebalance_weight_delta > 0:
+                    executed_target = _apply_rebalance_threshold(
+                        executed_target, current_target, self.min_rebalance_weight_delta
+                    )
 
             notices = {n.instrument_id: n for n in self.delisting_notices if n.active(signal_date)}
             if notices:

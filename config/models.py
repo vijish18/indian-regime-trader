@@ -302,11 +302,17 @@ class SelectionConfig(BaseModel):
 
     @model_validator(mode="after")
     def _momentum_lookback_is_two_ascending_horizons(self) -> SelectionConfig:
-        if len(self.momentum_lookback_months) != 2:
+        # One horizon is classic 12-1 momentum ([12] with a 21-day skip);
+        # two are blended [short, long].
+        if len(self.momentum_lookback_months) not in (1, 2):
             raise ValueError(
-                "momentum_lookback_months must have exactly 2 entries: [short, long] months"
+                "momentum_lookback_months must have 1 or 2 entries: [months] or "
+                "[short, long] months"
             )
-        if self.momentum_lookback_months[0] >= self.momentum_lookback_months[1]:
+        if (
+            len(self.momentum_lookback_months) == 2
+            and self.momentum_lookback_months[0] >= self.momentum_lookback_months[1]
+        ):
             raise ValueError("momentum_lookback_months short horizon must be < long horizon")
         return self
 
@@ -675,6 +681,13 @@ class BacktestConfig(BaseModel):
     """Scales the square-root price-impact term in
     ``backtest.costs.CostModel.estimate_slippage_bps`` -- also a model
     parameter, not a statutory rate."""
+    rebalance_every_sessions: int = Field(default=1, ge=1)
+    """Trade toward the model's target only every Nth session of a fold
+    (the first session always trades). In between, holdings are left as
+    they are: no selection, no regime-driven resizing. Forced exits (a
+    stock that stops trading, a delisting notice, fold-end liquidation)
+    still happen on any day. ``1`` rebalances daily, the original
+    behaviour."""
 
 
 class CostsConfig(BaseModel):

@@ -540,6 +540,61 @@ def test_engine_with_a_rebalance_threshold_produces_fewer_or_equal_fills(
     assert len(result_thresholded.fills) <= len(result_none.fills)
 
 
+def test_a_rebalance_interval_only_trades_on_every_nth_session(tmp_path: Path) -> None:
+    env = Environment(n_days=140, n_stocks=3)
+    band = env.regime_policy.band_for(AllocationRegime.LOW_RISK)
+    dates = env.dates[70:100]
+    targets = {
+        day: AllocationTarget(
+            as_of=day,
+            regime=AllocationRegime.LOW_RISK,
+            target_gross_exposure=band.max_gross_exposure,
+            min_gross_exposure=band.max_gross_exposure,
+            max_gross_exposure=band.max_gross_exposure,
+            allow_new_positions=True,
+            confidence=1.0,
+            expected_volatility=0.1,
+            reason="test",
+        )
+        for day in dates
+    }
+    daily = env.engine(tmp_path / "daily").run("daily", targets, dates, 1_000_000.0)
+    weekly_engine = BacktestEngine(
+        calendar=env.calendar,
+        market_data=env.market_data,
+        stock_selector=env.stock_selector,
+        portfolio_constructor=env.portfolio_constructor,
+        risk_config=env.risk_cfg,
+        cost_model=env.cost_model,
+        circuit_breaker_state_dir=tmp_path / "weekly",
+        corporate_actions=env.corporate_actions,
+        rebalance_every_sessions=5,
+    )
+    weekly = weekly_engine.run("weekly", targets, dates, 1_000_000.0)
+
+    rebalance_days = set(dates[::5])
+    assert weekly.fills
+    assert {f.order.signal_date for f in weekly.fills} <= rebalance_days
+    assert dates[0] in {f.order.signal_date for f in weekly.fills}
+    assert len(weekly.fills) <= len(daily.fills)
+    assert len(weekly.equity_curve) == len(daily.equity_curve)
+
+
+def test_a_rebalance_interval_below_one_is_refused(tmp_path: Path) -> None:
+    env = Environment(n_days=140, n_stocks=3)
+    with pytest.raises(BacktestEngineError):
+        BacktestEngine(
+            calendar=env.calendar,
+            market_data=env.market_data,
+            stock_selector=env.stock_selector,
+            portfolio_constructor=env.portfolio_constructor,
+            risk_config=env.risk_cfg,
+            cost_model=env.cost_model,
+            circuit_breaker_state_dir=tmp_path,
+            rebalance_every_sessions=0,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Marking a suspended holding
 # ---------------------------------------------------------------------------
