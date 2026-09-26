@@ -70,6 +70,8 @@ def test_diversification_validator_rejects_infeasible_holdings(
 
 
 def test_risk_threshold_ordering_enforced(valid_settings_dict: dict[str, Any]) -> None:
+    valid_settings_dict["risk"]["daily_loss_reduce_pct"] = 0.02
+    valid_settings_dict["risk"]["daily_loss_halt_pct"] = 0.03
     valid_settings_dict["risk"]["daily_loss_warning_pct"] = 0.05  # above reduce and halt
     with pytest.raises(ValidationError):
         Settings.model_validate(valid_settings_dict)

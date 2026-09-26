@@ -14,6 +14,7 @@ import pytest
 
 from core.features.feature_engineering import MarketFeatureInputs, drop_warmup_rows
 from core.features.feature_scaler import CausalFeatureScaler
+from core.regime.allocation import AllocationRegime
 from core.regime.hmm_engine import HMMRegimeEngine
 from core.regime.model_registry import ModelArtifact, build_model_id
 from orchestration.regime_computation import RegimeComputationError, RegimeComputer
@@ -117,3 +118,40 @@ def test_compute_today_raises_when_no_history_exists_at_all(
     )
     with pytest.raises(RegimeComputationError):
         computer.compute_today(artifact, env.dates[-1])
+
+
+def test_full_exposure_always_targets_the_low_risk_maximum(
+    env: Environment, artifact: ModelArtifact
+) -> None:
+    computer = RegimeComputer(
+        env.market_data,
+        env.hmm_cfg,
+        env.allocation_cfg,
+        env.regime_policy,
+        env.feature_pipeline,
+        INDEX_SYMBOL,
+        VIX_SYMBOL,
+        feature_warmup_buffer_days=120,
+        exposure="full",
+    )
+    band = env.regime_policy.band_for(AllocationRegime.LOW_RISK)
+    for as_of in (env.dates[181], env.dates[-1]):
+        target, state = computer.compute_today(artifact, as_of)
+        assert target.target_gross_exposure == band.max_gross_exposure
+        assert target.allow_new_positions
+        assert state.as_of == as_of
+        assert target.confidence == state.confidence
+
+
+def test_an_unknown_exposure_mode_is_refused(env: Environment) -> None:
+    with pytest.raises(ValueError):
+        RegimeComputer(
+            env.market_data,
+            env.hmm_cfg,
+            env.allocation_cfg,
+            env.regime_policy,
+            env.feature_pipeline,
+            INDEX_SYMBOL,
+            VIX_SYMBOL,
+            exposure="leveraged",
+        )

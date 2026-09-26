@@ -775,6 +775,30 @@ class MonitoringConfig(BaseModel):
     matter drown in the ones that are already known."""
 
 
+class BotConfig(BaseModel):
+    """How the trading bot (``app/paper_runtime.py``) turns rankings into a
+    book. Defaults reproduce the original behaviour: regime-scaled exposure,
+    rebalanced every session."""
+
+    model_config = {"frozen": True}
+
+    exposure: Literal["regime", "full"] = "regime"
+    """``regime``: the HMM's allocation target sizes the book. ``full``: always
+    the low-risk band's maximum, the backtest's ``buy_and_hold`` -- the HMM is
+    still computed and reported, but it does not change exposure."""
+
+    rebalance: Literal["daily", "weekly"] = "daily"
+    """``weekly``: trade only on the first trading session of each ISO week
+    (Monday, or the next session when Monday is a holiday)."""
+
+    capital: float = Field(default=100_000.0, gt=0)
+    """Starting cash of the paper account, in INR."""
+
+    trade_until_ist: str = "10:30"
+    """The ``trade`` command keeps working resting orders until this IST
+    time on a rebalance day, then reports and exits."""
+
+
 class Settings(BaseModel):
     """Root, validated configuration object for the whole system."""
 
@@ -800,6 +824,7 @@ class Settings(BaseModel):
     database: DatabaseConfig
     logging: LoggingConfig
     monitoring: MonitoringConfig
+    bot: BotConfig = Field(default_factory=BotConfig)
 
     @model_validator(mode="after")
     def _diversification_can_reach_low_risk_exposure(self) -> Settings:

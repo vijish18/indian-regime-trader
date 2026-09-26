@@ -112,7 +112,7 @@ selection:
   # exact formula and point-in-time discipline behind each window.
   min_holdings: 7
   max_holdings: 10
-  momentum_lookback_months: [3, 6]     # short/long horizons for blended risk-adjusted momentum
+  momentum_lookback_months: [12]     # short/long horizons for blended risk-adjusted momentum
   momentum_skip_days: 21               # exclude the most recent ~1 month (avoid short-term reversal)
   trend_ma_window_days: 50             # moving-average window used inside trend_persistence
   trend_window_days: 100               # how many trailing sessions are checked against that MA
@@ -120,14 +120,14 @@ selection:
   volatility_window_days: 63           # ~3 months, annualized realized volatility
   drawdown_window_days: 252            # ~1 year, distance from the trailing high
   liquidity_window_days: 20            # average daily traded value (INR)
-  min_history_days: 252                # must cover the longest window above (drawdown, here)
+  min_history_days: 273                # must cover the longest window above (drawdown, here)
   factor_weights:
     momentum: 0.30
     trend_persistence: 0.15
     relative_strength: 0.20
     volatility: 0.15                   # applied to -volatility: calmer stocks score higher
     drawdown: 0.10
-    liquidity: 0.10
+    liquidity: 0.0
 
 portfolio:
   # See portfolio/portfolio_constructor.py for the exact waterfall these
@@ -138,8 +138,9 @@ portfolio:
   min_position_weight_pct: 0.02        # positions smaller than this become cash instead
   max_pairwise_correlation: 0.80       # trailing correlation above this triggers a weight penalty
   correlation_lookback_days: 90
-  correlation_penalty_pct: 0.50        # halves the lower-ranked member of an over-correlated pair
-  min_correlation_observations: 40     # below this, skip the pair rather than act on a noisy estimate
+  correlation_penalty_pct: 0.0        # halves the lower-ranked member of an over-correlated pair
+  min_correlation_observations: 40
+  weighting: equal     # below this, skip the pair rather than act on a noisy estimate
 
 risk:
   # See risk/risk_manager.py and risk/circuit_breaker.py for how these are
@@ -152,18 +153,24 @@ risk:
   max_sector_pct: 0.30
   max_concurrent_positions: 10
   max_risk_per_position_pct: 0.005
-  daily_loss_warning_pct: 0.015        # logged only; does not change circuit state
-  daily_loss_reduce_pct: 0.020         # -> REDUCED_RISK
-  daily_loss_halt_pct: 0.030           # -> HALTED
-  rolling_loss_reduce_pct: 0.040       # rolling-window drawdown -> REDUCED_RISK
-  rolling_loss_halt_pct: 0.060         # rolling-window drawdown -> HALTED
-  peak_to_trough_drawdown_halt_pct: 0.10
+  # CATASTROPHE-ONLY brakes (2026-09-26, pure buy-and-hold). The 2%/3% daily
+  # limits cut exposure after bad days and cost more than half the return in
+  # the walk-forward (+311% vs +661% at Rs 1 crore). These sit above anything
+  # the backtest saw (worst day -8.7%, worst drawdown 39.4%) so they never
+  # fired there, and at live/preflight.py's ceilings (daily halt <= 10%,
+  # drawdown halt <= 50%) so a real crash or a bug still stops the bot.
+  daily_loss_warning_pct: 0.08        # logged only; does not change circuit state
+  daily_loss_reduce_pct: 0.09         # -> REDUCED_RISK
+  daily_loss_halt_pct: 0.10           # -> HALTED
+  rolling_loss_reduce_pct: 0.98       # rolling-window drawdown -> REDUCED_RISK
+  rolling_loss_halt_pct: 0.99         # rolling-window drawdown -> HALTED
+  peak_to_trough_drawdown_halt_pct: 0.50
   stale_data_max_minutes: 30
-  max_pairwise_correlation: 0.85       # backstop above portfolio's 0.80 soft penalty threshold
+  max_pairwise_correlation: 1.0       # backstop above portfolio's 0.80 soft penalty threshold
   max_adv_participation_pct: 0.08      # backstop above execution's 0.05 soft construction target
   max_spread_bps: 100                  # liquid NSE large caps trade well under this; a spread this
                                         # wide signals a stressed or illiquid book, not just noise
-  max_daily_turnover_pct: 0.50         # guards against a bug causing repeated full rebalances
+  max_daily_turnover_pct: 5.0         # guards against a bug causing repeated full rebalances
   reduced_risk_exposure_multiplier: 0.50
 
   # Per-position stops (risk/stop_loss.py). These act on ONE holding; every
@@ -293,6 +300,7 @@ backtest:
   point_in_time_universe: true
   slippage_min_bps: 5.0              # floor so a tight-spread, liquid trade still carries a
                                       # realistic minimum slippage estimate (section 9.1)
+  rebalance_every_sessions: 5
   slippage_impact_coefficient: 50.0  # see backtest/costs.py's square-root impact model
 
 # See backtest/cost_schedule.py -- rates are versioned data, not settings
@@ -350,3 +358,15 @@ monitoring:
   # synchronous on purpose: for the one process whose job is to stop safely,
   # knowing the page arrived is worth the seconds.
   alert_webhook_timeout_seconds: 10.0
+
+# The weekly trading bot (app/bot.py, 2026-09-26). The strategy above is the
+# "pure buy-and-hold" walk-forward run: 12-1 momentum top 10, equal weight,
+# account-level loss brakes effectively off (limits at 97-99%), no stop.
+# Backtest (UNVALIDATED, in-sample factor choice): +26% CAGR at Rs 1 crore
+# after costs, 39% worst drawdown. The HMM is still computed and reported,
+# but with exposure: full it does not size the book.
+bot:
+  exposure: full                     # regime | full
+  rebalance: weekly                  # daily | weekly (first session of each ISO week)
+  capital: 100000                    # paper account starting cash, INR
+  trade_until_ist: "10:30"           # keep working resting orders until then

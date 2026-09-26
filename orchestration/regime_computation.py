@@ -21,7 +21,7 @@ from core.features.feature_engineering import (
     drop_warmup_rows,
 )
 from core.features.feature_scaler import CausalFeatureScaler, ScalerParams
-from core.regime.allocation import AllocationTarget, RegimeAllocationEngine
+from core.regime.allocation import AllocationRegime, AllocationTarget, RegimeAllocationEngine
 from core.regime.hmm_engine import FittedRegimeModel, HMMRegimeEngine, RegimeState
 from core.regime.model_registry import ModelArtifact
 from core.regime.regime_policy import RegimePolicy
@@ -32,6 +32,24 @@ class RegimeComputationError(RuntimeError):
     """Raised when there is not enough trailing history to compute today's
     regime -- fail-closed, the caller must not proceed to sizing/orders
     without a regime decision."""
+
+
+def full_exposure_target(
+    as_of: dt.date, regime_policy: RegimePolicy, confidence: float
+) -> AllocationTarget:
+    """Always the low-risk band's maximum: the backtest's ``buy_and_hold``."""
+    band = regime_policy.band_for(AllocationRegime.LOW_RISK)
+    return AllocationTarget(
+        as_of=as_of,
+        regime=AllocationRegime.LOW_RISK,
+        target_gross_exposure=band.max_gross_exposure,
+        min_gross_exposure=band.max_gross_exposure,
+        max_gross_exposure=band.max_gross_exposure,
+        allow_new_positions=True,
+        confidence=confidence,
+        expected_volatility=0.0,
+        reason="full exposure: buy_and_hold, the regime is reported but not applied",
+    )
 
 
 class RegimeComputer:
@@ -45,7 +63,11 @@ class RegimeComputer:
         index_symbol: str,
         vix_symbol: str,
         feature_warmup_buffer_days: int = 500,
+        exposure: str = "regime",
     ) -> None:
+        if exposure not in ("regime", "full"):
+            raise ValueError(f"exposure must be 'regime' or 'full', got {exposure!r}")
+        self.exposure = exposure
         self.market_data = market_data
         self.hmm_config = hmm_config
         self.allocation_config = allocation_config
@@ -73,6 +95,9 @@ class RegimeComputer:
                 f"latest computable regime state is dated {states[-1].as_of}, not {as_of} "
                 "-- index data for today is not yet available"
             )
+        if self.exposure == "full":
+            target = full_exposure_target(as_of, self.regime_policy, states[-1].confidence)
+            return target, states[-1]
         engine = RegimeAllocationEngine(self.hmm_config, self.allocation_config, self.regime_policy)
         target = engine.evaluate(states)
         return target, states[-1]

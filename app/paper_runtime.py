@@ -22,6 +22,7 @@ from execution.position_tracker import PositionTracker
 from execution.system_state import SystemStateStore
 from monitoring.health import HealthChecker
 from orchestration.orchestrator import Orchestrator
+from orchestration.rebalance_schedule import is_rebalance_session
 from orchestration.regime_computation import RegimeComputer
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.risk_manager import RiskManager
@@ -112,6 +113,7 @@ class PaperRuntime:
                 "NIFTY50",
                 "INDIAVIX",
                 600,
+                exposure=self.settings.bot.exposure,
             ),
             portfolio_constructor=self.validator.engine.portfolio_constructor,
             risk_manager=RiskManager(self.settings.risk, breaker),
@@ -123,7 +125,9 @@ class PaperRuntime:
             state_store=SystemStateStore(state_dir / "system_state.json"),
             health_checker=health,
             execution_config=self.settings.execution,
-            strategy_version="paper-orchestrated-v1",
+            strategy_version=(
+                f"paper-orchestrated-v1:{self.settings.bot.exposure}:{self.settings.bot.rebalance}"
+            ),
             settings_loader=lambda: self.settings,
         )
         self.identity = hashlib.sha256(
@@ -162,7 +166,10 @@ class PaperRuntime:
         )
         self.ticks = self.ticks[-840:]
         day_key = today.isoformat()
-        if day_key not in self.metadata["completed_days"]:
+        rebalance_today = is_rebalance_session(self.settings.bot.rebalance, self.calendar, today)
+        if not rebalance_today:
+            self.status, self.detail = "holding", "Not a rebalance session; positions held"
+        elif day_key not in self.metadata["completed_days"]:
             report = self.orchestrator.run_daily_cycle(self.as_of)
             self.detail = " | ".join(report.messages[-4:])
             if report.permit_trading:
