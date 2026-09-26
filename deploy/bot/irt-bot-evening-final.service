@@ -1,0 +1,13 @@
+[Unit]
+Description=Trading bot: nightly data update + ranking (final attempt, alerts on failure)
+
+[Service]
+Type=oneshot
+User=irt
+WorkingDirectory=/home/irt/bot
+EnvironmentFile=/home/irt/bot/deploy/app.env
+Environment=IRT_DATA_ROOT=/home/irt/bot_data PYTHONUNBUFFERED=1
+Nice=5
+ExecStart=-/home/irt/bot/.venv/bin/python scripts/daily_data_update.py
+ExecStart=/home/irt/bot/.venv/bin/python -m app.bot evening
+TimeoutStartSec=45min

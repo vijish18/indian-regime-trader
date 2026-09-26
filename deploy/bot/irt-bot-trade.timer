@@ -1,0 +1,9 @@
+[Unit]
+Description=Trading bot trade, 09:14 IST Mon-Fri (no-op unless a rebalance day)
+
+[Timer]
+OnCalendar=Mon..Fri 03:44 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

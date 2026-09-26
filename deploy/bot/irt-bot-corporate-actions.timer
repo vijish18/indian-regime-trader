@@ -1,0 +1,9 @@
+[Unit]
+Description=Trading bot corporate actions, Saturday 10:00 IST
+
+[Timer]
+OnCalendar=Sat 04:30 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Trading bot evening retry, 21:30 IST Mon-Fri
+
+[Timer]
+OnCalendar=Mon..Fri 16:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -105,24 +105,37 @@ def _plan_text(runtime: PaperRuntime) -> str:
     return "\n".join(lines)
 
 
-def cmd_evening(settings: Settings, notifier: Notifier, as_of: dt.date | None) -> int:
+def cmd_evening(
+    settings: Settings, notifier: Notifier, as_of: dt.date | None, *, final: bool = True
+) -> int:
+    """``final=False`` is an early attempt with a later retry scheduled: its
+    failures are printed, not sent, so a slow NSE publish does not page."""
     calendar = _calendar()
     today = dt.datetime.now(IST).date()
     as_of = as_of or _last_session_on_or_before(calendar, today)
+    marker = STATE_DIR / f"evening_done_{as_of}"
+    if marker.exists():
+        return 0
+
+    def fail(subject: str, body: str) -> int:
+        if final:
+            notifier.send(subject, body, severity="error")
+        else:
+            print(f"[not final] {subject}: {body}", flush=True)
+        return 1
+
     nifty = _index_last_date("NIFTY50")
     if nifty != as_of:
-        notifier.send(
+        return fail(
             "Bot: data not ready",
             f"NIFTY 50 data ends {nifty}, expected {as_of}. Tonight's ranking was skipped.",
-            severity="error",
         )
-        return 1
     try:
         runtime = _runtime(settings, as_of)
         runtime.publish(REPO_ROOT / "state" / "dashboard_data.json")
     except Exception as exc:  # noqa: BLE001 - report, then fail the scheduler job
-        notifier.send("Bot: ranking failed", f"{type(exc).__name__}: {exc}", severity="error")
-        return 1
+        return fail("Bot: ranking failed", f"{type(exc).__name__}: {exc}")
+    marker.touch()
     nxt = calendar.next_trading_day(as_of)
     if is_rebalance_session(settings.bot.rebalance, calendar, nxt):
         notifier.send(
@@ -251,6 +264,9 @@ def main(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     evening = sub.add_parser("evening")
     evening.add_argument("--as-of", type=dt.date.fromisoformat, default=None)
+    evening.add_argument(
+        "--not-final", action="store_true", help="a retry follows: print failures, do not send"
+    )
     sub.add_parser("morning")
     sub.add_parser("trade")
     sub.add_parser("status")
@@ -265,7 +281,7 @@ def main(argv: list[str]) -> int:
         return cmd_status(settings)
     notifier = Notifier.from_settings(settings)
     if args.command == "evening":
-        return cmd_evening(settings, notifier, args.as_of)
+        return cmd_evening(settings, notifier, args.as_of, final=not args.not_final)
     if args.command == "morning":
         return cmd_morning(settings, notifier)
     return cmd_trade(settings, notifier)

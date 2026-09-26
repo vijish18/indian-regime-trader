@@ -1,0 +1,12 @@
+[Unit]
+Description=Trading bot: rebalance-morning Kite login link, waits for the redirect until 09:10 IST
+
+[Service]
+Type=oneshot
+User=irt
+WorkingDirectory=/home/irt/bot
+EnvironmentFile=/home/irt/bot/deploy/app.env
+Environment=IRT_DATA_ROOT=/home/irt/bot_data PYTHONUNBUFFERED=1
+Nice=5
+ExecStart=/home/irt/bot/.venv/bin/python -m app.bot morning
+TimeoutStartSec=60min
