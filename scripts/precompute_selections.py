@@ -85,10 +85,12 @@ def main(argv: list[str]) -> int:
         selection_cache=args.cache,
     )
     folds = validator.generate_folds(args.start, args.end)
+    # The engine only ranks on rebalance sessions: every Nth of each fold.
+    every = validator.config.rebalance_every_sessions
     dates: list[dt.date] = sorted({
         day
         for _, _, test_start, test_end in folds
-        for day in validator.calendar.trading_days_between(test_start, test_end)
+        for day in validator.calendar.trading_days_between(test_start, test_end)[::every]
     })
     selector = validator.engine.stock_selector
     pending = [d for d in dates if not selector.has(d)]  # type: ignore[attr-defined]
