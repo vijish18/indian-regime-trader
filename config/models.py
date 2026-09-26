@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -358,6 +359,11 @@ class PortfolioConfig(BaseModel):
     """Minimum overlapping return observations required to trust a pairwise
     correlation estimate; below this, the pair's correlation is skipped
     rather than acted on."""
+
+    weighting: Literal["score_over_volatility", "equal"] = "score_over_volatility"
+    """How raw weights are formed before penalties and caps:
+    ``score_over_volatility`` (shifted score / realized volatility) or
+    ``equal`` (every selected candidate the same)."""
 
     @model_validator(mode="after")
     def _min_weight_below_max_weight(self) -> PortfolioConfig:

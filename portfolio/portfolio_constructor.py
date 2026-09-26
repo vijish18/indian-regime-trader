@@ -354,6 +354,8 @@ class PortfolioConstructor:
         """
         if not candidates:
             return {}
+        if self.config.weighting == "equal":
+            return {candidate.instrument_id: 1.0 for candidate in candidates}
         scores = [candidate.score for candidate in candidates]
         score_range = max(scores) - min(scores)
         shift = -min(scores) + max(1.0, 0.1 * score_range)

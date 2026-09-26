@@ -294,6 +294,19 @@ def test_raw_weights_of_empty_candidates_is_empty() -> None:
     assert constructor().raw_weights([]) == {}
 
 
+def test_equal_weighting_ignores_score_and_volatility() -> None:
+    candidates = [
+        candidate("NSE:A", 1, score=5.0, volatility=0.10),
+        candidate("NSE:B", 2, score=-3.0, volatility=0.60),
+    ]
+    weights = constructor(config=portfolio_config(weighting="equal")).raw_weights(candidates)
+    assert weights["NSE:A"] == weights["NSE:B"]
+
+
+def test_weighting_defaults_to_score_over_volatility() -> None:
+    assert portfolio_config().weighting == "score_over_volatility"
+
+
 # --------------------------------------------------------------------------
 # Weighting waterfall: normalization and caps
 # --------------------------------------------------------------------------

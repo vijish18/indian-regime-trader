@@ -254,6 +254,7 @@ properties:
       correlation_lookback_days: { type: integer, minimum: 2 }
       correlation_penalty_pct: { type: number, minimum: 0, exclusiveMaximum: 1 }
       min_correlation_observations: { type: integer, minimum: 2 }
+      weighting: { type: string, enum: [score_over_volatility, equal] }
 
   risk:
     type: object
