@@ -9,7 +9,13 @@ Runs, in order, and stops at the first failure:
 1. ``backfill_bhavcopy.py --from 2015-01-01 --to D`` -- always the full
    range, because it rewrites ``index_membership.csv`` from what it covers.
    ``--skip-corporate-actions`` unless ``--corporate-actions``, which also
-   re-applies ``repair_corporate_action_symbols.py`` to the fresh feed.
+   re-applies ``repair_corporate_action_symbols.py`` to the fresh feed and
+   then MERGES rather than replaces: every existing row is kept as it was,
+   and only fresh events dated within ``RECENT_ACTION_DAYS`` (or later) that
+   are not already present are appended. The history was repaired with
+   extra ISIN sources and reviewed hand corrections this job cannot
+   reproduce; re-deriving it weekly would silently move ~40 old events to
+   other tickers.
 2. ``build_equity_bars.py --to D``.
 3. NIFTY 50 and India VIX appended from NSE's public
    ``ind_close_all_DDMMYYYY.csv`` -- no Kite login needed, which matters
@@ -26,6 +32,7 @@ import argparse
 import csv
 import datetime as dt
 import io
+import shutil
 import subprocess
 import sys
 import time
@@ -99,6 +106,33 @@ def append_index_closes(sessions: list[dt.date], index_dir: Path) -> int:
     return len(todo)
 
 
+RECENT_ACTION_DAYS = 60
+ACTION_KEY = ("instrument_id", "action_type", "ex_date")
+
+
+def merge_recent_actions(
+    existing: list[dict[str, str]], fresh: list[dict[str, str]], since: dt.date
+) -> tuple[list[dict[str, str]], int]:
+    """``existing`` unchanged, plus fresh rows dated ``since`` or later whose
+    (instrument, type, ex-date) is not already there. Returns the rows and
+    how many were added."""
+    seen = {tuple(row[k] for k in ACTION_KEY) for row in existing}
+    added = []
+    for row in fresh:
+        key = tuple(row[k] for k in ACTION_KEY)
+        if key in seen or dt.date.fromisoformat(row["ex_date"]) < since:
+            continue
+        seen.add(key)
+        added.append(row)
+    return existing + added, len(added)
+
+
+def _read_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), list(reader)
+
+
 def _run(args: list[str]) -> None:
     print("$ " + " ".join(args), flush=True)
     subprocess.run([sys.executable, *args], cwd=REPO_ROOT, check=True)
@@ -118,12 +152,32 @@ def main(argv: list[str]) -> int:
         today if calendar.is_trading_day(today) else calendar.previous_trading_day(today)
     )
 
+    actions = DATA_CACHE / "reference" / "corporate_actions.csv"
+    frozen = actions.with_name("corporate_actions.frozen.csv")
+    if args.corporate_actions:
+        shutil.copy2(actions, frozen)
     backfill = ["scripts/backfill_bhavcopy.py", "--from", "2015-01-01", "--to", end.isoformat()]
     if not args.corporate_actions:
         backfill.append("--skip-corporate-actions")
-    _run(backfill)
-    if args.corporate_actions:
-        _run(["scripts/repair_corporate_action_symbols.py"])
+    try:
+        _run(backfill)
+        if args.corporate_actions:
+            _run(["scripts/repair_corporate_action_symbols.py"])
+            fields, existing = _read_rows(frozen)
+            _, fresh = _read_rows(actions)
+            merged, added = merge_recent_actions(
+                existing, fresh, today - dt.timedelta(days=RECENT_ACTION_DAYS)
+            )
+            with actions.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(merged)
+            print(f"corporate actions: kept {len(existing)}, appended {added} recent")
+    except BaseException:
+        if args.corporate_actions and frozen.exists():
+            shutil.copy2(frozen, actions)  # never leave a half-processed feed in place
+            print("corporate actions restored from the frozen copy", file=sys.stderr)
+        raise
     _run(["scripts/build_equity_bars.py", "--to", end.isoformat()])
 
     index_dir = DATA_CACHE / "raw" / "index"

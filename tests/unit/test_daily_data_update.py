@@ -4,7 +4,7 @@ import datetime as dt
 
 import pytest
 
-from scripts.daily_data_update import parse_index_close
+from scripts.daily_data_update import merge_recent_actions, parse_index_close
 
 HEADER = (
     "Index Name,Index Date,Open Index Value,High Index Value,Low Index Value,"
@@ -47,3 +47,20 @@ def test_a_missing_index_is_refused() -> None:
 def test_a_non_numeric_close_is_refused() -> None:
     with pytest.raises(ValueError):
         parse_index_close(FILE.replace("23140.5", "-"), DAY)
+
+
+def _act(iid: str, kind: str, ex: str) -> dict[str, str]:
+    return {"instrument_id": iid, "action_type": kind, "ex_date": ex, "ratio_new": ""}
+
+
+def test_merge_keeps_history_and_appends_only_new_recent_events() -> None:
+    existing = [_act("NSE:HEG", "dividend", "2015-09-14"), _act("NSE:A", "bonus", "2026-09-10")]
+    fresh = [
+        _act("NSE:HEGAM", "dividend", "2015-09-14"),  # old, re-filed: ignored
+        _act("NSE:A", "bonus", "2026-09-10"),  # already present
+        _act("NSE:B", "split", "2026-09-28"),  # new and recent: added
+        _act("NSE:C", "dividend", "2026-06-01"),  # new but older than the window
+    ]
+    merged, added = merge_recent_actions(existing, fresh, dt.date(2026, 8, 3))
+    assert added == 1
+    assert merged == existing + [_act("NSE:B", "split", "2026-09-28")]
