@@ -21,9 +21,10 @@ from execution.order_manager import OrderManager
 from execution.position_tracker import PositionTracker
 from execution.system_state import SystemStateStore
 from monitoring.health import HealthChecker
+from orchestration.model_validation import validate_model_metadata
 from orchestration.orchestrator import Orchestrator
 from orchestration.rebalance_schedule import is_rebalance_session
-from orchestration.regime_computation import RegimeComputer
+from orchestration.regime_computation import RegimeComputer, full_exposure_target
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.risk_manager import RiskManager
 from risk.stop_loss import StopLossPolicy, evaluate
@@ -65,15 +66,14 @@ class PaperRuntime:
         )
         self.validator.feature_pipeline = FeaturePipeline(definitions)
         registry = ModelRegistry(state_dir / "models")
-        try:
-            artifact = registry.load_current_approved()
-        except NoApprovedModelError:
+
+        def fit_and_approve(reason: str) -> ModelArtifact:
             train_start = self.calendar.sessions_offset(
                 as_of, -(self.settings.hmm.training_window_days - 1)
             )
-            print(f"Fitting paper model: {train_start} .. {as_of}", flush=True)
+            print(f"Fitting paper model ({reason}): {train_start} .. {as_of}", flush=True)
             model, scaler, _, model_id = self.validator._fit_fold(train_start, as_of)
-            artifact = ModelArtifact(
+            fitted = ModelArtifact(
                 model_id,
                 dt.datetime.now(dt.UTC),
                 model,
@@ -81,8 +81,27 @@ class PaperRuntime:
                 feature_set_version(definitions),
                 notes="Paper-only model; approval is not evidence of profitability",
             )
-            registry.save(artifact)
+            registry.save(fitted)
             registry.approve(model_id)
+            return fitted
+
+        try:
+            artifact = registry.load_current_approved()
+        except NoApprovedModelError:
+            artifact = fit_and_approve("no approved model")
+        else:
+            # Retrain on schedule (hmm.retrain_interval_sessions) rather than
+            # let the model age out: the orchestrator refuses a stale model
+            # when the regime sizes the book, and reports it as stale otherwise.
+            if validate_model_metadata(
+                artifact,
+                [d.name for d in definitions],
+                feature_set_version(definitions),
+                as_of=as_of,
+                calendar=self.calendar,
+                max_age_sessions=self.settings.hmm.retrain_interval_sessions,
+            ):
+                artifact = fit_and_approve("approved model is due for retraining")
         self.artifact = artifact
         print(f"Ranking equities as of {as_of} ...", flush=True)
         self.candidates = self.validator.engine.stock_selector.select(as_of)
@@ -263,7 +282,36 @@ class PaperRuntime:
         cash = self.broker.cash
         market_value = sum(p.quantity * p.current_price for p in positions)
         equity = cash + market_value
-        allocation, regime = orch.regime_computer.compute_today(self.artifact, self.as_of)
+        regime_now: dict[str, Any]
+        try:
+            allocation, regime = orch.regime_computer.compute_today(self.artifact, self.as_of)
+            path = orch.regime_computer.recent_states(self.artifact, self.as_of, 30)
+            stats = sorted(self.artifact.model.statistics, key=lambda st: st.state_id)
+            regime_now = {
+                "available": True,
+                "as_of": str(self.as_of),
+                "label": regime.label.value,
+                "state_id": regime.state_id,
+                "confidence": regime.confidence,
+                "min_confidence": self.settings.hmm.min_confidence,
+                "confident": regime.confidence >= self.settings.hmm.min_confidence,
+                "probabilities": list(regime.probabilities),
+                "expected_volatility": regime.expected_volatility,
+                "expected_return": regime.expected_return,
+                "persistence": regime.persistence,
+                "state_labels": [st.label.value for st in stats],
+                "model_id": self.artifact.model_id,
+                "sizes_book": orch.regime_sizes_book,
+                "recent": [
+                    {"as_of": str(st.as_of), "label": st.label.value, "confidence": st.confidence}
+                    for st in path
+                ],
+            }
+        except Exception as exc:  # noqa: BLE001 - a report must not take the job down
+            allocation = orch.last_allocation_target or full_exposure_target(
+                self.as_of, orch.regime_computer.regime_policy, 0.0
+            )
+            regime_now = {"available": False, "reason": f"regime not computed: {exc}"}
         payload = {
             "generated_at": dt.datetime.now(dt.UTC).isoformat(),
             "paper_execution": {
@@ -287,16 +335,20 @@ class PaperRuntime:
                     for c in self.candidates
                 ],
             },
-            "regime_now": {
-                "available": True,
-                "as_of": str(self.as_of),
-                "label": regime.label.value,
-                "confidence": regime.confidence,
-                "min_confidence": self.settings.hmm.min_confidence,
-                "confident": regime.confidence >= self.settings.hmm.min_confidence,
-                "probabilities": list(regime.probabilities),
+            "regime_now": regime_now,
+            "hmm": {
+                "states": [
+                    {
+                        "state_id": s.state_id,
+                        "label": s.label.value,
+                        "expected_return": s.expected_return,
+                        "expected_volatility": s.expected_volatility,
+                        "expected_duration": s.expected_duration,
+                        "occupancy": s.occupancy,
+                    }
+                    for s in sorted(self.artifact.model.statistics, key=lambda st: st.state_id)
+                ]
             },
-            "hmm": {"states": [{"label": s.label.value} for s in self.artifact.model.statistics]},
             "live_book": {
                 "available": True,
                 "hypothetical": False,

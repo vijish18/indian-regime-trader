@@ -102,6 +102,13 @@ class RegimeComputer:
         target = engine.evaluate(states)
         return target, states[-1]
 
+    def recent_states(
+        self, artifact: ModelArtifact, as_of: dt.date, sessions: int
+    ) -> list[RegimeState]:
+        """The filtered regime path for the last ``sessions`` sessions through
+        ``as_of`` -- causal, with ``artifact``'s frozen model. For reporting."""
+        return self._filter_history(artifact.model, artifact.scaler, as_of)[-sessions:]
+
     def _filter_history(
         self, model: FittedRegimeModel, scaler_params: ScalerParams, as_of: dt.date
     ) -> list[RegimeState]:

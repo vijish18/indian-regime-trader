@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.notifier import Notifier
@@ -105,6 +106,52 @@ def _plan_text(runtime: PaperRuntime) -> str:
     return "\n".join(lines)
 
 
+REGIME_FIELDS = [
+    "as_of",
+    "label",
+    "state_id",
+    "confidence",
+    "sizes_book",
+    "model_id",
+    "probabilities",
+]
+
+
+def record_regime(published: Path, history: Path) -> bool:
+    """Append the published regime to the day-by-day log, once per session.
+    The log is the as-recorded history: each row is what the model in force
+    that evening said, unlike a path re-filtered later with a newer model."""
+    import csv
+    import json
+
+    regime = json.loads(published.read_text(encoding="utf-8")).get("regime_now", {})
+    if not regime.get("available"):
+        return False
+    seen: set[str] = set()
+    if history.exists():
+        with history.open(encoding="utf-8", newline="") as handle:
+            seen = {row["as_of"] for row in csv.DictReader(handle)}
+    if regime["as_of"] in seen:
+        return False
+    new = not history.exists()
+    with history.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REGIME_FIELDS)
+        if new:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "as_of": regime["as_of"],
+                "label": regime["label"],
+                "state_id": regime.get("state_id", ""),
+                "confidence": f"{regime['confidence']:.4f}",
+                "sizes_book": regime.get("sizes_book", ""),
+                "model_id": regime.get("model_id", ""),
+                "probabilities": json.dumps([round(x, 4) for x in regime["probabilities"]]),
+            }
+        )
+    return True
+
+
 def cmd_evening(
     settings: Settings, notifier: Notifier, as_of: dt.date | None, *, final: bool = True
 ) -> int:
@@ -135,6 +182,7 @@ def cmd_evening(
         runtime.publish(STATE_DIR / "dashboard.json")
     except Exception as exc:  # noqa: BLE001 - report, then fail the scheduler job
         return fail("Bot: ranking failed", f"{type(exc).__name__}: {exc}")
+    record_regime(STATE_DIR / "dashboard.json", STATE_DIR / "regime_history.csv")
     marker.touch()
     nxt = calendar.next_trading_day(as_of)
     if is_rebalance_session(settings.bot.rebalance, calendar, nxt):

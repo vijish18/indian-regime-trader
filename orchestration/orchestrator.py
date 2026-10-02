@@ -96,7 +96,11 @@ from orchestration.heartbeat import Heartbeat
 from orchestration.model_validation import validate_model_metadata
 from orchestration.orchestrator_state import OrchestratorState
 from orchestration.portfolio_snapshot import current_target_portfolio
-from orchestration.regime_computation import RegimeComputationError, RegimeComputer
+from orchestration.regime_computation import (
+    RegimeComputationError,
+    RegimeComputer,
+    full_exposure_target,
+)
 from orchestration.trade_sizing import SizedTrade, size_trades
 from portfolio.portfolio_constructor import (
     PortfolioConstructionError,
@@ -227,20 +231,28 @@ class Orchestrator:
         self.min_order_value_inr = min_order_value_inr
         self._clock: Callable[[], dt.datetime] = clock or (lambda: dt.datetime.now(dt.UTC))
 
+        self.regime_sizes_book = getattr(regime_computer, "exposure", "regime") != "full"
+        """False with ``bot.exposure: full``: the regime is reported but decides
+        nothing -- not the size of the book, and not whether a rebalance runs."""
         self.startup_sequence = StartupSequence(
             state_store=state_store,
             position_tracker=position_tracker,
             order_manager=order_manager,
             broker=broker,
             circuit_breaker=circuit_breaker,
-            model_registry=model_registry,
+            # An approved model is a startup requirement only when it sizes
+            # the book.
+            model_registry=model_registry if self.regime_sizes_book else None,
             strategy_version=strategy_version,
             order_reconciler=self.order_reconciler,
             clock=self._clock,
             settings_loader=settings_loader,
         )
         self.reconciliation_engine = ReconciliationEngine(
-            position_tracker, order_manager, broker, order_reconciler=self.order_reconciler,
+            position_tracker,
+            order_manager,
+            broker,
+            order_reconciler=self.order_reconciler,
             clock=self._clock,
         )
         self.fill_tracker = FillTracker(position_tracker)
@@ -452,7 +464,10 @@ class Orchestrator:
             messages.append(f"{as_of} is not a trading day; nothing to do")
             self.state = OrchestratorState.READY
             return DailyCycleReport(
-                as_of, self.state, is_trading_day=False, permit_trading=False,
+                as_of,
+                self.state,
+                is_trading_day=False,
+                permit_trading=False,
                 messages=tuple(messages),
             )
 
@@ -519,48 +534,68 @@ class Orchestrator:
     ) -> DailyCycleReport:
         self.state = OrchestratorState.RUNNING
 
+        # Steps 7-9 decide exposure only when the regime sizes the book. With
+        # exposure "full" the regime is reported, never a gate: a missing,
+        # stale or failing model is logged and the rebalance goes ahead at
+        # the full-exposure target, exactly as the backtest's buy_and_hold.
+        reporting_only = not self.regime_sizes_book
+
         # Step 7: load the correct model.
+        artifact = None
         try:
             artifact = self.model_registry.load_current_approved()
         except NoApprovedModelError as exc:
             messages.append(f"no approved model: {exc}")
-            self.state = OrchestratorState.HALTED
-            return DailyCycleReport(
-                as_of, self.state, startup_report=startup_report, messages=tuple(messages)
-            )
+            if not reporting_only:
+                self.state = OrchestratorState.HALTED
+                return DailyCycleReport(
+                    as_of, self.state, startup_report=startup_report, messages=tuple(messages)
+                )
 
         # Step 8: validate model metadata.
-        feature_definitions = self.regime_computer.feature_pipeline.definitions
-        problems = validate_model_metadata(
-            artifact,
-            [d.name for d in feature_definitions],
-            feature_set_version(feature_definitions),
-            as_of=as_of,
-            calendar=self.calendar,
-            max_age_sessions=settings.hmm.retrain_interval_sessions,
-        )
-        if problems:
-            messages.extend(problems)
-            self.state = OrchestratorState.HALTED
-            return DailyCycleReport(
-                as_of, self.state, startup_report=startup_report, messages=tuple(messages)
+        if artifact is not None:
+            feature_definitions = self.regime_computer.feature_pipeline.definitions
+            problems = validate_model_metadata(
+                artifact,
+                [d.name for d in feature_definitions],
+                feature_set_version(feature_definitions),
+                as_of=as_of,
+                calendar=self.calendar,
+                max_age_sessions=settings.hmm.retrain_interval_sessions,
             )
+            if problems:
+                if not reporting_only:
+                    messages.extend(problems)
+                    self.state = OrchestratorState.HALTED
+                    return DailyCycleReport(
+                        as_of, self.state, startup_report=startup_report, messages=tuple(messages)
+                    )
+                messages.extend(f"regime model (reported only): {p}" for p in problems)
 
         # Step 9: compute market regime.
+        regime_state: RegimeState | None = None
         try:
+            if artifact is None:
+                raise RegimeComputationError("no approved regime model to compute with")
             regime_target, regime_state = self.regime_computer.compute_today(artifact, as_of)
-            self.last_regime_state = regime_state
-            self.last_allocation_target = regime_target
-        except RegimeComputationError as exc:
-            messages.append(str(exc))
-            self.state = OrchestratorState.DEGRADED
-            return DailyCycleReport(
-                as_of, self.state, startup_report=startup_report, messages=tuple(messages)
-            )
+        except Exception as exc:  # noqa: BLE001 - see reporting_only above
+            if not reporting_only:
+                if isinstance(exc, RegimeComputationError):
+                    messages.append(str(exc))
+                    self.state = OrchestratorState.DEGRADED
+                    return DailyCycleReport(
+                        as_of, self.state, startup_report=startup_report, messages=tuple(messages)
+                    )
+                raise
+            messages.append(f"regime not computed ({exc}); exposure is full, rebalance proceeds")
+            regime_target = full_exposure_target(as_of, self.regime_computer.regime_policy, 0.0)
+        self.last_regime_state = regime_state
+        self.last_allocation_target = regime_target
         messages.append(
             f"regime: {regime_target.regime.value} "
             f"(exposure={regime_target.target_gross_exposure:.2%}, "
-            f"confidence={regime_state.confidence:.2f}, reason={regime_target.reason})"
+            f"confidence={regime_state.confidence if regime_state else 0.0:.2f}, "
+            f"reason={regime_target.reason})"
         )
 
         # Step 10: compute stock rankings.
@@ -591,7 +626,10 @@ class Orchestrator:
             messages.append(f"portfolio construction failed: {exc}")
             self.state = OrchestratorState.DEGRADED
             return DailyCycleReport(
-                as_of, self.state, startup_report=startup_report, candidates=tuple(candidates),
+                as_of,
+                self.state,
+                startup_report=startup_report,
+                candidates=tuple(candidates),
                 messages=tuple(messages),
             )
 
@@ -656,7 +694,11 @@ class Orchestrator:
         weight_trades = required_trades(target_portfolio, current_portfolio)
         quotes = self._fetch_quotes(weight_trades)
         sized_trades, skip_reasons = self._size_trades(
-            weight_trades, decisions_by_instrument, current_positions, equity, quotes,
+            weight_trades,
+            decisions_by_instrument,
+            current_positions,
+            equity,
+            quotes,
             circuit_halted=circuit_halted,
         )
         messages.extend(skip_reasons)

@@ -43,6 +43,7 @@ from core.features.feature_engineering import (
     feature_set_version,
 )
 from core.features.feature_scaler import CausalFeatureScaler
+from core.regime.allocation import AllocationRegime
 from core.regime.hmm_engine import HMMRegimeEngine
 from core.regime.model_registry import ModelArtifact, ModelRegistry, build_model_id
 from data.errors import DataNotAvailableError
@@ -59,7 +60,7 @@ from orchestration.fail_closed import FailClosedReason
 from orchestration.heartbeat import Heartbeat
 from orchestration.orchestrator import DailyCycleReport, Orchestrator
 from orchestration.orchestrator_state import OrchestratorState
-from orchestration.regime_computation import RegimeComputer
+from orchestration.regime_computation import RegimeComputationError, RegimeComputer
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.portfolio_risk_state import PortfolioRiskState
 from risk.risk_manager import RiskManager
@@ -197,6 +198,7 @@ class Harness:
         approve_model: bool = True,
         close_positions_on_shutdown: bool = False,
         with_monitoring: bool = False,
+        exposure: str = "regime",
     ) -> None:
         self.env = env
         self.as_of = as_of
@@ -304,6 +306,7 @@ class Harness:
                 INDEX_SYMBOL,
                 VIX_SYMBOL,
                 feature_warmup_buffer_days=150,
+                exposure=exposure,
             ),
             portfolio_constructor=env.portfolio_constructor,
             risk_manager=RiskManager(env.risk_cfg, self.circuit_breaker),
@@ -401,9 +404,7 @@ def settings() -> Settings:
 
 @pytest.fixture
 def harness(env: Environment, settings: Settings, tmp_path: Path) -> Harness:
-    return Harness(
-        env, tmp_path, as_of=env.dates[-1], settings=settings, train_end=env.dates[200]
-    )
+    return Harness(env, tmp_path, as_of=env.dates[-1], settings=settings, train_end=env.dates[200])
 
 
 # --------------------------------------------------------------------------
@@ -593,6 +594,7 @@ def test_configuration_failure_halts_rather_than_trading_blind(harness: Harness)
     returns a report naming the condition and stays alive to be asked
     about it, rather than crash-looping under a supervisor that restarts
     it (see orchestration/fail_closed.py)."""
+
     def failing_loader() -> Settings:
         raise ConfigError("settings.yaml is unreadable")
 
@@ -890,9 +892,7 @@ def test_a_monitored_run_publishes_a_snapshot_of_the_real_system(monitored: Harn
     assert snapshot.system.status == report.state.value
     assert snapshot.system.broker_connected is True
     assert snapshot.portfolio.equity > 0
-    assert snapshot.portfolio.position_count == len(
-        monitored.position_tracker.current_positions()
-    )
+    assert snapshot.portfolio.position_count == len(monitored.position_tracker.current_positions())
     assert snapshot.execution.orders_submitted == len(report.submitted_order_ids)
     assert snapshot.regime.regime is not None, "the cycle computed a regime; monitoring lost it"
     assert snapshot.regime.label is not None
@@ -921,9 +921,7 @@ def test_a_broker_disconnect_during_the_loop_raises_an_alert(monitored: Harness)
     monitored.broker.health_detail = "connection refused"
 
     monitored.orchestrator._monitor_and_reconcile_once()
-    assert AlertType.BROKER_DISCONNECT in {
-        alert.alert_type for alert in monitored.alerts_received
-    }
+    assert AlertType.BROKER_DISCONNECT in {alert.alert_type for alert in monitored.alerts_received}
 
 
 def test_an_unexpected_broker_position_alerts_through_the_loop(monitored: Harness) -> None:
@@ -961,3 +959,78 @@ def test_an_orchestrator_without_monitoring_still_runs(harness: Harness) -> None
     assert harness.orchestrator.publish_monitoring_snapshot() is None
     report = harness.run()
     assert report.state is OrchestratorState.RUNNING
+
+
+# --------------------------------------------------------------------------
+# exposure "full": the regime is reported, never a gate on the rebalance
+# --------------------------------------------------------------------------
+
+
+def _full(env: Environment, settings: Settings, tmp_path: Path, **kw: object) -> Harness:
+    return Harness(
+        env,
+        tmp_path,
+        as_of=env.dates[-1],
+        settings=settings,
+        train_end=env.dates[200],
+        exposure="full",
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def test_full_exposure_trades_without_an_approved_model(
+    env: Environment, settings: Settings, tmp_path: Path
+) -> None:
+    harness = _full(env, settings, tmp_path, approve_model=False)
+    report = harness.run()
+    assert report.permit_trading is True
+    assert report.state is OrchestratorState.RUNNING
+    assert report.submitted_order_ids
+    assert any("no approved model" in m for m in report.messages)
+    assert harness.orchestrator.last_allocation_target is not None
+    assert harness.orchestrator.last_allocation_target.target_gross_exposure == pytest.approx(
+        env.regime_policy.band_for(AllocationRegime.LOW_RISK).max_gross_exposure
+    )
+
+
+def test_full_exposure_trades_with_a_stale_model_and_still_reports_the_regime(
+    env: Environment, settings: Settings, tmp_path: Path
+) -> None:
+    harness = _full(env, settings, tmp_path)
+    stale = settings.model_copy(
+        update={"hmm": settings.hmm.model_copy(update={"retrain_interval_sessions": 1})}
+    )
+    harness.orchestrator._settings_loader = lambda: stale
+    report = harness.run()
+    assert report.state is OrchestratorState.RUNNING
+    assert report.submitted_order_ids
+    assert any("regime model (reported only)" in m for m in report.messages)
+    assert harness.orchestrator.last_regime_state is not None
+
+
+def test_full_exposure_trades_when_the_regime_cannot_be_computed(
+    env: Environment, settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _full(env, settings, tmp_path)
+
+    def broken(*_: object) -> None:
+        raise RegimeComputationError("index data missing")
+
+    monkeypatch.setattr(harness.orchestrator.regime_computer, "compute_today", broken)
+    report = harness.run()
+    assert report.state is OrchestratorState.RUNNING
+    assert report.submitted_order_ids
+    assert any("regime not computed" in m for m in report.messages)
+    assert harness.orchestrator.last_regime_state is None
+
+
+def test_regime_mode_still_degrades_when_the_regime_cannot_be_computed(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: object) -> None:
+        raise RegimeComputationError("index data missing")
+
+    monkeypatch.setattr(harness.orchestrator.regime_computer, "compute_today", broken)
+    report = harness.run()
+    assert report.state is OrchestratorState.DEGRADED
+    assert report.submitted_order_ids == ()
