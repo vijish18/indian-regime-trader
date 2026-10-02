@@ -132,7 +132,7 @@ def cmd_evening(
         )
     try:
         runtime = _runtime(settings, as_of)
-        runtime.publish(REPO_ROOT / "state" / "dashboard_data.json")
+        runtime.publish(STATE_DIR / "dashboard.json")
     except Exception as exc:  # noqa: BLE001 - report, then fail the scheduler job
         return fail("Bot: ranking failed", f"{type(exc).__name__}: {exc}")
     marker.touch()
@@ -217,7 +217,7 @@ def cmd_trade(settings: Settings, notifier: Notifier) -> int:
         return 1
     hh, mm = (int(x) for x in settings.bot.trade_until_ist.split(":"))
     until = dt.datetime.combine(today, dt.time(hh, mm), tzinfo=IST)
-    output = REPO_ROOT / "state" / "dashboard_data.json"
+    output = STATE_DIR / "dashboard.json"
     errors: dict[str, int] = {}
     while dt.datetime.now(IST) < until:
         try:
