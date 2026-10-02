@@ -8,7 +8,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.paper_market import IST, PaperMarket
 from app.paper_state import restore_paper, save_paper
@@ -29,6 +29,25 @@ from risk.risk_manager import RiskManager
 from risk.stop_loss import StopLossPolicy, evaluate
 from scripts.run_walk_forward import REPO_ROOT, build_validator
 from storage.atomic import atomic_write
+from universe.stock_selector import StockSelector
+
+
+class _SignalDaySelector:
+    """The ranking computed at startup, reused for the signal date.
+
+    Ranking the whole universe takes ~20 s on the bot's VM. The orchestrator
+    ranks again inside the daily cycle, between the quote fetch and the
+    orders; reusing the startup ranking keeps that gap short. Any other date
+    goes to the real selector."""
+
+    def __init__(self, inner: Any, as_of: dt.date, candidates: list[Any]) -> None:
+        self.inner, self.as_of, self.candidates = inner, as_of, candidates
+
+    def select(self, as_of: dt.date) -> list[Any]:
+        return list(self.candidates) if as_of == self.as_of else self.inner.select(as_of)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
 
 
 class PaperRuntime:
@@ -103,7 +122,9 @@ class PaperRuntime:
         self.orchestrator = Orchestrator(
             calendar=self.calendar,
             market_data=self.market,
-            stock_selector=selector,
+            stock_selector=cast(
+                StockSelector, _SignalDaySelector(selector, as_of, self.candidates)
+            ),
             regime_computer=RegimeComputer(
                 self.market,
                 self.settings.hmm,

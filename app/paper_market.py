@@ -39,19 +39,30 @@ def parse_quote(instrument_id: str, row: dict[str, Any], now: dt.datetime) -> Qu
     return quote
 
 
+REFETCH_AFTER_SECONDS = 5.0
+"""A quote fetched longer ago than this is fetched again when asked for. The
+broker refuses quotes older than ``execution.stale_quote_seconds`` (15 s), and
+a daily cycle can take longer than that between the first fetch and its last
+order, so serving the first fetch would get every late order rejected."""
+
+
 class PaperMarket(MarketDataProvider):
     def __init__(self, history: MarketDataProvider, session_path: Path) -> None:
         self.history = history
         self.session_path = session_path
         self.quotes: dict[str, Quote] = {}
         self.rows: dict[str, Any] = {}
+        self.fetched_at: dict[str, dt.datetime] = {}
 
-    def refresh(self, instrument_ids: list[str], now: dt.datetime) -> None:
-        self.quotes = {}
+    def refresh(self, instrument_ids: list[str], now: dt.datetime, *, replace: bool = True) -> None:
+        """Fetch ``instrument_ids``. ``replace`` drops every other quote first
+        (the per-tick refresh); ``replace=False`` updates just these."""
+        if replace:
+            self.quotes, self.rows, self.fetched_at = {}, {}, {}
         payload = live_quotes(instrument_ids, self.session_path)
         if not payload.get("available"):
             raise DataNotAvailableError(str(payload.get("reason", "No quotes")))
-        self.rows = payload["quotes"]
+        self.rows.update(payload["quotes"])
         for instrument_id in instrument_ids:
             try:
                 self.quotes[instrument_id] = parse_quote(
@@ -59,12 +70,14 @@ class PaperMarket(MarketDataProvider):
                 )
             except (KeyError, TypeError, ValueError, IndexError) as exc:
                 raise DataNotAvailableError(f"Incomplete quote for {instrument_id}") from exc
+            self.fetched_at[instrument_id] = now
 
     def get_quote(self, instrument_id: str) -> Quote:
-        try:
-            return self.quotes[instrument_id]
-        except KeyError:
-            raise DataNotAvailableError(f"No fresh quote for {instrument_id}") from None
+        now = dt.datetime.now(dt.UTC)
+        fetched = self.fetched_at.get(instrument_id)
+        if fetched is None or (now - fetched).total_seconds() > REFETCH_AFTER_SECONDS:
+            self.refresh([instrument_id], now, replace=False)
+        return self.quotes[instrument_id]
 
     def get_equity_bars(
         self,
