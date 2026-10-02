@@ -204,7 +204,7 @@ def equity_curves(series_dir: Path | None, sample_every: int = 5) -> dict[str, A
     return out
 
 
-def hmm_model() -> dict[str, Any]:
+def hmm_model(registry_dir: Path | None = None) -> dict[str, Any]:
     """The approved model's internals, for the regime panel.
 
     The transition matrix and the per-state statistics are what the HMM
@@ -216,7 +216,8 @@ def hmm_model() -> dict[str, Any]:
     try:
         from core.regime.model_registry import ModelRegistry
 
-        artifact = ModelRegistry(REPO_ROOT / "model_registry").load_current_approved()
+        registry = ModelRegistry(registry_dir or REPO_ROOT / "model_registry")
+        artifact = registry.load_current_approved()
     except Exception as exc:  # noqa: BLE001 - absent registry is a normal state here
         return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
