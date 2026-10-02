@@ -38,13 +38,14 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = REPO_ROOT / "data_cache" / "reference"
+REFERENCE = Path(os.environ.get("IRT_DATA_ROOT", REPO_ROOT / "data_cache")) / "reference"
 
 
 def _date(raw: str) -> dt.date | None:
