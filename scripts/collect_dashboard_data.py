@@ -447,7 +447,33 @@ def paper_sizing(selection: dict[str, Any], capital: float) -> dict[str, Any]:
 
 
 
-def trade_history(series_dir: Path | None, limit: int = 300) -> dict[str, Any]:
+def share_events(actions_csv: Path) -> list[Any]:
+    """Every split and bonus with a derivable factor, as the engine applies
+    them to holdings -- the restatements a trade log does not record."""
+    from backtest.trade_analysis import ShareEvent
+    from data.corporate_actions import InMemoryCorporateActionProvider
+    from data.models import CorporateActionType
+
+    if not actions_csv.is_file():
+        return []
+    provider = InMemoryCorporateActionProvider.from_file(actions_csv)
+    events = []
+    for instrument_id in provider.instruments_with_actions():
+        for action in provider.actions_for(instrument_id, dt.date(1990, 1, 1), dt.date(2100, 1, 1)):
+            if action.action_type not in (CorporateActionType.SPLIT, CorporateActionType.BONUS):
+                continue
+            try:
+                factor = float(action.price_adjustment_factor())
+            except ValueError:
+                continue
+            if factor > 0 and factor != 1:
+                events.append(ShareEvent(instrument_id, action.ex_date, factor))
+    return events
+
+
+def trade_history(
+    series_dir: Path | None, limit: int = 300, actions_csv: Path | None = None
+) -> dict[str, Any]:
     """Closed round trips per strategy, plus the gap that makes them partial.
 
     A fold boundary flattens the book, so a fold's final holdings are dropped
@@ -468,6 +494,7 @@ def trade_history(series_dir: Path | None, limit: int = 300) -> dict[str, Any]:
 
     from backtest.trade_analysis import by_instrument, round_trips, summarize
 
+    events = share_events(actions_csv or REFERENCE / "corporate_actions.csv")
     out: dict[str, Any] = {}
     for path in sorted(series_dir.glob("*.trades*.csv")):
         name = path.name.split(".trades")[0]
@@ -477,7 +504,7 @@ def trade_history(series_dir: Path | None, limit: int = 300) -> dict[str, Any]:
         for column in ("signal_date", "execution_date"):
             if column in frame.columns:
                 frame[column] = pd.to_datetime(frame[column]).dt.date
-        closed, still_open = round_trips(frame)
+        closed, still_open = round_trips(frame, events)
         if not closed:
             continue
         stats = summarize(closed)

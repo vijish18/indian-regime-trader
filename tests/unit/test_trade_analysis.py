@@ -15,6 +15,7 @@ import pytest
 
 from backtest.trade_analysis import (
     RoundTrip,
+    ShareEvent,
     by_instrument,
     round_trips,
     summarize,
@@ -223,3 +224,64 @@ def test_per_instrument_ranks_by_net_contribution() -> None:
     assert frame.loc[0, "round_trips"] == 2
     assert frame.loc[0, "net_pnl"] == pytest.approx(600.0)
     assert frame.loc[1, "win_rate"] == pytest.approx(0.0)
+
+
+def test_a_bonus_between_buy_and_sell_keeps_the_extra_shares_proceeds() -> None:
+    """100 bought at 100; a 1:1 bonus halves the price and doubles the shares;
+    all 200 sold at 55. The account made 1,000 on price (11,000 - 10,000),
+    which is what the trip must show -- not a 100-share trip at 100 -> 55."""
+    closed, open_positions = round_trips(
+        _log(
+            [
+                ("2024-01-02", "NSE:ACME", "buy", 100, 100.0, 0.0),
+                ("2024-03-01", "NSE:ACME", "sell", 200, 55.0, 0.0),
+            ]
+        ),
+        [ShareEvent("NSE:ACME", dt.date(2024, 2, 1), 0.5)],
+    )
+    assert open_positions == []
+    assert len(closed) == 1
+    assert closed[0].quantity == 200
+    assert closed[0].entry_price == pytest.approx(50.0)
+    assert closed[0].gross_pnl == pytest.approx(1000.0)
+
+
+def test_an_event_on_the_sell_date_applies_before_that_days_fill() -> None:
+    closed, _ = round_trips(
+        _log(
+            [
+                ("2024-01-02", "NSE:ACME", "buy", 10, 1000.0, 0.0),
+                ("2024-02-01", "NSE:ACME", "sell", 50, 210.0, 0.0),
+            ]
+        ),
+        [ShareEvent("NSE:ACME", dt.date(2024, 2, 1), 0.2)],  # 1 -> 5 split
+    )
+    assert sum(t.quantity for t in closed) == 50
+    assert sum(t.gross_pnl for t in closed) == pytest.approx(500.0)
+
+
+def test_a_fractional_entitlement_is_floored_like_the_engine() -> None:
+    """3 shares through a 3:2 bonus (factor 0.4) become floor(7.5) = 7."""
+    _, open_positions = round_trips(
+        _log([("2024-01-02", "NSE:ACME", "buy", 3, 100.0, 0.0)]),
+        [ShareEvent("NSE:ACME", dt.date(2024, 2, 1), 0.4)],
+    )
+    assert sum(p.quantity for p in open_positions) == 7
+
+
+def test_events_for_other_instruments_or_dates_change_nothing() -> None:
+    log = _log(
+        [
+            ("2024-01-02", "NSE:ACME", "buy", 100, 100.0, 0.0),
+            ("2024-02-01", "NSE:ACME", "sell", 100, 110.0, 0.0),
+        ]
+    )
+    plain, _ = round_trips(log)
+    with_events, _ = round_trips(
+        log,
+        [
+            ShareEvent("NSE:OTHER", dt.date(2024, 1, 15), 0.5),
+            ShareEvent("NSE:ACME", dt.date(2024, 3, 1), 0.5),
+        ],
+    )
+    assert with_events == plain

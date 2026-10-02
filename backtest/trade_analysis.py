@@ -20,6 +20,15 @@ fill's, so a trip's ``net_pnl`` is what the account actually kept. Summing
 ``net_pnl`` over all closed trips plus the marked value of what is still
 open reproduces the strategy's realised P&L.
 
+**Bonuses and splits change the lots, not the result.** The engine restates
+a holding at the open of the ex-date -- shares x 1/factor, price x factor,
+cost unchanged (``backtest.engine.BacktestEngine.apply_share_adjustments``)
+-- and the trade log records no row for it. Without the same restatement
+here, a sell of the post-bonus share count finds only the pre-bonus lots,
+and the extra shares' proceeds vanish from every trip. Pass the events as
+``share_events``; they are applied to open lots in the same place and the
+same way, so trips reconcile with the account's cash.
+
 **Open positions are not round trips.** Shares still held at the end have
 no exit price, and marking them at the last close would mix a realised
 result with an unrealised one. They are returned separately.
@@ -28,7 +37,9 @@ result with an unrealised one. They are returned separately.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -96,6 +107,39 @@ class TradeSummary:
     total_costs: float
 
 
+@dataclass(frozen=True, slots=True)
+class ShareEvent:
+    """A split or bonus going ex: open lots become ``1/price_factor`` times as
+    many shares at ``price_factor`` times the price."""
+
+    instrument_id: str
+    ex_date: dt.date
+    price_factor: float
+
+
+def _restate(queue: deque[_Lot], factor: float) -> None:
+    """Apply one split/bonus to an instrument's open lots, like the engine:
+    the total is floored to whole shares (a fraction is paid as cash in lieu),
+    the trim taken from the newest lot; each lot's price and per-share cost
+    scale by ``factor`` so its total cost is unchanged."""
+    if not queue or factor <= 0 or factor == 1:
+        return
+    total = sum(lot.remaining for lot in queue)
+    target = math.floor(total / factor + 1e-9)
+    for lot in queue:
+        lot.remaining /= factor
+        lot.price *= factor
+        lot.cost_per_share *= factor
+    excess = sum(lot.remaining for lot in queue) - target
+    while excess > 1e-9 and queue:
+        newest = queue[-1]
+        cut = min(newest.remaining, excess)
+        newest.remaining -= cut
+        excess -= cut
+        if newest.remaining <= 1e-9:
+            queue.pop()
+
+
 @dataclass(slots=True)
 class _Lot:
     """Shares bought and not yet sold. Mutable because a sell consumes part
@@ -115,10 +159,16 @@ def _as_date(value: object) -> dt.date:
     return pd.Timestamp(str(value)).date()
 
 
-def round_trips(trade_log: pd.DataFrame) -> tuple[list[RoundTrip], list[OpenPosition]]:
-    """Pair sells against earlier buys, per instrument, first in first out."""
+def round_trips(
+    trade_log: pd.DataFrame, share_events: Iterable[ShareEvent] = ()
+) -> tuple[list[RoundTrip], list[OpenPosition]]:
+    """Pair sells against earlier buys, per instrument, first in first out,
+    restating open lots for ``share_events`` at the open of each ex-date."""
     if trade_log.empty:
         return [], []
+    pending: dict[str, list[ShareEvent]] = defaultdict(list)
+    for event in sorted(share_events, key=lambda e: e.ex_date):
+        pending[event.instrument_id].append(event)
 
     required = {"execution_date", "instrument_id", "side", "quantity", "fill_price", "cost"}
     missing = required - set(trade_log.columns)
@@ -137,6 +187,9 @@ def round_trips(trade_log: pd.DataFrame) -> tuple[list[RoundTrip], list[OpenPosi
         price = float(row["fill_price"])
         cost_per_share = float(row["cost"]) / quantity if quantity else 0.0
         when = _as_date(row["execution_date"])
+        events = pending.get(instrument)
+        while events and events[0].ex_date <= when:
+            _restate(lots[instrument], events.pop(0).price_factor)
 
         if str(row["side"]).lower() == BUY:
             lots[instrument].append(_Lot(when, float(quantity), price, cost_per_share))
@@ -155,7 +208,7 @@ def round_trips(trade_log: pd.DataFrame) -> tuple[list[RoundTrip], list[OpenPosi
                     instrument_id=instrument,
                     entry_date=lot.entry_date,
                     exit_date=when,
-                    quantity=int(matched),
+                    quantity=round(matched),
                     entry_price=lot.price,
                     exit_price=price,
                     gross_pnl=gross,
@@ -165,23 +218,27 @@ def round_trips(trade_log: pd.DataFrame) -> tuple[list[RoundTrip], list[OpenPosi
             )
             lot.remaining -= matched
             outstanding -= matched
-            if lot.remaining <= 0:
+            if lot.remaining <= 1e-9:
                 lots[instrument].popleft()
         # A sell with nothing left to match cannot happen in a long-only
         # system; if it ever does, it is dropped rather than recorded as a
         # short, because this module must not invent a position the
         # portfolio never held.
 
+    for instrument, events in pending.items():
+        for event in events:
+            _restate(lots[instrument], event.price_factor)
+
     still_open = [
         OpenPosition(
             instrument_id=instrument,
             entry_date=lot.entry_date,
-            quantity=int(lot.remaining),
+            quantity=round(lot.remaining),
             entry_price=lot.price,
         )
         for instrument, queue in lots.items()
         for lot in queue
-        if lot.remaining > 0
+        if lot.remaining > 1e-9
     ]
     return closed, still_open
 
