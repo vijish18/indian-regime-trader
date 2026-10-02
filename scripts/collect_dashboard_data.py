@@ -244,6 +244,7 @@ def hmm_model(registry_dir: Path | None = None) -> dict[str, Any]:
                 "expected_volatility": stat.expected_volatility,
                 "expected_return": stat.expected_return,
                 "persistence": stat.self_transition_probability,
+                "occupancy": stat.occupancy,
             }
         )
     # Volatility order, which is the order the labels were assigned in:
@@ -290,6 +291,16 @@ def hmm_model(registry_dir: Path | None = None) -> dict[str, Any]:
         "aic": float(training.aic),
         "converged": bool(training.converged),
         "iterations": int(training.iterations),
+        # The window the per-state statistics were measured over, after the
+        # feature warm-up rows are dropped -- shorter than training_window_days.
+        # With occupancy it gives each state's session count, which is what
+        # makes a state's average return a few dozen noisy days rather than a
+        # forecast.
+        "training": {
+            "start": training.training_start.isoformat(),
+            "end": training.training_end.isoformat(),
+            "sessions": int(training.n_observations),
+        },
     }
 
 
