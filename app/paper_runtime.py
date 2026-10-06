@@ -282,10 +282,29 @@ class PaperRuntime:
                 orch.order_manager.submit(created.order.client_order_id, orch.broker)
                 orch.fill_tracker.poll(orch.broker)
 
+    def marks(self) -> dict[str, float]:
+        """Prices to value the held book at: the latest live quote, else the
+        signal session's close. The orchestrator marks its own book at the
+        broker's average cost (a BrokerPosition carries no price), so without
+        this the report shows every position at its entry and P&L at zero."""
+        held = {p.instrument_id for p in self.orchestrator.position_tracker.current_positions()}
+        out = {i: float(q.last_price) for i, q in self.market.quotes.items() if i in held}
+        for instrument_id in held - out.keys():
+            try:
+                bars = self.market.get_equity_bars(instrument_id, self.as_of, self.as_of)
+            except DataNotAvailableError:
+                continue  # keeps its last mark
+            if bars:
+                out[instrument_id] = float(bars[-1].close)
+        return out
+
     def publish(self, output: Path) -> None:
         orch = self.orchestrator
         # No quote is invented for an unobserved position. A disconnected
         # feed retains the last mark with its original timestamp.
+        marks = self.marks()
+        if marks:
+            orch.position_tracker.mark_to_market(marks, dt.datetime.now(dt.UTC))
         positions = orch.position_tracker.current_positions()
         cash = self.broker.cash
         market_value = sum(p.quantity * p.current_price for p in positions)
