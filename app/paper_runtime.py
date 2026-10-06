@@ -17,7 +17,7 @@ from config.loader import load_settings
 from core.features.feature_engineering import FeaturePipeline, feature_set_version
 from core.regime.model_registry import ModelArtifact, ModelRegistry, NoApprovedModelError
 from data.errors import DataNotAvailableError
-from execution.order_manager import OrderManager
+from execution.order_manager import OPEN_STATES, OrderManager
 from execution.position_tracker import PositionTracker
 from execution.system_state import SystemStateStore
 from monitoring.health import HealthChecker
@@ -298,6 +298,80 @@ class PaperRuntime:
                 out[instrument_id] = float(bars[-1].close)
         return out
 
+    def live_book(
+        self, positions: list[Any], cash: float, equity: float, market_value: float
+    ) -> dict[str, Any]:
+        """The held book as the dashboard's live-book panel reads it."""
+        rank = {c.instrument_id: i + 1 for i, c in enumerate(self.candidates)}
+        stops_on = bool(self.settings.risk.stop_loss.enabled)
+        cost_basis = sum(p.quantity * p.avg_price for p in positions)
+        pnl = sum(p.unrealized_pnl for p in positions)
+        rows = []
+        for p in sorted(positions, key=lambda q: rank.get(q.instrument_id, 10**6)):
+            cost = p.quantity * p.avg_price
+            stop: dict[str, Any] = {"available": False}
+            if stops_on:
+                level = p.avg_price * (1 - self.policy.hard_stop_pct)
+                stop = {
+                    "available": True,
+                    "hard_level": level,
+                    "hard_distance_pct": p.current_price / level - 1,
+                }
+            rows.append(
+                {
+                    "rank": rank.get(p.instrument_id),
+                    "symbol": p.instrument_id.removeprefix("NSE:"),
+                    "shares": p.quantity,
+                    "entry": p.avg_price,
+                    "last": p.current_price,
+                    "value": p.quantity * p.current_price,
+                    "pnl": p.unrealized_pnl,
+                    "pnl_pct": p.unrealized_pnl / cost if cost else 0.0,
+                    "day_pct": self.market.rows.get(p.instrument_id, {}).get("day_pct"),
+                    "stop": stop,
+                }
+            )
+        today = dt.datetime.now(IST).date()
+        orders = [
+            {
+                "symbol": o.instrument_id.removeprefix("NSE:"),
+                "side": o.side,
+                "quantity": o.quantity,
+                "filled": o.filled_quantity,
+                "limit": o.limit_price,
+                "avg_price": o.avg_fill_price,
+                "state": o.state.value,
+                "placed": o.created_at.astimezone(IST).strftime("%d %b %H:%M"),
+                "reason": o.reject_reason,
+            }
+            for o in sorted(
+                self.orchestrator.order_manager.all_orders(), key=lambda o: o.created_at
+            )
+            if o.created_at.astimezone(IST).date() == today or o.state in OPEN_STATES
+        ]
+        return {
+            "available": True,
+            "hypothetical": False,
+            "fetched_at": self.last_quote_at,
+            "budget": self.budget,
+            "cash": cash,
+            "equity": equity,
+            "equity_pct": equity / self.budget - 1,
+            "market_value": market_value,
+            "cost_basis": cost_basis,
+            "pnl": pnl,
+            "pnl_pct": pnl / cost_basis if cost_basis else 0.0,
+            "winners": sum(1 for r in rows if r["pnl"] > 0),
+            "losers": sum(1 for r in rows if r["pnl"] <= 0),
+            "stops": {"available": stops_on},
+            "positions": rows,
+            "orders": orders,
+            "unquoted": [
+                {"symbol": i.removeprefix("NSE:"), "reason": why}
+                for i, why in sorted(self.market.unavailable.items())
+            ],
+        }
+
     def publish(self, output: Path) -> None:
         orch = self.orchestrator
         # No quote is invented for an unobserved position. A disconnected
@@ -376,35 +450,7 @@ class PaperRuntime:
                     for s in sorted(self.artifact.model.statistics, key=lambda st: st.state_id)
                 ]
             },
-            "live_book": {
-                "available": True,
-                "hypothetical": False,
-                "fetched_at": self.last_quote_at,
-                "budget": self.budget,
-                "cash": cash,
-                "equity": equity,
-                "equity_pct": equity / self.budget - 1,
-                "market_value": market_value,
-                "pnl": sum(p.unrealized_pnl for p in positions),
-                "positions": [
-                    {
-                        "symbol": p.instrument_id.removeprefix("NSE:"),
-                        "shares": p.quantity,
-                        "entry": p.avg_price,
-                        "last": p.current_price,
-                        "value": p.quantity * p.current_price,
-                        "pnl": p.unrealized_pnl,
-                        "day_pct": self.market.rows.get(p.instrument_id, {}).get("day_pct"),
-                        "stop": {
-                            "hard_level": p.avg_price * (1 - self.policy.hard_stop_pct),
-                            "hard_distance_pct": p.current_price
-                            / (p.avg_price * (1 - self.policy.hard_stop_pct))
-                            - 1,
-                        },
-                    }
-                    for p in positions
-                ],
-            },
+            "live_book": self.live_book(positions, cash, equity, market_value),
             "ticks": {"updated_at": self.last_quote_at, "points": self.ticks},
             "realized": {"available": False, "reason": "See durable fill ledger for costs"},
         }
