@@ -744,7 +744,17 @@ class Orchestrator:
             return {quote.instrument_id: quote for quote in self.broker.get_quotes(instrument_ids)}
         except Exception as exc:  # noqa: BLE001 - sizing degrades to "no price", not a crash
             logger.warning("failed to fetch quotes for sizing: %s", exc)
-            return {}
+        # One unquotable name (locked at a price band, suspended) fails the
+        # batch; asking per name keeps the rest tradeable and leaves only that
+        # one unpriced, which sizing skips.
+        quotes: dict[str, BrokerQuote] = {}
+        for instrument_id in instrument_ids:
+            try:
+                for quote in self.broker.get_quotes([instrument_id]):
+                    quotes[quote.instrument_id] = quote
+            except Exception as exc:  # noqa: BLE001 - see above
+                logger.warning("no quote for %s: %s", instrument_id, exc)
+        return quotes
 
     def _size_trades(
         self,

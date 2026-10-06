@@ -16,6 +16,7 @@ from broker.adapters.paper_broker import PaperBroker
 from config.loader import load_settings
 from core.features.feature_engineering import FeaturePipeline, feature_set_version
 from core.regime.model_registry import ModelArtifact, ModelRegistry, NoApprovedModelError
+from data.errors import DataNotAvailableError
 from execution.order_manager import OrderManager
 from execution.position_tracker import PositionTracker
 from execution.system_state import SystemStateStore
@@ -194,7 +195,8 @@ class PaperRuntime:
             | {p.instrument_id for p in self.orchestrator.position_tracker.current_positions()}
         )
         self.market.refresh(ids, dt.datetime.now(dt.UTC))
-        self.last_quote_at = min(q.as_of for q in self.market.quotes.values()).isoformat()
+        oldest = min((q.as_of for q in self.market.quotes.values()), default=None)
+        self.last_quote_at = oldest.isoformat() if oldest else None
         self.ticks.append(
             {
                 "hhmm": now.astimezone(IST).strftime("%H:%M:%S"),
@@ -211,6 +213,10 @@ class PaperRuntime:
         else:
             report = self.orchestrator.run_daily_cycle(self.as_of)
             self.detail = " | ".join(report.messages[-4:])
+            if self.market.unavailable:
+                self.detail += " | no live quote, not traded: " + "; ".join(
+                    self.market.unavailable.values()
+                )
             if report.permit_trading:
                 self.metadata["completed_days"].append(day_key)
             self.status = report.state.value
@@ -225,7 +231,10 @@ class PaperRuntime:
         if orch.circuit_breaker.current_status().state is CircuitState.HALTED:
             return
         for position in orch.position_tracker.current_positions():
-            quote = self.market.get_quote(position.instrument_id)
+            try:
+                quote = self.market.get_quote(position.instrument_id)
+            except DataNotAvailableError:
+                continue  # no quote this tick (e.g. locked at a band); checked next tick
             price = float(quote.last_price)
             key = f"{now.astimezone(IST).date()}:{position.instrument_id}"
             extremes = self.metadata["extremes"].setdefault(key, {"high": price, "low": price})

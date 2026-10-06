@@ -53,30 +53,49 @@ class PaperMarket(MarketDataProvider):
         self.quotes: dict[str, Quote] = {}
         self.rows: dict[str, Any] = {}
         self.fetched_at: dict[str, dt.datetime] = {}
+        self.unavailable: dict[str, str] = {}
+        """Instruments the last fetch returned no usable quote for, and why."""
 
     def refresh(self, instrument_ids: list[str], now: dt.datetime, *, replace: bool = True) -> None:
         """Fetch ``instrument_ids``. ``replace`` drops every other quote first
-        (the per-tick refresh); ``replace=False`` updates just these."""
+        (the per-tick refresh); ``replace=False`` updates just these.
+
+        One instrument without a usable quote -- locked at a price band with
+        one side of the book empty, suspended, a stale tick -- is recorded in
+        ``unavailable`` and left unquoted; it does not stop the others. Only a
+        failed fetch as a whole raises. ``get_quote`` raises for that one name.
+        """
         if replace:
-            self.quotes, self.rows, self.fetched_at = {}, {}, {}
+            self.quotes, self.rows, self.fetched_at, self.unavailable = {}, {}, {}, {}
         payload = live_quotes(instrument_ids, self.session_path)
         if not payload.get("available"):
             raise DataNotAvailableError(str(payload.get("reason", "No quotes")))
         self.rows.update(payload["quotes"])
         for instrument_id in instrument_ids:
+            self.fetched_at[instrument_id] = now
             try:
                 self.quotes[instrument_id] = parse_quote(
                     instrument_id, self.rows[instrument_id], now
                 )
-            except (KeyError, TypeError, ValueError, IndexError) as exc:
-                raise DataNotAvailableError(f"Incomplete quote for {instrument_id}") from exc
-            self.fetched_at[instrument_id] = now
+            except DataNotAvailableError as exc:
+                reason = str(exc)
+            except (KeyError, TypeError, ValueError, IndexError):
+                reason = f"Incomplete quote for {instrument_id}"
+            else:
+                self.unavailable.pop(instrument_id, None)
+                continue
+            self.quotes.pop(instrument_id, None)
+            self.unavailable[instrument_id] = reason
 
     def get_quote(self, instrument_id: str) -> Quote:
         now = dt.datetime.now(dt.UTC)
         fetched = self.fetched_at.get(instrument_id)
         if fetched is None or (now - fetched).total_seconds() > REFETCH_AFTER_SECONDS:
             self.refresh([instrument_id], now, replace=False)
+        if instrument_id not in self.quotes:
+            raise DataNotAvailableError(
+                self.unavailable.get(instrument_id, f"{instrument_id}: no quote")
+            )
         return self.quotes[instrument_id]
 
     def get_equity_bars(

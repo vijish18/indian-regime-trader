@@ -76,3 +76,30 @@ def test_the_signal_day_ranking_is_reused_and_other_days_pass_through() -> None:
     assert inner.calls == []
     assert selector.select(day - dt.timedelta(days=1)) == ["other-day"]
     assert selector.universe_provider == "universe"
+
+
+def test_one_unquotable_name_does_not_stop_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_live_quotes(ids: list[str], session_path: Path) -> dict[str, Any]:
+        now = dt.datetime.now(dt.UTC)
+        rows = {i: _row(100.0, now) for i in ids}
+        if "NSE:LOCKED" in rows:  # upper circuit: buyers only, no sellers
+            rows["NSE:LOCKED"]["depth"]["sell"] = [{"price": 0, "quantity": 0}]
+        return {"available": True, "quotes": rows}
+
+    monkeypatch.setattr(paper_market, "live_quotes", fake_live_quotes)
+    market = PaperMarket(history=None, session_path=Path("x"))  # type: ignore[arg-type]
+    market.refresh(["NSE:A", "NSE:LOCKED"], dt.datetime.now(dt.UTC))
+    assert set(market.quotes) == {"NSE:A"}
+    assert "crossed" in market.unavailable["NSE:LOCKED"]
+    with pytest.raises(paper_market.DataNotAvailableError):
+        market.get_quote("NSE:LOCKED")
+    assert float(market.get_quote("NSE:A").last_price) == 100.0
+
+
+def test_a_failed_fetch_as_a_whole_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        paper_market, "live_quotes", lambda ids, path: {"available": False, "reason": "down"}
+    )
+    market = PaperMarket(history=None, session_path=Path("x"))  # type: ignore[arg-type]
+    with pytest.raises(paper_market.DataNotAvailableError, match="down"):
+        market.refresh(["NSE:A"], dt.datetime.now(dt.UTC))

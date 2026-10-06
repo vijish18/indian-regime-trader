@@ -96,9 +96,7 @@ states (``SUBMITTED``, ``CANCEL_REQUESTED``) this adapter never emits
 about its own book -- by the time it can report on an order at all, that
 order has already been received and processed."""
 
-_RESTING_STATES: frozenset[OrderState] = frozenset(
-    {OrderState.OPEN, OrderState.PARTIALLY_FILLED}
-)
+_RESTING_STATES: frozenset[OrderState] = frozenset({OrderState.OPEN, OrderState.PARTIALLY_FILLED})
 
 
 class PaperBrokerError(RuntimeError):
@@ -186,7 +184,13 @@ class PaperBroker(Broker):
         for client_order_id, order in list(self._orders.items()):
             if OrderState(order.status) not in _RESTING_STATES:
                 continue
-            quote = self._get_quote_or_raise(order.instrument_id)
+            try:
+                quote = self._get_quote_or_raise(order.instrument_id)
+            except PaperBrokerError:
+                # No quote for this name this tick (e.g. locked at a price
+                # band): the order keeps resting, as it would on the exchange,
+                # and the other resting orders are still matched.
+                continue
             updated.append(self._attempt_match(client_order_id, quote, self._clock()))
         return updated
 
