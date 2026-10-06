@@ -4,7 +4,12 @@ import datetime as dt
 
 import pytest
 
-from orchestration.rebalance_schedule import is_rebalance_session, next_rebalance_session
+from orchestration.rebalance_schedule import (
+    is_rebalance_session,
+    next_rebalance_due,
+    next_rebalance_session,
+    rebalance_due,
+)
 
 
 class _Calendar:
@@ -72,3 +77,41 @@ def test_next_rebalance_session_skips_to_the_following_week() -> None:
 def test_unknown_mode_is_refused() -> None:
     with pytest.raises(ValueError):
         is_rebalance_session("monthly", _Calendar(set()), MON)
+
+
+DAY = dt.timedelta(days=1)
+
+
+def test_a_missed_monday_is_caught_up_the_next_session() -> None:
+    cal = _Calendar(set())
+    assert rebalance_due("weekly", cal, MON, [])
+    assert rebalance_due("weekly", cal, MON + DAY, [])
+    assert not rebalance_due("weekly", cal, MON + DAY, [MON])
+    assert not rebalance_due("weekly", cal, MON + 2 * DAY, [MON + DAY])
+
+
+def test_last_weeks_rebalance_does_not_cover_this_week() -> None:
+    cal = _Calendar(set())
+    assert rebalance_due("weekly", cal, MON, [MON - 7 * DAY])
+    assert rebalance_due("weekly", cal, MON + 3 * DAY, [MON - 7 * DAY])
+
+
+def test_a_rebalance_later_in_the_week_does_not_count_for_an_earlier_day() -> None:
+    cal = _Calendar(set())
+    assert rebalance_due("weekly", cal, MON, [MON + 2 * DAY])
+
+
+def test_nothing_is_due_on_a_holiday_and_daily_is_always_due() -> None:
+    cal = _Calendar({MON})
+    assert not rebalance_due("weekly", cal, MON, [])
+    assert not rebalance_due("daily", cal, MON, [])
+    assert rebalance_due("daily", cal, MON + DAY, [MON + DAY])
+    with pytest.raises(ValueError):
+        rebalance_due("monthly", cal, MON + DAY, [])
+
+
+def test_next_due_follows_a_missed_session() -> None:
+    cal = _Calendar(set())
+    assert next_rebalance_due("weekly", cal, MON, []) == MON + DAY
+    assert next_rebalance_due("weekly", cal, MON, [MON]) == MON + 7 * DAY
+    assert next_rebalance_due("weekly", cal, MON + 4 * DAY, []) == MON + 7 * DAY

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import time
 from pathlib import Path
 from typing import Any, cast
 
 from app.paper_market import IST, PaperMarket
-from app.paper_state import restore_paper, save_paper
+from app.paper_state import paper_identity, restore_paper, save_paper
 from backtest.costs import TradeSide
 from broker.adapters.paper_broker import PaperBroker
 from config.loader import load_settings
@@ -23,7 +22,7 @@ from execution.system_state import SystemStateStore
 from monitoring.health import HealthChecker
 from orchestration.model_validation import validate_model_metadata
 from orchestration.orchestrator import Orchestrator
-from orchestration.rebalance_schedule import is_rebalance_session
+from orchestration.rebalance_schedule import rebalance_due
 from orchestration.regime_computation import RegimeComputer, full_exposure_target
 from risk.circuit_breaker import CircuitBreaker, CircuitState
 from risk.risk_manager import RiskManager
@@ -170,9 +169,7 @@ class PaperRuntime:
             ),
             settings_loader=lambda: self.settings,
         )
-        self.identity = hashlib.sha256(
-            (self.settings.model_dump_json() + str(budget)).encode()
-        ).hexdigest()
+        self.identity = paper_identity(self.settings, budget)
         self.metadata = restore_paper(state_dir / "ledger.json", self.identity, self.orchestrator)
         self.policy = StopLossPolicy.from_mapping(self.settings.risk.stop_loss.model_dump())
         self.status = "prepared"
@@ -206,10 +203,12 @@ class PaperRuntime:
         )
         self.ticks = self.ticks[-840:]
         day_key = today.isoformat()
-        rebalance_today = is_rebalance_session(self.settings.bot.rebalance, self.calendar, today)
-        if not rebalance_today:
+        completed = [dt.date.fromisoformat(d) for d in self.metadata["completed_days"]]
+        if day_key in self.metadata["completed_days"]:
+            pass  # rebalanced earlier today; keep working its resting orders
+        elif not rebalance_due(self.settings.bot.rebalance, self.calendar, today, completed):
             self.status, self.detail = "holding", "Not a rebalance session; positions held"
-        elif day_key not in self.metadata["completed_days"]:
+        else:
             report = self.orchestrator.run_daily_cycle(self.as_of)
             self.detail = " | ".join(report.messages[-4:])
             if report.permit_trading:

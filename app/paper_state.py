@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,21 @@ def components(orchestrator: Any) -> dict[str, tuple[Any, tuple[str, ...]]]:
         "fills": (orchestrator.fill_tracker, ("_applied_fill_ids", "_cumulative_cash_flow")),
         "equity": (orchestrator.equity_history, ("values",)),
     }
+
+
+def paper_identity(settings: Any, budget: float) -> str:
+    """The ledger's identity: a settings or budget change starts a new ledger
+    rather than continuing one built under different rules."""
+    return hashlib.sha256((settings.model_dump_json() + str(budget)).encode()).hexdigest()
+
+
+def completed_days(path: Path, identity: str) -> list[dt.date]:
+    """Sessions whose rebalance cycle completed, read without building a
+    runtime -- the scheduler asks this before deciding to prompt a login."""
+    state = load(path, identity)
+    if state is None:
+        return []
+    return [dt.date.fromisoformat(day) for day in state["metadata"]["completed_days"]]
 
 
 def save_paper(path: Path, identity: str, orchestrator: Any, metadata: dict[str, Any]) -> None:

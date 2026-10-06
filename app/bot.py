@@ -15,8 +15,9 @@ each step runs and *what the owner is told*.
 no automated login, and this bot does not script around it. So on the
 evening before a rebalance, and again at ~08:30 on the day, it sends the
 login link; ``morning`` then waits for the redirect and caches the session.
-No login by the time ``trade`` starts means no trading that week -- and a
-message saying so -- never a guess.
+No login by the time ``trade`` starts means no trading that day -- and a
+message saying so -- never a guess. The week's rebalance then moves to the
+next session (``rebalance_due``), which asks for a login again.
 
 Every command exits 0 when it did its job (including "nothing to do
 today"), non-zero when it could not, so a scheduler can alert on failure.
@@ -33,11 +34,12 @@ from typing import TYPE_CHECKING
 
 from app.notifier import Notifier
 from app.paper_market import IST
+from app.paper_state import completed_days, paper_identity
 from broker.zerodha.kite_session import KiteSessionError, load_session
 from config.loader import load_environment, load_settings
 from config.models import Settings
 from data.calendar import NSETradingCalendar
-from orchestration.rebalance_schedule import is_rebalance_session, next_rebalance_session
+from orchestration.rebalance_schedule import next_rebalance_due, rebalance_due
 from scripts.run_walk_forward import REPO_ROOT
 
 if TYPE_CHECKING:
@@ -84,6 +86,19 @@ def _index_last_date(symbol: str) -> dt.date | None:
         return dt.date.fromisoformat(last[1])
     except (IndexError, ValueError):
         return None
+
+
+def _completed(settings: Settings) -> list[dt.date]:
+    """Sessions the paper ledger has rebalanced on."""
+    return completed_days(STATE_DIR / "ledger.json", paper_identity(settings, settings.bot.capital))
+
+
+def _due(settings: Settings, calendar: NSETradingCalendar, day: dt.date) -> bool:
+    return rebalance_due(settings.bot.rebalance, calendar, day, _completed(settings))
+
+
+def _next_due(settings: Settings, calendar: NSETradingCalendar, after: dt.date) -> dt.date:
+    return next_rebalance_due(settings.bot.rebalance, calendar, after, _completed(settings))
 
 
 def _runtime(settings: Settings, as_of: dt.date) -> PaperRuntime:
@@ -185,7 +200,7 @@ def cmd_evening(
     record_regime(STATE_DIR / "dashboard.json", STATE_DIR / "regime_history.csv")
     marker.touch()
     nxt = calendar.next_trading_day(as_of)
-    if is_rebalance_session(settings.bot.rebalance, calendar, nxt):
+    if _due(settings, calendar, nxt):
         notifier.send(
             f"Rebalance next session ({nxt:%a %d %b})",
             f"{_plan_text(runtime)}\n\nLog in to Kite before 09:10 IST:\n{_login_url()}",
@@ -196,7 +211,7 @@ def cmd_evening(
 def cmd_morning(settings: Settings, notifier: Notifier) -> int:
     calendar = _calendar()
     now = dt.datetime.now(IST)
-    if not is_rebalance_session(settings.bot.rebalance, calendar, now.date()):
+    if not _due(settings, calendar, now.date()):
         return 0
     ok, detail = _session_ok(now)
     if ok:
@@ -244,14 +259,14 @@ def cmd_trade(settings: Settings, notifier: Notifier) -> int:
     calendar = _calendar()
     now = dt.datetime.now(IST)
     today = now.date()
-    if not is_rebalance_session(settings.bot.rebalance, calendar, today):
+    if not _due(settings, calendar, today):
         return 0
     ok, detail = _session_ok(now)
     if not ok:
         notifier.send(
-            "No rebalance this week",
+            "No rebalance today",
             f"No valid Kite login ({detail}). Positions are held unchanged; "
-            f"next rebalance {next_rebalance_session(settings.bot.rebalance, calendar, today)}.",
+            f"next attempt {_next_due(settings, calendar, today)}.",
             severity="error",
         )
         return 1
@@ -299,9 +314,10 @@ def cmd_status(settings: Settings) -> int:
         f"mode={settings.execution.mode} exposure={settings.bot.exposure} "
         f"rebalance={settings.bot.rebalance} capital={settings.bot.capital:,.0f}"
     )
-    mode = settings.bot.rebalance
-    print(f"today {now.date()} rebalance={is_rebalance_session(mode, calendar, now.date())}")
-    print(f"next rebalance {next_rebalance_session(mode, calendar, now.date())}")
+    done = _completed(settings)
+    print(f"rebalanced on: {', '.join(map(str, done)) or 'never'}")
+    print(f"today {now.date()} rebalance due={_due(settings, calendar, now.date())}")
+    print(f"next due {_next_due(settings, calendar, now.date())}")
     print(f"kite session: {'OK ' if ok else 'MISSING '}{detail}")
     print(f"NIFTY50 data through {_index_last_date('NIFTY50')}")
     return 0
