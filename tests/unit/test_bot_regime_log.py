@@ -43,3 +43,16 @@ def test_an_unavailable_regime_is_not_logged(tmp_path: Path) -> None:
     _publish(pub, "2026-10-01", available=False)
     assert record_regime(pub, log) is False
     assert not log.exists()
+
+
+def test_trade_runs_when_due_or_to_finish_todays_rebalance() -> None:
+    import datetime as dt
+
+    from app.bot import trades_today
+    from data.calendar import NSETradingCalendar
+
+    calendar = NSETradingCalendar(holidays={}, covered_years=frozenset({2026}))
+    tue, wed = dt.date(2026, 10, 6), dt.date(2026, 10, 7)
+    assert trades_today("weekly", calendar, tue, [])
+    assert trades_today("weekly", calendar, tue, [tue])
+    assert not trades_today("weekly", calendar, wed, [tue])

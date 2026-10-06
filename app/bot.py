@@ -101,6 +101,14 @@ def _next_due(settings: Settings, calendar: NSETradingCalendar, after: dt.date) 
     return next_rebalance_due(settings.bot.rebalance, calendar, after, _completed(settings))
 
 
+def trades_today(
+    mode: str, calendar: NSETradingCalendar, today: dt.date, completed: list[dt.date]
+) -> bool:
+    """Whether ``trade`` runs: a rebalance is due, or one already ran today
+    and its resting orders still need working (a restarted run)."""
+    return today in completed or rebalance_due(mode, calendar, today, completed)
+
+
 def _runtime(settings: Settings, as_of: dt.date) -> PaperRuntime:
     from app.paper_runtime import PaperRuntime
 
@@ -261,7 +269,7 @@ def cmd_trade(settings: Settings, notifier: Notifier, until_ist: str | None = No
     calendar = _calendar()
     now = dt.datetime.now(IST)
     today = now.date()
-    if not _due(settings, calendar, today):
+    if not trades_today(settings.bot.rebalance, calendar, today, _completed(settings)):
         return 0
     ok, detail = _session_ok(now)
     if not ok:
