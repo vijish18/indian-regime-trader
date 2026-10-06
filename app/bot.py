@@ -2,7 +2,7 @@
 
     python -m app.bot evening [--as-of YYYY-MM-DD]   # after the nightly data update
     python -m app.bot morning                        # rebalance mornings, ~08:30 IST
-    python -m app.bot trade                          # rebalance mornings, from 09:14 IST
+    python -m app.bot trade [--until HH:MM]          # rebalance mornings, from 09:14 IST
     python -m app.bot status
 
 The strategy is whatever ``config/settings.yaml`` says -- ``bot.exposure``,
@@ -255,7 +255,9 @@ def _orders_text(runtime: PaperRuntime, day: dt.date) -> str:
     return "\n".join(out)
 
 
-def cmd_trade(settings: Settings, notifier: Notifier) -> int:
+def cmd_trade(settings: Settings, notifier: Notifier, until_ist: str | None = None) -> int:
+    """``until_ist`` overrides ``bot.trade_until_ist`` for one hand-started run
+    (a catch-up started mid-session); the ledger identity is unaffected."""
     calendar = _calendar()
     now = dt.datetime.now(IST)
     today = now.date()
@@ -278,7 +280,7 @@ def cmd_trade(settings: Settings, notifier: Notifier) -> int:
             "Bot: could not start trading", f"{type(exc).__name__}: {exc}", severity="error"
         )
         return 1
-    hh, mm = (int(x) for x in settings.bot.trade_until_ist.split(":"))
+    hh, mm = (int(x) for x in (until_ist or settings.bot.trade_until_ist).split(":"))
     until = dt.datetime.combine(today, dt.time(hh, mm), tzinfo=IST)
     output = STATE_DIR / "dashboard.json"
     errors: dict[str, int] = {}
@@ -332,7 +334,10 @@ def main(argv: list[str]) -> int:
         "--not-final", action="store_true", help="a retry follows: print failures, do not send"
     )
     sub.add_parser("morning")
-    sub.add_parser("trade")
+    trade = sub.add_parser("trade")
+    trade.add_argument(
+        "--until", default=None, help="HH:MM IST; overrides bot.trade_until_ist for this run"
+    )
     sub.add_parser("status")
     args = parser.parse_args(argv[1:])
 
@@ -348,7 +353,7 @@ def main(argv: list[str]) -> int:
         return cmd_evening(settings, notifier, args.as_of, final=not args.not_final)
     if args.command == "morning":
         return cmd_morning(settings, notifier)
-    return cmd_trade(settings, notifier)
+    return cmd_trade(settings, notifier, args.until)
 
 
 if __name__ == "__main__":
